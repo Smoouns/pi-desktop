@@ -19,8 +19,8 @@ interface RenderAssistantWorkflowViewParams {
 	summarizeToolCall: (toolCall: WorkflowToolCall) => string;
 	renderToolPreview: (preview: string) => TemplateResult;
 	formatDuration: (ms: number) => string;
-	isWorkflowThinkingExpanded: (thinkingId: string) => boolean;
-	toggleWorkflowThinkingExpanded: (thinkingId: string) => void;
+	isWorkflowThinkingExpanded: (thinkingId: string, autoExpand: boolean) => boolean;
+	toggleWorkflowThinkingExpanded: (thinkingId: string, autoExpand: boolean) => void;
 	isToolGroupExpanded: (workflowId: string, groupId: string) => boolean;
 	toggleToolGroupExpanded: (workflowId: string, groupId: string) => void;
 	toggleToolWorkflowExpanded: (workflowId: string, autoExpanded: boolean, currentlyExpanded: boolean) => void;
@@ -164,11 +164,11 @@ export function renderAssistantWorkflowView({
 							<div class="tool-workflow-list">
 								${detailEntries.map((entry) => {
 									if (entry.kind === "thinking") {
-										const thinkingExpanded = isWorkflowThinkingExpanded(entry.id);
+										const thinkingExpanded = isWorkflowThinkingExpanded(entry.id, workflow.isStreaming);
 										const thinkingAnimating = running === 0 && entry.animating;
 										return html`
 											<div class="tool-workflow-thinking">
-												<button class="tool-workflow-thinking-toggle ${thinkingAnimating ? "animating" : "done"}" @click=${() => toggleWorkflowThinkingExpanded(entry.id)}>
+												<button class="tool-workflow-thinking-toggle ${thinkingAnimating ? "animating" : "done"}" @click=${() => toggleWorkflowThinkingExpanded(entry.id, workflow.isStreaming)}>
 													${thinkingAnimating ? html`<span class="tool-workflow-inline-pi" aria-hidden="true">${piGlyphIcon()}</span>` : nothing}
 													<span class="tool-workflow-thinking-text">Thinking…</span>
 												</button>

@@ -19,14 +19,16 @@
 		"build:frontend": "npx vite build",
 		"build": "tauri build",
 		"preview": "vite preview",
-		"check": "tsc --noEmit"
+		"check": "tsc --noEmit",
+		"test:novel-domain": "powershell -ExecutionPolicy Bypass -File scripts/test-novel-domain.ps1 && powershell -ExecutionPolicy Bypass -File scripts/test-novel-tools-extension.ps1 && powershell -ExecutionPolicy Bypass -File scripts/test-novel-verifier.ps1 && powershell -ExecutionPolicy Bypass -File scripts/test-world-change.ps1 && npm run test:novel-memory",
+		"test:novel-memory": "node --experimental-strip-types scripts/novel-memory-smoke.ts"
 	},
 	"dependencies": {
 		"@mariozechner/mini-lit": "^0.2.0",
 		"@tailwindcss/vite": "^4.1.17",
-		"@tauri-apps/api": "^2.0.0",
-		"@tauri-apps/plugin-dialog": "^2.6.0",
-		"@tauri-apps/plugin-fs": "^2.4.5",
+		"@tauri-apps/api": "2.11.1",
+		"@tauri-apps/plugin-dialog": "2.7.2",
+		"@tauri-apps/plugin-fs": "2.5.1",
 		"@tauri-apps/plugin-notification": "^2.3.3",
 		"@tauri-apps/plugin-shell": "^2.0.0",
 		"@xterm/addon-fit": "^0.11.0",

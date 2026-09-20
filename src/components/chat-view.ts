@@ -381,19 +381,19 @@ function normalizeText(value: unknown): string {
 function formatThinkingDisplayName(level: ThinkingLevel): string {
 	switch (level) {
 		case "off":
-			return "off";
+			return "关闭";
 		case "minimal":
-			return "minimal";
+			return "极低";
 		case "low":
-			return "low";
+			return "低";
 		case "medium":
-			return "medium";
+			return "中";
 		case "high":
-			return "high";
+			return "高";
 		case "xhigh":
-			return "xhigh";
+			return "极高";
 		default:
-			return "off";
+			return "关闭";
 	}
 }
 
@@ -450,6 +450,8 @@ export class ChatView {
 	private state: RpcSessionState | null = null;
 	private isConnected = false;
 	private scrollContainer: HTMLElement | null = null;
+	private pendingRenderFrame: number | null = null;
+	private pendingScrollFrame: number | null = null;
 	private unsubscribeEvents: (() => void) | null = null;
 	private nativeFileDropUnlisteners: Array<() => void> = [];
 	private lastDropSignature = "";
@@ -469,6 +471,7 @@ export class ChatView {
 	private onOpenShortcuts: (() => void) | null = null;
 	private onQuitApp: (() => void) | null = null;
 	private onSelectWelcomeProject: ((projectId: string) => void) | null = null;
+	private onNovelRoleCommand: ((commandName: string, args: string) => boolean | Promise<boolean>) | null = null;
 	private onPromptSubmitted: (() => void) | null = null;
 	private onRunStateChange: ((running: boolean) => void) | null = null;
 	private availableModels: ModelOption[] = [];
@@ -492,6 +495,7 @@ export class ChatView {
 	private settingThinking = false;
 	private unsupportedThinkingLevelsByModel = new Map<string, Set<ThinkingLevel>>();
 	private modelPickerOpen = false;
+	private thinkingPickerOpen = false;
 	private modelPickerActiveProvider = "";
 	private modelPickerGlobalListenersBound = false;
 	private runningProviderAuthAction: { provider: string; action: "login" | "logout" } | null = null;
@@ -526,6 +530,7 @@ export class ChatView {
 	private expandedToolWorkflowIds = new Set<string>();
 	private expandedToolGroupByWorkflowId = new Map<string, string>();
 	private expandedWorkflowThinkingIds = new Set<string>();
+	private collapsedWorkflowThinkingIds = new Set<string>();
 	private collapsedAutoWorkflowIds = new Set<string>();
 	private selectedSkillDraft: ComposerSkillDraft | null = null;
 	private slashPaletteOpen = false;
@@ -598,6 +603,8 @@ export class ChatView {
 	private fetchingGitRemotes = false;
 	private creatingGitRepo = false;
 	private projectPath: string | null = null;
+	private novelContextProvider: ((prompt: string) => Promise<string>) | null = null;
+	private novelContextAttachedForSession = false;
 	private bindingStatusText: string | null = null;
 	private gitKnownBranchesByProject = new Map<string, string[]>();
 	private welcomeDashboard: WelcomeDashboardSummary = {
@@ -616,7 +623,7 @@ export class ChatView {
 	private welcomeActiveProjectId: string | null = null;
 	private welcomeHeadlineTimer: ReturnType<typeof setInterval> | null = null;
 	private welcomeHeadlineIndex = 0;
-	private readonly welcomeHeadlines = ["Ready when you are", "Your move when you’re back", "Come back when you want, I’m here", "I’m waiting for you"];
+	private readonly welcomeHeadlines = ["准备好了就开始吧", "等你回来继续", "想继续时，我就在这里", "我在这里等你"];
 
 	constructor(container: HTMLElement) {
 		this.container = container;
@@ -682,6 +689,10 @@ export class ChatView {
 		this.onSelectWelcomeProject = cb;
 	}
 
+	setOnNovelRoleCommand(cb: (commandName: string, args: string) => boolean | Promise<boolean>): void {
+		this.onNovelRoleCommand = cb;
+	}
+
 	setWelcomeProjects(projects: Array<{ id: string; name: string; path: string }>, activeProjectId: string | null): void {
 		this.welcomeProjects = projects
 			.filter((entry) => Boolean(entry?.id) && Boolean(entry?.name) && Boolean(entry?.path))
@@ -710,6 +721,7 @@ export class ChatView {
 		this.expandedToolWorkflowIds.clear();
 		this.expandedToolGroupByWorkflowId.clear();
 		this.expandedWorkflowThinkingIds.clear();
+		this.collapsedWorkflowThinkingIds.clear();
 		this.collapsedAutoWorkflowIds.clear();
 		this.compactionCycle = null;
 		this.compactionInsertIndex = null;
@@ -739,6 +751,7 @@ export class ChatView {
 		if (this.projectPath === path) return;
 		const previous = this.projectPath;
 		this.projectPath = path;
+		this.novelContextAttachedForSession = false;
 		const push = (window as typeof window & {
 			__PI_DESKTOP_PUSH_TRACE__?: (message: string) => void;
 		}).__PI_DESKTOP_PUSH_TRACE__;
@@ -766,6 +779,15 @@ export class ChatView {
 		this.render();
 	}
 
+	setNovelContextProvider(provider: ((prompt: string) => Promise<string>) | null): void {
+		this.novelContextProvider = provider;
+	}
+
+	/** Explicit user context changes refresh the attachment once, including in a continued session. */
+	refreshNovelContextOnNextRequest(): void {
+		this.novelContextAttachedForSession = false;
+	}
+
 	prepareForSessionSwitch(projectPath: string | null, statusText?: string): void {
 		if (this.projectPath !== projectPath) {
 			this.setProjectPath(projectPath);
@@ -774,6 +796,7 @@ export class ChatView {
 		this.state = null;
 		this.messages = [];
 		this.lastBackendSessionFile = null;
+		this.novelContextAttachedForSession = false;
 		this.lastBackendRefreshError = null;
 		this.pendingDeliveryMode = "prompt";
 		this.resetSessionUiTransientState();
@@ -841,6 +864,11 @@ export class ChatView {
 		this.closeSlashPalette();
 		this.render();
 		this.syncComposerTextareaDeferred(commandText, { maxHeight: 200, focus: true });
+	}
+
+	/** Refreshes the one-time novel context attachment for a new routed Agent task. */
+	prepareNovelAgentTask(): void {
+		this.novelContextAttachedForSession = false;
 	}
 
 	private normalizeSkillSlashCommandText(commandText: string): string {
@@ -1236,6 +1264,12 @@ export class ChatView {
 			this.pushNotice("Slash commands cannot be sent with pending attachments", "info");
 			return;
 		}
+		if (parsed && /^novel-(world|plan|write|review)$/i.test(parsed.commandName) && this.onNovelRoleCommand) {
+			if (await this.onNovelRoleCommand(parsed.commandName, parsed.args)) {
+				this.clearComposer();
+				return;
+			}
+		}
 		await this.ensureSlashCommandsLoaded();
 		const liveItems = this.getSlashPaletteItems();
 		if (parsed) {
@@ -1272,6 +1306,9 @@ export class ChatView {
 	async runSlashCommandText(commandText: string): Promise<boolean> {
 		const parsed = this.parseSlashInput(commandText);
 		if (!parsed) return false;
+		if (/^novel-(world|plan|write|review)$/i.test(parsed.commandName) && this.onNovelRoleCommand) {
+			if (await this.onNovelRoleCommand(parsed.commandName, parsed.args)) return true;
+		}
 		await this.ensureSlashCommandsLoaded();
 		const exact = this.findSlashPaletteItemByName(parsed.commandName);
 		if (exact) {
@@ -1294,7 +1331,10 @@ export class ChatView {
 		const trimmedCommandText = commandText.trim();
 		if (!trimmedCommandText) return;
 		this.rememberComposerHistoryEntry(trimmedCommandText);
-		this.clearComposer();
+		// A slash command is an auxiliary action. Keep an already selected skill
+		// draft available for the prompt that follows the command; running a
+		// command should not silently discard that user choice.
+		this.clearComposer({ preserveSkillDraft: true });
 		this.sendingPrompt = true;
 		this.render();
 		try {
@@ -1384,7 +1424,20 @@ export class ChatView {
 			this.closeModelPicker();
 			return;
 		}
+		this.thinkingPickerOpen = false;
 		this.openModelPicker({ preferredProvider });
+	}
+
+	private closeThinkingPicker(): void {
+		if (!this.thinkingPickerOpen) return;
+		this.thinkingPickerOpen = false;
+		this.render();
+	}
+
+	private toggleThinkingPicker(): void {
+		this.thinkingPickerOpen = !this.thinkingPickerOpen;
+		if (this.modelPickerOpen) this.closeModelPicker();
+		else this.render();
 	}
 
 	private resolveProviderHintFromModelArg(rawArg: string): string | null {
@@ -1531,16 +1584,18 @@ export class ChatView {
 	}
 
 	private onGlobalPointerDownForModelPicker = (event: Event): void => {
-		if (!this.modelPickerOpen) return;
+		if (!this.modelPickerOpen && !this.thinkingPickerOpen) return;
 		const target = event.target;
-		if (target instanceof Element && target.closest(".model-picker-root")) return;
-		this.closeModelPicker();
+		if (!(target instanceof Element)) return;
+		if (this.modelPickerOpen && !target.closest(".model-picker-root")) this.closeModelPicker();
+		if (this.thinkingPickerOpen && !target.closest(".thinking-picker-root")) this.closeThinkingPicker();
 	};
 
 	private onGlobalEscapeForModelPicker = (event: KeyboardEvent): void => {
-		if (!this.modelPickerOpen || event.key !== "Escape") return;
+		if ((!this.modelPickerOpen && !this.thinkingPickerOpen) || event.key !== "Escape") return;
 		event.preventDefault();
 		this.closeModelPicker();
+		this.closeThinkingPicker();
 	};
 
 	private bindModelPickerGlobalListeners(): void {
@@ -1576,6 +1631,14 @@ export class ChatView {
 	disconnect(): void {
 		this.unsubscribeEvents?.();
 		this.unsubscribeEvents = null;
+		if (this.pendingRenderFrame !== null) {
+			cancelAnimationFrame(this.pendingRenderFrame);
+			this.pendingRenderFrame = null;
+		}
+		if (this.pendingScrollFrame !== null) {
+			cancelAnimationFrame(this.pendingScrollFrame);
+			this.pendingScrollFrame = null;
+		}
 		this.cancelStreamingUiReconcile();
 		this.runHasAssistantText = false;
 		this.runSawToolActivity = false;
@@ -1615,6 +1678,9 @@ export class ChatView {
 			this.recomputeProviderAuthConfigured();
 			this.lastBackendSessionFile = currentSessionFile;
 			if ((previousSessionFile ?? "") !== (currentSessionFile ?? "")) {
+				this.novelContextAttachedForSession = backendMessages.some((entry) => {
+					return (entry.role as string) === "user" && this.extractText((entry as Record<string, unknown>).content).includes("<novel-context>");
+				});
 				this.sessionStats = {
 					tokens: null,
 					lifetimeTokens: null,
@@ -1640,6 +1706,7 @@ export class ChatView {
 			this.expandedToolWorkflowIds.clear();
 			this.expandedToolGroupByWorkflowId.clear();
 			this.expandedWorkflowThinkingIds.clear();
+			this.collapsedWorkflowThinkingIds.clear();
 			this.collapsedAutoWorkflowIds.clear();
 			this.forkEntryIdByMessageId.clear();
 			this.lastAssistantContextTokens = this.deriveLatestAssistantContextTokens(backendMessages);
@@ -3214,6 +3281,7 @@ export class ChatView {
 		this.runSawToolActivity = false;
 		this.keepWorkflowExpandedUntilAssistantText = false;
 		this.collapsedAutoWorkflowIds.clear();
+		this.collapsedWorkflowThinkingIds.clear();
 		this.render();
 		this.scrollToBottom(true);
 	}
@@ -3344,11 +3412,12 @@ export class ChatView {
 		this.applyComposerText(draft);
 	}
 
-	private clearComposer(): void {
+	private clearComposer(options: { preserveSkillDraft?: boolean } = {}): void {
+		const preservedSkillDraft = options.preserveSkillDraft ? this.selectedSkillDraft : null;
 		this.inputText = "";
 		this.pendingImages = [];
 		this.pendingFileReferences = [];
-		this.selectedSkillDraft = null;
+		this.selectedSkillDraft = preservedSkillDraft;
 		this.resetComposerHistoryNavigation();
 		this.closeSlashPalette();
 		this.render();
@@ -3356,11 +3425,17 @@ export class ChatView {
 	}
 
 	async sendMessage(mode: DeliveryMode = this.pendingDeliveryMode): Promise<void> {
+		const rawInputText = this.composedPromptText(this.inputText);
+		const isSlashCommand = !this.selectedSkillDraft && rawInputText.trim().startsWith("/");
+		const shouldAttachNovelContext = !isSlashCommand && !this.novelContextAttachedForSession && rawInputText.trim().length > 0;
+		const novelContext = shouldAttachNovelContext && this.novelContextProvider ? await this.novelContextProvider(rawInputText) : "";
+		const inputText = novelContext ? `${rawInputText}\n\n<novel-context>\n${novelContext}\n</novel-context>` : rawInputText;
 		await sendMessageFlow({
 			mode,
 			bindingStatusText: this.bindingStatusText,
 			isComposerInteractionLocked: this.isComposerInteractionLocked.bind(this),
-			inputText: this.composedPromptText(this.inputText),
+			inputText,
+			displayInputText: rawInputText,
 			selectedSkillCommandText: this.selectedSkillDraft?.commandText?.trim() ?? "",
 			pendingImages: [...this.pendingImages],
 			slashQueryFromInput: () => (this.pendingFileReferences.length > 0 ? null : this.slashQueryFromInput()),
@@ -3383,7 +3458,10 @@ export class ChatView {
 			},
 			toRpcImages: this.toRpcImages.bind(this),
 			removeComposerQueueMessage: this.removeComposerQueueMessage.bind(this),
-			onPromptSubmitted: this.onPromptSubmitted ?? undefined,
+			onPromptSubmitted: () => {
+				if (novelContext) this.novelContextAttachedForSession = true;
+				this.onPromptSubmitted?.();
+			},
 		});
 	}
 
@@ -3528,6 +3606,7 @@ export class ChatView {
 		this.runSawToolActivity = false;
 		this.keepWorkflowExpandedUntilAssistantText = false;
 		this.collapsedAutoWorkflowIds.clear();
+		this.collapsedWorkflowThinkingIds.clear();
 		this.onRunStateChange?.(false);
 	}
 
@@ -3573,6 +3652,7 @@ export class ChatView {
 		try {
 			await rpcBridge.newSession();
 			this.messages = [];
+			this.novelContextAttachedForSession = false;
 			await this.refreshFromBackend();
 			this.pushNotice("Started new session", "success");
 			return true;
@@ -3821,7 +3901,9 @@ export class ChatView {
 	private scrollToBottom(force = false): void {
 		const shouldFollow = force || this.autoFollowChat;
 		if (!shouldFollow) return;
-		requestAnimationFrame(() => {
+		if (this.pendingScrollFrame !== null) return;
+		this.pendingScrollFrame = requestAnimationFrame(() => {
+			this.pendingScrollFrame = null;
 			if (!this.scrollContainer) return;
 			this.scrollContainer.scrollTop = this.scrollContainer.scrollHeight;
 		});
@@ -4087,6 +4169,11 @@ export class ChatView {
 				this.expandedWorkflowThinkingIds.delete(thinkingId);
 			}
 		}
+		for (const thinkingId of Array.from(this.collapsedWorkflowThinkingIds)) {
+			if (thinkingId.startsWith(`${workflowId}:thinking:`)) {
+				this.collapsedWorkflowThinkingIds.delete(thinkingId);
+			}
+		}
 	}
 
 	private toggleToolWorkflowExpanded(workflowId: string, autoExpanded = false, currentlyExpanded = false): void {
@@ -4104,14 +4191,16 @@ export class ChatView {
 		this.render();
 	}
 
-	private isWorkflowThinkingExpanded(thinkingId: string): boolean {
-		return this.expandedWorkflowThinkingIds.has(thinkingId);
+	private isWorkflowThinkingExpanded(thinkingId: string, autoExpand: boolean): boolean {
+		return (autoExpand && !this.collapsedWorkflowThinkingIds.has(thinkingId)) || this.expandedWorkflowThinkingIds.has(thinkingId);
 	}
 
-	private toggleWorkflowThinkingExpanded(thinkingId: string): void {
-		if (this.expandedWorkflowThinkingIds.has(thinkingId)) {
+	private toggleWorkflowThinkingExpanded(thinkingId: string, autoExpand: boolean): void {
+		if (this.isWorkflowThinkingExpanded(thinkingId, autoExpand)) {
 			this.expandedWorkflowThinkingIds.delete(thinkingId);
+			if (autoExpand) this.collapsedWorkflowThinkingIds.add(thinkingId);
 		} else {
+			this.collapsedWorkflowThinkingIds.delete(thinkingId);
 			this.expandedWorkflowThinkingIds.add(thinkingId);
 		}
 		this.render();
@@ -4162,7 +4251,6 @@ export class ChatView {
 			workflowId,
 			toolCalls,
 			isTerminal,
-			keepWorkflowExpandedUntilAssistantText: this.keepWorkflowExpandedUntilAssistantText,
 			runSawToolActivity: this.runSawToolActivity,
 			expandedWorkflowIds: this.expandedToolWorkflowIds,
 			collapsedAutoWorkflowIds: this.collapsedAutoWorkflowIds,
@@ -4178,8 +4266,8 @@ export class ChatView {
 			summarizeToolCall: (toolCall) => this.summarizeToolCall(toolCall),
 			renderToolPreview: (preview) => this.renderToolPreview(preview),
 			formatDuration,
-			isWorkflowThinkingExpanded: (thinkingId) => this.isWorkflowThinkingExpanded(thinkingId),
-			toggleWorkflowThinkingExpanded: (thinkingId) => this.toggleWorkflowThinkingExpanded(thinkingId),
+			isWorkflowThinkingExpanded: (thinkingId, autoExpand) => this.isWorkflowThinkingExpanded(thinkingId, autoExpand),
+			toggleWorkflowThinkingExpanded: (thinkingId, autoExpand) => this.toggleWorkflowThinkingExpanded(thinkingId, autoExpand),
 			isToolGroupExpanded: (workflowId, groupId) => this.isToolGroupExpanded(workflowId, groupId),
 			toggleToolGroupExpanded: (workflowId, groupId) => this.toggleToolGroupExpanded(workflowId, groupId),
 			toggleToolWorkflowExpanded: (workflowId, autoExpanded, currentlyExpanded) =>
@@ -4310,7 +4398,7 @@ export class ChatView {
 			this.welcomeProjects.find((project) => normalizeComparablePath(project.path) === comparableProjectPath) ??
 			null;
 		const hasProject = Boolean(activeProject || this.projectPath);
-		const projectLabel = activeProject?.name ?? (this.projectPath ? this.fileNameFromPath(this.projectPath) : "Add project");
+		const projectLabel = activeProject?.name ?? (this.projectPath ? this.fileNameFromPath(this.projectPath) : "添加项目");
 		const welcomeHeadline = this.welcomeHeadlines[this.welcomeHeadlineIndex] ?? this.welcomeHeadlines[0];
 
 		return renderCenteredWelcomeView({
@@ -4421,6 +4509,7 @@ export class ChatView {
 			currentModelDisplay,
 			currentProviderDisplay,
 			modelPickerOpen: this.modelPickerOpen,
+			thinkingPickerOpen: this.thinkingPickerOpen,
 			loadingModels: this.loadingModels,
 			loadingModelCatalog: this.loadingModelCatalog,
 			providerGroups,
@@ -4437,6 +4526,8 @@ export class ChatView {
 			onSetModelPickerActiveProvider: (provider) => this.setModelPickerActiveProvider(provider),
 			onProviderAuthAction: (provider, action) => this.handleProviderAuthAction(provider, action),
 			onSelectModel: (provider, modelId) => this.setModel(provider, modelId),
+			onCloseThinkingPicker: () => this.closeThinkingPicker(),
+			onToggleThinkingPicker: () => this.toggleThinkingPicker(),
 			onSetThinkingLevel: (value) => this.setThinkingLevel(value),
 			onAbort: () => this.abortCurrentRun(),
 			onSend: () => this.sendMessage("prompt"),
@@ -4595,8 +4686,12 @@ export class ChatView {
 				<div class="composer-inner">
 					${renderQueuedComposerMessagesView(this.queuedComposerMessages, truncate)}
 					<div class="composer-panel">
+						${this.selectedSkillDraft
+							? html`<div class="composer-skill-draft-row">
+								${renderComposerSkillDraftPillView(this.selectedSkillDraft, skillGlyphIcon(), () => this.removeComposerSkillDraft())}
+							</div>`
+							: nothing}
 						<div class="composer-row">
-							${renderComposerSkillDraftPillView(this.selectedSkillDraft, skillGlyphIcon(), () => this.removeComposerSkillDraft())}
 							${renderPendingImagesView(this.pendingImages, truncate, (id) => this.removePendingImage(id))}
 							${renderPendingFileReferencesView(this.pendingFileReferences, truncate, (id) => this.removePendingFileReference(id))}
 							<textarea
@@ -4790,6 +4885,26 @@ export class ChatView {
 	}
 
 	render(): void {
+		// Streaming events can arrive several times per frame (thinking/tool/text
+		// deltas). Rebuilding the whole Lit tree for each one restarts transient
+		// animations and competes with the scroll RAF, which looks like a flashback.
+		// Keep non-streaming interactions synchronous, but coalesce streaming work
+		// to one render per animation frame.
+		if (this.currentIsStreaming()) {
+			if (this.pendingRenderFrame !== null) return;
+			this.pendingRenderFrame = requestAnimationFrame(() => {
+				this.pendingRenderFrame = null;
+				this.doRender();
+				if (this.projectPath) this.scrollToBottom();
+				this.syncWorkingStatusAnimation();
+				this.ensureActiveSlashItemVisible();
+			});
+			return;
+		}
+		if (this.pendingRenderFrame !== null) {
+			cancelAnimationFrame(this.pendingRenderFrame);
+			this.pendingRenderFrame = null;
+		}
 		this.doRender();
 		if (this.projectPath) {
 			this.scrollToBottom();

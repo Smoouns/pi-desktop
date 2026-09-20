@@ -9,13 +9,14 @@ import { html, nothing, render } from "lit";
 
 type FileViewMode = "rendered" | "raw";
 
+interface CachedFileView {
+	content: string;
+	error: string;
+	viewMode: FileViewMode;
+}
+
 const DEFAULT_DRAFT_NAME = "New file";
 const AUTO_SAVE_DELAY_MS = 200;
-
-function truncatePath(path: string, max = 140): string {
-	if (path.length <= max) return path;
-	return `…${path.slice(path.length - max + 1)}`;
-}
 
 function fileExtension(path: string): string {
 	const normalized = path.replace(/\\/g, "/");
@@ -29,14 +30,6 @@ function pathBaseName(path: string): string {
 	const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
 	const parts = normalized.split("/");
 	return parts[parts.length - 1] || normalized;
-}
-
-function pathDirName(path: string): string {
-	const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
-	const idx = normalized.lastIndexOf("/");
-	if (idx === -1) return "";
-	if (idx === 0) return "/";
-	return normalized.slice(0, idx);
 }
 
 function isMarkdownPath(path: string | null): boolean {
@@ -66,6 +59,8 @@ export class FileViewer {
 	private viewMode: FileViewMode = "raw";
 	private openingExternal = false;
 	private autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+	private fileCache = new Map<string, CachedFileView>();
+	private openVersion = 0;
 	private onDraftFileCreated: ((filePath: string) => void) | null = null;
 	private onClose: (() => void) | null = null;
 
@@ -90,46 +85,75 @@ export class FileViewer {
 		this.onClose = cb;
 	}
 
+	assertFileReadyForChange(path: string): void {
+		const key = (value: string) => value.replace(/\\/g, "/").toLowerCase();
+		if (this.filePath && key(this.filePath) === key(path) && (this.dirty || this.saving)) throw new Error("该 Canon 文件仍有未保存的编辑，请先保存再执行变更或回滚。");
+	}
+
+	/** Refresh a controlled external write without discarding in-progress editor input. */
+	invalidateFile(path: string): void {
+		const key = (value: string) => value.replace(/\\/g, "/").toLowerCase();
+		for (const cached of this.fileCache.keys()) if (key(cached) === key(path)) this.fileCache.delete(cached);
+		if (!this.filePath || key(this.filePath) !== key(path)) return;
+		if (this.dirty || this.saving) return;
+		const currentPath = this.filePath;
+		this.openVersion += 1;
+		this.filePath = null;
+		void this.openFile(currentPath);
+	}
+
 	async openFile(filePath: string): Promise<void> {
 		if (this.filePath === filePath && !this.draftId && !this.loading) return;
+		const openVersion = ++this.openVersion;
 		if (this.filePath && this.filePath !== filePath && this.dirty) {
 			await this.persistOpenedFile({ silent: true });
 		}
+		if (openVersion !== this.openVersion) return;
 		this.clearAutoSaveTimer();
 		this.filePath = filePath;
 		this.draftId = null;
 		this.draftName = pathBaseName(filePath);
-		this.loading = true;
+		const cached = this.fileCache.get(filePath);
+		this.loading = !cached;
 		this.saving = false;
 		this.dirty = false;
-		this.error = "";
-		this.content = "";
-		this.editorText = "";
-		this.viewMode = isMarkdownPath(filePath) ? "rendered" : "raw";
+		this.error = cached?.error ?? "";
+		this.content = cached?.content ?? "";
+		this.editorText = cached?.content ?? "";
+		this.viewMode = cached?.viewMode ?? (isMarkdownPath(filePath) ? "rendered" : "raw");
 		this.render();
+		if (cached) return;
 
 		try {
 			const { readTextFile } = await import("@tauri-apps/plugin-fs");
 			const text = await readTextFile(filePath);
+			let nextContent = text;
+			let nextError = "";
 			if (text.includes("\u0000")) {
-				this.error = "Binary file preview is not supported yet.";
-				this.content = "";
-				this.editorText = "";
-			} else {
-				this.content = text;
-				this.editorText = text;
+				nextContent = "";
+				nextError = "Binary file preview is not supported yet.";
 			}
+			this.fileCache.set(filePath, { content: nextContent, error: nextError, viewMode: this.viewMode });
+			if (openVersion !== this.openVersion || this.filePath !== filePath) return;
+			this.error = nextError;
+			this.content = nextContent;
+			this.editorText = nextContent;
 		} catch (err) {
-			this.error = err instanceof Error ? err.message : String(err);
+			const nextError = err instanceof Error ? err.message : String(err);
+			this.fileCache.set(filePath, { content: "", error: nextError, viewMode: this.viewMode });
+			if (openVersion !== this.openVersion || this.filePath !== filePath) return;
+			this.error = nextError;
 			this.content = "";
 			this.editorText = "";
 		} finally {
+			if (openVersion !== this.openVersion || this.filePath !== filePath) return;
 			this.loading = false;
 			this.render();
 		}
 	}
 
 	openDraft(draftId: string, suggestedName = DEFAULT_DRAFT_NAME): void {
+		this.openVersion += 1;
 		this.clearAutoSaveTimer();
 		const firstOpen = this.draftId !== draftId || this.filePath !== null;
 		this.filePath = null;
@@ -154,6 +178,7 @@ export class FileViewer {
 	}
 
 	clear(): void {
+		this.openVersion += 1;
 		this.clearAutoSaveTimer();
 		this.filePath = null;
 		this.draftId = null;
@@ -172,6 +197,7 @@ export class FileViewer {
 	private setViewMode(mode: FileViewMode): void {
 		if (this.viewMode === mode) return;
 		this.viewMode = mode;
+		if (this.filePath) this.fileCache.set(this.filePath, { content: this.editorText, error: this.error, viewMode: mode });
 		this.render();
 	}
 
@@ -201,6 +227,7 @@ export class FileViewer {
 			await writeTextFile(this.filePath, textToSave);
 			this.content = textToSave;
 			this.dirty = this.editorText !== this.content;
+			this.fileCache.set(this.filePath, { content: textToSave, error: "", viewMode: this.viewMode });
 		} catch (err) {
 			console.error("Autosave failed:", err);
 			if (!options.silent) {
@@ -219,6 +246,7 @@ export class FileViewer {
 		this.editorText = next;
 		if (this.filePath) {
 			this.dirty = this.editorText !== this.content;
+			this.fileCache.set(this.filePath, { content: this.editorText, error: this.error, viewMode: this.viewMode });
 			this.scheduleAutoSave();
 		} else {
 			this.dirty = this.editorText.length > 0;
@@ -301,11 +329,6 @@ export class FileViewer {
 		const activeNameOrPath = this.filePath ?? this.draftName;
 		const markdown = isMarkdownPath(activeNameOrPath);
 		const canCreateDraft = Boolean(this.draftId);
-		const fileTitle = this.filePath ? pathBaseName(this.filePath) : this.draftName;
-		const fileDirectory = this.filePath ? pathDirName(this.filePath) : null;
-		const filePathLabel = this.filePath
-			? truncatePath(fileDirectory || this.filePath)
-			: "Select a file from the sidebar.";
 
 		const template = html`
 			<div class="file-viewer-root">
@@ -319,12 +342,7 @@ export class FileViewer {
 								@input=${(e: Event) => this.updateDraftName((e.target as HTMLInputElement).value)}
 							/>
 						`
-						: html`
-							<div class="file-viewer-meta">
-								<div class="file-viewer-path" title=${fileDirectory || this.filePath || ""}>${filePathLabel}</div>
-								<div class="file-viewer-title" title=${fileTitle}>${fileTitle}</div>
-							</div>
-						`}
+					: nothing}
 					<div class="file-viewer-actions">
 						${markdown
 							? html`
@@ -358,7 +376,6 @@ export class FileViewer {
 								<path d="M13 3L4.8 11.2"></path>
 							</svg>
 						</button>
-						<button class="file-viewer-close-btn" title="Close file panel" @click=${() => this.onClose?.()}>✕</button>
 					</div>
 				</div>
 				<div class="file-viewer-body">

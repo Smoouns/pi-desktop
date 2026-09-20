@@ -68,18 +68,18 @@ export function renderCenteredWelcomeView({
 								`;
 							})}
 							${projects.length > 0 ? html`<div class="welcome-project-sep"></div>` : nothing}
-							<button class="welcome-project-item" @click=${onAddProject}>Add new project</button>
+							<button class="welcome-project-item" @click=${onAddProject}>添加项目</button>
 							<div class="welcome-project-sep"></div>
-							<button class="welcome-project-item" @click=${onOpenPackages}>Packages</button>
-							<button class="welcome-project-item" @click=${onOpenSettings}>Settings</button>
+							<button class="welcome-project-item" @click=${onOpenPackages}>扩展包</button>
+							<button class="welcome-project-item" @click=${onOpenSettings}>设置</button>
 						</div>
 					`
 					: nothing}
 			</div>
 			<div class="welcome-meta-line muted ${projectMenuOpen ? "hidden" : ""}">
 				${snapshot.loading
-					? "Refreshing local Pi inventory…"
-					: `${snapshot.skills.length} skills · ${snapshot.extensions.length} extensions · ${snapshot.themes.length} themes`}
+					? "正在刷新本地 Pi 资源…"
+					: `${snapshot.skills.length} 个技能 · ${snapshot.extensions.length} 个扩展 · ${snapshot.themes.length} 个主题`}
 			</div>
 			${snapshot.error ? html`<div class="welcome-error">${snapshot.error}</div>` : nothing}
 		</div>

@@ -555,7 +555,23 @@ fn discover_pi(app: &AppHandle, options: &RpcStartOptions) -> Result<PiProcess, 
         return Ok(PiProcess::SidecarBinary { path });
     }
 
-    // Fallback: pi on PATH
+    // On Windows, prefer the known npm install locations before PATH. npm puts
+    // an extensionless Unix shell shim beside pi.cmd, and `which("pi")` may
+    // choose that shim even though CreateProcess cannot use it as an RPC host.
+    #[cfg(target_os = "windows")]
+    if let Some(path) = discover_pi_from_common_locations() {
+        return Ok(PiProcess::PathBinary { path });
+    }
+
+    // Fallback: pi on PATH. npm exposes both an extensionless Unix shell shim
+    // and a Windows batch shim; CreateProcess must never pick the Unix shim.
+    #[cfg(target_os = "windows")]
+    for executable in ["pi.cmd", "pi.exe", "pi.bat"] {
+        if let Ok(path) = which::which(executable) {
+            return Ok(PiProcess::PathBinary { path });
+        }
+    }
+
     if let Ok(path) = which::which("pi") {
         return Ok(PiProcess::PathBinary { path });
     }
@@ -569,7 +585,113 @@ fn discover_pi(app: &AppHandle, options: &RpcStartOptions) -> Result<PiProcess, 
 }
 
 /// Build a Command for the discovered pi process
+fn is_windows_batch_script(path: &Path) -> bool {
+    cfg!(target_os = "windows")
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat"))
+            .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_npm_batch_node_script(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    let contents = fs::read_to_string(path).ok()?;
+    for quoted in contents.split('"') {
+        let candidate = quoted.trim();
+        if !candidate.to_ascii_lowercase().ends_with(".js") || !candidate.contains("node_modules") {
+            continue;
+        }
+        let relative = candidate
+            .replace("%dp0%\\", "")
+            .replace("%~dp0\\", "")
+            .replace('/', "\\");
+        let script = parent.join(relative);
+        if script.is_file() {
+            return Some(script);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn discover_node_executable() -> PathBuf {
+    for name in ["node.exe", "node"] {
+        if let Ok(path) = which::which(name) {
+            return path;
+        }
+    }
+
+    for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Ok(root) = std::env::var(key) {
+            let candidate = PathBuf::from(root).join("nodejs").join("node.exe");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+
+    PathBuf::from("node.exe")
+}
+
 fn build_command(pi: &PiProcess, options: &RpcStartOptions) -> Command {
+    #[cfg(target_os = "windows")]
+    if let PiProcess::SidecarBinary { path } | PiProcess::PathBinary { path } = pi {
+        if is_windows_batch_script(path) {
+            // npm creates `pi.cmd` on Windows. Instead of delegating through the
+            // batch interpreter, start its resolved JavaScript entrypoint with
+            // Node directly; this preserves the RPC pipes in Tauri processes.
+            use std::os::windows::process::CommandExt;
+
+            let script = resolve_npm_batch_node_script(path);
+            let mut cmd = Command::new(discover_node_executable());
+            if let Some(script) = script {
+                cmd.arg(script);
+            } else {
+                // Keep a compatible fallback for non-standard batch shims.
+                let mut fallback = Command::new("cmd.exe");
+                fallback.arg("/D").arg("/S").arg("/C").arg(path);
+                fallback.arg("--mode").arg("rpc");
+                if let Some(ref provider) = options.provider {
+                    fallback.arg("--provider").arg(provider);
+                }
+                if let Some(ref model) = options.model {
+                    fallback.arg("--model").arg(model);
+                }
+                fallback
+                    .current_dir(&options.cwd)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                if let Some(ref env) = options.env {
+                    fallback.envs(env);
+                }
+                fallback.creation_flags(0x08000000);
+                return fallback;
+            }
+
+            cmd.arg("--mode").arg("rpc");
+            if let Some(ref provider) = options.provider {
+                cmd.arg("--provider").arg(provider);
+            }
+            if let Some(ref model) = options.model {
+                cmd.arg("--model").arg(model);
+            }
+            cmd.current_dir(&options.cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(ref env) = options.env {
+                cmd.envs(env);
+            }
+            if let Some(parent) = path.parent() {
+                prepend_bin_dir_to_path(&mut cmd, parent);
+            }
+            return cmd;
+        }
+    }
+
     let mut cmd = match pi {
         PiProcess::DevNode { script } => {
             let mut c = Command::new("node");
@@ -697,10 +819,12 @@ async fn rpc_start(
 
     // Spawn thread to read stdout and emit events to frontend
     let app_handle = app.clone();
+    let stdout_instances = state.instances.clone();
     let stdout_instance_id = instance_id.clone();
     let stdout_generation = generation;
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        let mut stdout_read_error = None;
         for line in reader.lines() {
             match line {
                 Ok(line) => {
@@ -714,15 +838,37 @@ async fn rpc_start(
                     };
                     let _ = app_handle.emit("rpc-event", payload);
                 }
-                Err(_) => break,
+                Err(err) => {
+                    stdout_read_error = Some(format!("RPC stdout read error: {err}"));
+                    break;
+                }
             }
         }
+        let reason = stdout_read_error.unwrap_or_else(|| stdout_instances
+            .lock()
+            .ok()
+            .and_then(|mut instances| {
+                let handle = instances.get_mut(&stdout_instance_id)?;
+                if handle.generation != stdout_generation {
+                    return Some("superseded by a newer RPC instance".to_string());
+                }
+                match handle.process.as_mut()?.try_wait() {
+                    Ok(Some(status)) => {
+                        handle.process = None;
+                        handle.stdin_writer = None;
+                        Some(format!("process exited ({status})"))
+                    }
+                    Ok(None) => Some("RPC stdout closed while process is still running".to_string()),
+                    Err(err) => Some(format!("could not inspect process status: {err}")),
+                }
+            })
+            .unwrap_or_else(|| "RPC process closed".to_string()));
         let _ = app_handle.emit(
             "rpc-closed",
             RpcClosedEventPayload {
                 instance_id: stdout_instance_id,
                 generation: stdout_generation,
-                reason: "process exited".to_string(),
+                reason,
             },
         );
     });
@@ -865,6 +1011,7 @@ pub struct SessionInfo {
     pub modified_at: i64,
     pub tokens: u64,
     pub cost: f64,
+    pub novel_role: Option<String>,
 }
 
 fn get_pi_agent_dir() -> Option<PathBuf> {
@@ -964,6 +1111,7 @@ fn parse_session_info(path: &Path) -> Option<SessionInfo> {
     let mut cwd: Option<String> = None;
     let mut tokens: u64 = 0;
     let mut cost: f64 = 0.0;
+    let mut novel_role: Option<String> = None;
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -1015,7 +1163,34 @@ fn parse_session_info(path: &Path) -> Option<SessionInfo> {
                     cost += message_cost;
                 }
             }
+            Some("custom") => {
+                if entry.get("customType").and_then(|v| v.as_str()) == Some("pi-desktop-novel-role") {
+                    let role = entry
+                        .get("data")
+                        .and_then(|data| data.get("role"))
+                        .and_then(|role| role.as_str())
+                        .map(str::trim)
+                        .filter(|role| matches!(*role, "world" | "plan" | "write"))
+                        .map(ToOwned::to_owned);
+                    if role.is_some() {
+                        novel_role = role;
+                    }
+                }
+            }
             _ => {}
+        }
+    }
+
+    // Older dedicated Novel sessions may only have the role in their title.
+    if novel_role.is_none() {
+        if let Some(session_name) = name.as_deref() {
+            if session_name.contains("世界观") {
+                novel_role = Some("world".to_string());
+            } else if session_name.contains("规划") {
+                novel_role = Some("plan".to_string());
+            } else if session_name.contains("写作") || session_name.contains("写文") {
+                novel_role = Some("write".to_string());
+            }
         }
     }
 
@@ -1028,6 +1203,7 @@ fn parse_session_info(path: &Path) -> Option<SessionInfo> {
         modified_at: get_modified_at_ms(path),
         tokens,
         cost,
+        novel_role,
     })
 }
 
@@ -1944,6 +2120,50 @@ fn get_latest_npm_cli_version(pi: Option<&PiProcess>) -> (bool, Option<String>, 
 }
 
 fn build_plain_command(pi: &PiProcess, options: &PiCliCommandOptions) -> Command {
+    #[cfg(target_os = "windows")]
+    if let PiProcess::SidecarBinary { path } | PiProcess::PathBinary { path } = pi {
+        if is_windows_batch_script(path) {
+            use std::os::windows::process::CommandExt;
+
+            let script = resolve_npm_batch_node_script(path);
+            let mut cmd = Command::new(discover_node_executable());
+            if let Some(script) = script {
+                cmd.arg(script);
+            } else {
+                let mut fallback = Command::new("cmd.exe");
+                fallback.arg("/D").arg("/S").arg("/C").arg(path);
+                fallback.args(&options.args);
+                if let Some(cwd) = &options.cwd {
+                    fallback.current_dir(cwd);
+                }
+                fallback
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                if let Some(env) = &options.env {
+                    fallback.envs(env);
+                }
+                fallback.creation_flags(0x08000000);
+                return fallback;
+            }
+            cmd.args(&options.args);
+            if let Some(cwd) = &options.cwd {
+                cmd.current_dir(cwd);
+            }
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(env) = &options.env {
+                cmd.envs(env);
+            }
+            if let Some(parent) = path.parent() {
+                prepend_bin_dir_to_path(&mut cmd, parent);
+            }
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            return cmd;
+        }
+    }
+
     let mut cmd = match pi {
         PiProcess::DevNode { script } => {
             let mut c = Command::new("node");

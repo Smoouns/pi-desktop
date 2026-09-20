@@ -13,6 +13,7 @@ interface SessionInfo {
 	modifiedAt: number;
 	tokens: number;
 	cost: number;
+	novelRole: "world" | "plan" | "write" | null;
 }
 
 interface ForkOption {
@@ -107,6 +108,7 @@ export class SessionBrowser {
 					modified_at: number;
 					tokens: number;
 					cost: number;
+					novel_role: "world" | "plan" | "write" | null;
 				}>
 			>("list_sessions");
 
@@ -118,6 +120,7 @@ export class SessionBrowser {
 				modifiedAt: s.modified_at,
 				tokens: s.tokens,
 				cost: s.cost,
+				novelRole: s.novel_role ?? null,
 			}));
 		} catch (err) {
 			console.error("Failed to load sessions:", err);
@@ -207,6 +210,20 @@ export class SessionBrowser {
 		return date.toLocaleDateString();
 	}
 
+	private groupedSessions(): Array<{ key: "world" | "plan" | "write" | "other"; label: string; sessions: SessionInfo[] }> {
+		const groups: Array<{ key: "world" | "plan" | "write" | "other"; label: string; sessions: SessionInfo[] }> = [
+			{ key: "world", label: "世界观 Agent", sessions: [] },
+			{ key: "plan", label: "规划 Agent", sessions: [] },
+			{ key: "write", label: "写作 Agent", sessions: [] },
+			{ key: "other", label: "其他会话", sessions: [] },
+		];
+		for (const session of this.filteredSessions) {
+			const group = groups.find((candidate) => candidate.key === (session.novelRole ?? "other")) ?? groups[3];
+			group.sessions.push(session);
+		}
+		return groups.filter((group) => group.sessions.length > 0);
+	}
+
 	render(): void {
 		if (!this.isOpen) {
 			this.container.innerHTML = "";
@@ -214,6 +231,7 @@ export class SessionBrowser {
 		}
 
 		const list = this.filteredSessions;
+		const groups = this.groupedSessions();
 
 		const template = html`
 			<div class="overlay" @click=${(e: Event) => e.target === e.currentTarget && this.close()}>
@@ -267,20 +285,30 @@ export class SessionBrowser {
 								? html`<div class="overlay-empty">Loading sessions...</div>`
 								: list.length === 0
 									? html`<div class="overlay-empty">No sessions found.</div>`
-									: list.map(
-											(session) => html`
-												<button class="session-row" @click=${() => this.selectSession(session)} title=${session.path}>
-													<div class="session-row-main">
-														<div class="session-row-title">${session.name || "Untitled Session"}</div>
-														<div class="session-row-subtitle">${session.cwd || session.path}</div>
+									: groups.map(
+											(group) => html`
+												<section class="session-browser-group">
+													<div class="session-browser-group-header">
+														<span>${group.label}</span>
+														<span class="session-browser-group-count">${group.sessions.length}</span>
 													</div>
-													<div class="session-row-meta">
-														<div>${this.formatDate(session.modifiedAt)}</div>
-														<div>${formatTokens(session.tokens)} tok · ${formatCost(session.cost)}</div>
-													</div>
-												</button>
+													${group.sessions.map(
+														(session) => html`
+															<button class="session-row" @click=${() => this.selectSession(session)} title=${session.path}>
+																<div class="session-row-main">
+																	<div class="session-row-title">${session.name || "Untitled Session"}</div>
+																	<div class="session-row-subtitle">${session.cwd || session.path}</div>
+																</div>
+																<div class="session-row-meta">
+																	<div>${this.formatDate(session.modifiedAt)}</div>
+																	<div>${formatTokens(session.tokens)} tok · ${formatCost(session.cost)}</div>
+																</div>
+															</button>
+														`,
+													)}
+												</section>
 											`,
-									  )}
+										  )}
 					</div>
 
 					${!this.forkMode

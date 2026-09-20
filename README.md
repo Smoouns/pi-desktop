@@ -46,6 +46,16 @@ Pi Desktop gives you a stable desktop UX for Pi without hardcoding product logic
 - **Hardcoding rule:** avoid embedding project-specific automation/policy logic in app core.
 - **Architecture intent:** Pi Desktop is a capability host for extensions, not a monolithic workflow engine.
 
+### Novel workspace (first phase)
+
+The first novel phase adds a local-first Novel sidebar mode, safe Markdown editing, and a visible Context Inspector without replacing the generic workspace/session infrastructure. Projects may opt into the format with `.novel/project.json`; initializing a normal folder only creates missing metadata and standard directories. Files remain the source of truth.
+
+The format separates content type (`manuscript`, `canon`, `planning`, `draft`, `craft`, `notes`, `memory`, etc.) from lifecycle/authority (`canonical`, `proposed`, `historical`, `derived`, etc.). Legacy projects can use explicit authority mappings such as a Canonical Text Index, so a formal manuscript under an old `drafts/` directory is not misclassified. The local `fate-control-cycle` fixture demonstrates this import path under `fixtures/novel-projects/`; it contains private novel material and is intentionally excluded from this repository.
+
+`npm run check` and `npm run build:frontend` do not require that private fixture. The full `npm run test:novel-domain` suite includes fixture-dependent tests and requires an authorized local copy at `fixtures/novel-projects/fate-control-cycle-sample/`; a fresh clone alone cannot run the full suite. Test scripts are published, but novel manuscripts and temporary application database copies are not.
+
+The current novel workflow adds a filesystem-backed, user-confirmed chapter gate: chapter cards, candidates, proposals, reviews, and deterministic verification reports remain ordinary Markdown; the app only projects their explicit statuses. Users first accept a pending chapter card, then separately accept a candidate manuscript after reading it before they may copy it into a non-existing Canon target while writing `.novel/promotion-log.md`. A matching verification report is visible, auditable evidence rather than an automatic acceptance or promotion trigger. No agent or chat action can promote Canon silently.
+
 ### Recent highlights (v1.0.0)
 
 - Codex-inspired UI polish across chat timeline, composer, and no-project welcome/dashboard flows.

@@ -39,3 +39,7 @@ yarn-error.log*
 # Temporary
 *.tmp
 *.temp
+
+# Private local novel sample and temporary application database copies
+/fixtures/novel-projects/fate-control-cycle-sample/
+/tmp-leveldb-read/

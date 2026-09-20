@@ -25,6 +25,7 @@ interface RenderComposerControlsViewParams {
 	currentModelDisplay: string;
 	currentProviderDisplay: string;
 	modelPickerOpen: boolean;
+	thinkingPickerOpen: boolean;
 	loadingModels: boolean;
 	loadingModelCatalog: boolean;
 	providerGroups: ModelPickerProviderGroup[];
@@ -41,6 +42,8 @@ interface RenderComposerControlsViewParams {
 	onSetModelPickerActiveProvider: (provider: string) => void;
 	onProviderAuthAction: (provider: string, action: "login" | "logout") => void | Promise<unknown>;
 	onSelectModel: (provider: string, modelId: string) => void | Promise<unknown>;
+	onCloseThinkingPicker: () => void;
+	onToggleThinkingPicker: () => void;
 	onSetThinkingLevel: (value: ThinkingLevel) => void | Promise<unknown>;
 	onAbort: () => void | Promise<unknown>;
 	onSend: () => void | Promise<unknown>;
@@ -62,6 +65,7 @@ export function renderComposerControlsView({
 	currentModelDisplay,
 	currentProviderDisplay,
 	modelPickerOpen,
+	thinkingPickerOpen,
 	loadingModels,
 	loadingModelCatalog,
 	providerGroups,
@@ -78,6 +82,8 @@ export function renderComposerControlsView({
 	onSetModelPickerActiveProvider,
 	onProviderAuthAction,
 	onSelectModel,
+	onCloseThinkingPicker,
+	onToggleThinkingPicker,
 	onSetThinkingLevel,
 	onAbort,
 	onSend,
@@ -217,22 +223,59 @@ export function renderComposerControlsView({
 						: nothing}
 				</div>
 
-				<div class="thinking-select-wrap" title="Reasoning effort · Shift+Tab to cycle">
-					<span class="thinking-select-label">${thinkingLabel}</span>
-					<select
-						class="thinking-select-native"
-						.value=${thinkingValue}
+				<div
+					class="thinking-picker-root"
+					@keydown=${(event: KeyboardEvent) => {
+						if (event.key !== "Escape") return;
+						event.preventDefault();
+						onCloseThinkingPicker();
+					}}
+					@focusout=${(event: FocusEvent) => {
+						const next = event.relatedTarget as Node | null;
+						const root = event.currentTarget as HTMLElement;
+						if (!next || !root.contains(next)) onCloseThinkingPicker();
+					}}
+				>
+					<button
+						type="button"
+						class="thinking-picker-trigger"
+						title="思考强度 · Shift+Tab 可切换"
 						?disabled=${interactionLocked || settingThinking}
-						@change=${(event: Event) => void onSetThinkingLevel((event.target as HTMLSelectElement).value as ThinkingLevel)}
+						@click=${() => {
+							if (!interactionLocked && !settingThinking) onToggleThinkingPicker();
+						}}
 					>
-						<option value="off">off</option>
-						<option value="minimal">minimal</option>
-						<option value="low">low</option>
-						<option value="medium">medium</option>
-						<option value="high">high</option>
-						<option value="xhigh">xhigh</option>
-					</select>
-					<span class="thinking-select-caret">▾</span>
+						<span class="thinking-picker-spark" aria-hidden="true">✦</span>
+						<span>${thinkingLabel}</span>
+						<span class="composer-select-caret">▾</span>
+					</button>
+					${thinkingPickerOpen
+						? html`
+							<div class="thinking-picker-popover" role="listbox" aria-label="思考强度">
+								${([
+									["off", "关闭"],
+									["minimal", "极低"],
+									["low", "低"],
+									["medium", "中"],
+									["high", "高"],
+									["xhigh", "极高"],
+								] as const).map(([value, label]) => html`
+									<button
+										type="button"
+										class="thinking-picker-option ${thinkingValue === value ? "active" : ""}"
+										role="option"
+										aria-selected=${String(thinkingValue === value)}
+										@click=${() => {
+											onCloseThinkingPicker();
+											if (thinkingValue !== value) void onSetThinkingLevel(value);
+										}}
+									>
+										<span>${label}</span>${thinkingValue === value ? html`<span aria-hidden="true">✓</span>` : nothing}
+									</button>
+								`)}
+							</div>
+						`
+						: nothing}
 				</div>
 			</div>
 

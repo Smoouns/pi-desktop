@@ -1,0 +1,9 @@
+{
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": "http://localhost:1420/scripts/memory-preview.html?native=1"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "Pi Desktop Memory Test", "width": 1050, "height": 750, "decorations": true }]
+  }
+}

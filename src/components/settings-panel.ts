@@ -1765,9 +1765,6 @@ export class SettingsPanel {
 						<div class="settings-view-title-wrap">
 							<div class="settings-view-title">Appearance</div>
 						</div>
-						<div class="settings-view-header-actions">
-							<button class="settings-back-btn" @click=${() => this.close()}>← Back</button>
-						</div>
 					</div>
 					<div class="settings-view-body">
 						<div class="settings-view-grid">
@@ -2182,17 +2179,17 @@ export class SettingsPanel {
 
 		try {
 			const template = html`
-				<div class="settings-view-root">
+				<div class="settings-modal-backdrop" @click=${() => this.close()}>
+				<div class="settings-view-root settings-modal" role="dialog" aria-modal="true" aria-label="设置" @click=${(event: Event) => event.stopPropagation()}>
 					<div class="settings-view-header">
-						<div class="settings-view-title-wrap">
-							<div class="settings-view-title">${activeItem?.label ?? "Settings"}</div>
-						</div>
-						<div class="settings-view-header-actions">
-							<button class="settings-back-btn" @click=${() => this.close()}>← Back</button>
-						</div>
+						<div class="settings-view-title-wrap"><div class="settings-view-title">设置</div><div class="settings-view-meta">${activeItem?.label ?? "通用"}</div></div>
+						<button class="settings-modal-close" title="关闭设置" @click=${() => this.close()}>×</button>
 					</div>
 
 					<div class="settings-view-body settings-view-body-flat">
+						<nav class="settings-modal-nav" aria-label="设置分类">
+							${navigation.items.map((item) => html`<button class=${item.id === activeSection ? "active" : ""} ?disabled=${item.disabled} @click=${() => this.setActiveSection(item.id)}><span>${item.label}</span><small>${item.description}</small></button>`)}
+						</nav>
 						<section class="settings-main" aria-live="polite">
 							<div class="settings-main-content settings-main-content-flat">
 								${this.renderActiveSectionSafe(activeSection, runtimeControlsEnabled, hasProjectContext, authProviders, compatibilityChecks)}
@@ -2200,6 +2197,7 @@ export class SettingsPanel {
 						</section>
 					</div>
 					${this.renderCreateThemeDialog()}
+				</div>
 				</div>
 			`;
 

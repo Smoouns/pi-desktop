@@ -227,7 +227,7 @@ export function handleComposerKeyDownEvent({
 	}
 	if (event.key === "Enter" && !event.shiftKey) {
 		event.preventDefault();
-		if (!hasSelectedSkillDraft && slashQueryFromInput() !== null) {
+		if (slashQueryFromInput() !== null) {
 			void onExecuteSlashCommandFromComposer();
 			return;
 		}

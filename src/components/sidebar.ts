@@ -5,8 +5,12 @@
 import { html, nothing, render, type TemplateResult } from "lit";
 import { clearActiveDraggedFilePaths, setActiveDraggedFilePaths } from "./file-drag-transfer.js";
 import { EMOJI_CATALOG } from "./workspace-tabs.js";
+import type { NovelWorkflowAction } from "./novel-workflow-dialog.js";
+import { initializeNovelProject, inspectChapterWorkflow, loadNovelProject, resolveNextWorkflowChapter, scanNovelDocuments, type NovelChapterRecord, type NovelDocument, type NovelProject } from "../novel/index.js";
+import type { NovelAgentTask as NovelAgentTaskType } from "../novel/agents.js";
 
-export type SidebarMode = "projects" | "files";
+export type SidebarMode = "projects" | "files" | "novel" | "review";
+export type NovelAgentTask = NovelAgentTaskType;
 
 export interface SidebarWorkspaceItem {
 	id: string;
@@ -131,6 +135,34 @@ function joinFsPath(base: string, name: string): string {
 	const sep = base.includes("\\") ? "\\" : "/";
 	const normalizedBase = base.replace(/[\\/]+$/, "");
 	return `${normalizedBase}${sep}${name}`;
+}
+
+function chapterNumber(value: string): number {
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isMissingChapterCard(record: NovelChapterRecord): boolean {
+	return record.reasons.some((reason) => reason.startsWith("Missing chapter card:"));
+}
+
+function isMissingChapterArchitecture(record: NovelChapterRecord): boolean {
+	return !record.architectureRegistered;
+}
+
+function hasPlanningContractFailure(record: NovelChapterRecord): boolean {
+	return record.reasons.some((reason) => /^(?:Missing chapter architecture|Missing chapter card|Invalid chapter card contract:)/.test(reason));
+}
+
+function planningContractMessage(record: NovelChapterRecord): string {
+	if (record.reasons.some((reason) => /expected exactly one fenced YAML document/i.test(reason))) {
+		return "章节卡格式不符合验证合同：整张任务卡只能有一个 yaml 代码块，required_scenes 等机器字段也必须放在其中。";
+	}
+	return "章节规划合同未完成，需由规划 Agent 修复章节架构或章节卡。";
+}
+
+function requiresWriterVerification(record: NovelChapterRecord): boolean {
+	return Boolean(record.candidatePath) && !hasPlanningContractFailure(record) && record.verification !== "pass" && record.verification !== "pass-with-warnings";
 }
 
 function parentFsPath(path: string): string {
@@ -263,6 +295,10 @@ export class Sidebar {
 	private storageKey = workspaceStorageKey("workspace_default");
 
 	private fileTrees = new Map<string, FileNode[]>();
+	private novelProjects = new Map<string, { project: NovelProject | null; documents: NovelDocument[]; workflow: NovelChapterRecord[]; active: NovelChapterRecord | null; loading: boolean; error: string | null }>();
+	private collapsedNovelSections = new Set<string>();
+	private reviewChapterOverride: string | null = null;
+	private reviewHistoryOpen = false;
 	private fileTreeErrors = new Map<string, string>();
 	private loadingFileTreeForProject = new Set<string>();
 	private sessionLoadsInFlight = new Map<string, Promise<void>>();
@@ -305,6 +341,9 @@ export class Sidebar {
 	private newFilePlacementHint: { projectId: string; anchorPath: string; newPath: string; expiresAt: number } | null = null;
 	private onFileOpen: ((projectId: string, filePath: string) => void) | null = null;
 	private onFileDelete: ((projectId: string, filePath: string) => void) | null = null;
+	private onNovelPromote: ((project: { id: string; name: string; path: string }, record: NovelChapterRecord, action: NovelWorkflowAction) => void) | null = null;
+	private onNovelAgentTask: ((project: { id: string; name: string; path: string }, task: NovelAgentTask) => void) | null = null;
+	private onWorldChange: ((project: { id: string; name: string; path: string }) => void) | null = null;
 	private onModeChange: ((mode: SidebarMode) => void) | null = null;
 	private onSettingsNavSelect: ((id: string) => void) | null = null;
 	private onCollapsedChange: ((collapsed: boolean) => void) | null = null;
@@ -543,6 +582,18 @@ export class Sidebar {
 		this.onFileDelete = cb;
 	}
 
+	setOnNovelPromote(cb: (project: { id: string; name: string; path: string }, record: NovelChapterRecord, action: NovelWorkflowAction) => void): void {
+		this.onNovelPromote = cb;
+	}
+
+	setOnNovelAgentTask(cb: (project: { id: string; name: string; path: string }, task: NovelAgentTask) => void): void {
+		this.onNovelAgentTask = cb;
+	}
+
+	setOnWorldChange(cb: (project: { id: string; name: string; path: string }) => void): void {
+		this.onWorldChange = cb;
+	}
+
 	setOnModeChange(cb: (mode: SidebarMode) => void): void {
 		this.onModeChange = cb;
 	}
@@ -659,13 +710,19 @@ export class Sidebar {
 	}
 
 	setMode(mode: SidebarMode): void {
-		if (this.mode === mode) return;
+		const leavingSettings = this.settingsShellActive;
+		if (this.mode === mode && !leavingSettings) return;
+		if (leavingSettings) this.onOpenSettings?.();
 		this.mode = mode;
 		this.query = "";
 		this.modeFilterMenuOpen = false;
 		this.cancelProjectPointerDrag(false);
 		this.clearInlineDrafts();
 		this.closeContextMenu(false);
+		if (mode !== "review") {
+			this.reviewChapterOverride = null;
+			this.reviewHistoryOpen = false;
+		}
 		if (mode === "files") {
 			const expandedProjects = this.projects.filter((project) => project.expanded);
 			if (expandedProjects.length === 0) {
@@ -676,6 +733,7 @@ export class Sidebar {
 				});
 			}
 		}
+		if (mode === "novel" || mode === "review") void this.ensureNovelForActiveProject(true);
 		this.render();
 		this.onModeChange?.(mode);
 	}
@@ -691,6 +749,303 @@ export class Sidebar {
 
 	listProjects(): Array<{ id: string; name: string; path: string }> {
 		return this.projects.map((project) => ({ id: project.id, name: project.name, path: project.path }));
+	}
+
+	private async ensureNovelForActiveProject(force = false): Promise<void> {
+		const active = this.getActiveProject();
+		if (!active) return;
+		const current = this.novelProjects.get(active.id);
+		if (!force && current && !current.error && !current.loading) return;
+		this.novelProjects.set(active.id, { project: current?.project ?? null, documents: current?.documents ?? [], workflow: current?.workflow ?? [], active: current?.active ?? null, loading: true, error: null });
+		this.render();
+		try {
+			const project = await loadNovelProject(active.path);
+			const documents = project ? await scanNovelDocuments(project) : [];
+			const chapters = [...new Set(documents.filter((doc) => /chapter-cards\/\d+\.md$/i.test(doc.relativePath)).map((doc) => /chapter-cards\/(\d+)\.md$/i.exec(doc.relativePath)?.[1]).filter((chapter): chapter is string => Boolean(chapter)))].sort();
+			const workflow = project ? await Promise.all(chapters.map((chapter) => inspectChapterWorkflow(project, documents, chapter))) : [];
+			const activeWorkflow = project ? await this.resolveActiveNovelWorkflow(project, documents, workflow) : null;
+			this.novelProjects.set(active.id, { project, documents, workflow, active: activeWorkflow, loading: false, error: null });
+		} catch (err) {
+			this.novelProjects.set(active.id, { project: null, documents: [], workflow: [], active: null, loading: false, error: err instanceof Error ? err.message : String(err) });
+		}
+		this.render();
+	}
+
+	private async resolveActiveNovelWorkflow(project: NovelProject, documents: NovelDocument[], workflow: NovelChapterRecord[]): Promise<NovelChapterRecord> {
+		const nextChapter = resolveNextWorkflowChapter(workflow);
+		const existingRecord = workflow.find((record) => record.chapter === nextChapter && record.state !== "promoted");
+		return existingRecord ?? inspectChapterWorkflow(project, documents, nextChapter);
+	}
+
+	private async initializeActiveNovelProject(): Promise<void> {
+		const active = this.getActiveProject();
+		if (!active) return;
+		try {
+			await initializeNovelProject(active.path, active.name);
+			await this.ensureNovelForActiveProject(true);
+		} catch (err) {
+			window.alert(err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	private toggleNovelSection(section: string): void {
+		if (this.collapsedNovelSections.has(section)) this.collapsedNovelSections.delete(section);
+		else this.collapsedNovelSections.add(section);
+		this.render();
+	}
+
+	private renderNovelSectionChevron(collapsed: boolean): TemplateResult {
+		return html`
+			<span class="novel-section-chevron" aria-hidden="true">
+				<svg viewBox="0 0 16 16"><path d=${collapsed ? "M6 3.5 10.5 8 6 12.5" : "m3.5 6 4.5 4 4.5-4"}></path></svg>
+			</span>
+		`;
+	}
+
+	private renderNovelMode(): TemplateResult {
+		const active = this.getActiveProject();
+		if (!active) return html`<div class="sidebar-empty">请先打开一个项目，再浏览小说文件。</div>`;
+		const state = this.novelProjects.get(active.id);
+		if (!state || state.loading) return html`<div class="sidebar-empty">正在读取小说项目…</div>`;
+		if (state.error) return html`<div class="sidebar-empty">无法读取小说项目。<br /><small>${state.error}</small></div>`;
+		if (!state.project) {
+			return html`
+				<div class="novel-initialize-card">
+					<div class="novel-initialize-title">${active.name} is not initialized</div>
+					<div class="novel-initialize-copy">仅创建缺失的小说目录和元数据，现有文件不会被修改。</div>
+					<button class="sidebar-primary-action" @click=${() => void this.initializeActiveNovelProject()}>初始化为小说项目</button>
+				</div>
+			`;
+		}
+		const labels: Record<string, string> = { manuscript: "Manuscript / Chapters", canon: "Canon", planning: "Planning", drafts: "Drafts & History", craft: "Craft", notes: "Notes", memory: "Memory" };
+		const categories = ["manuscript", "canon", "planning", "drafts", "craft", "notes", "memory"];
+		const latestWorkflow = state.active;
+		const projectContextPaths = [
+			state.project.config.authority?.currentState,
+			state.project.config.authority?.continuityLedger,
+			state.project.config.authority?.canonicalTextIndex,
+		].filter((path): path is string => Boolean(path && state.documents.some((document) => document.relativePath === path)));
+		const workflowStateLabels: Partial<Record<NovelChapterRecord["state"], string>> = {
+			"awaiting-card-review": "待确认章节卡",
+			"card-revision-requested": "章节卡待返工",
+			planned: "待起草",
+			"awaiting-user-review": "等待确认",
+			"manuscript-revision-requested": "正文待返工",
+			accepted: "已接受",
+			blocked: "已阻止",
+		};
+		const workflowReasonLabel = (reason: string): string => ({
+			"Missing chapter architecture: planning/chapter-architecture.md": "未找到章节架构；请由规划 Agent 建立。",
+			"No proposed candidate manuscript found.": "未找到候选正文。",
+			"No continuity proposal found; promotion will not update associated records.": "未找到连续性提案；晋升时不会更新关联记录。",
+			"A user revision request is open for the chapter card.": "章节卡已有待处理的返工请求。",
+			"A user revision request is open for the candidate manuscript.": "正文已有待处理的返工请求。",
+		})[reason] ?? (reason.startsWith("Missing chapter architecture registration:") ? "章节尚未登记到章节架构；请由规划 Agent 先完成登记。" : reason);
+		return html`
+			<div class="novel-navigator">
+				<div class="novel-project-header">
+					<div class="novel-project-caption">${state.project.config.name || active.name}</div>
+					<div class="novel-project-actions"><button class="novel-agent-launch-button" title="切换到世界观 Agent" @click=${() => this.onNovelAgentTask?.(active, { role: "world", kind: "world-discussion", contextPaths: projectContextPaths })}>世界观 Agent</button><button class="novel-world-change-button" title="提出并审阅 Canon 世界观变更" @click=${() => this.onWorldChange?.(active)}>世界观变更</button></div>
+				</div>
+				${latestWorkflow ? (() => {
+					const sectionKey = "workflow";
+					const collapsed = this.collapsedNovelSections.has(sectionKey);
+					return html`
+						<section class="novel-workflow-section">
+							<button class="novel-category-heading novel-section-toggle" aria-expanded=${String(!collapsed)} @click=${() => this.toggleNovelSection(sectionKey)}>
+								<span>章节验收</span>${this.renderNovelSectionChevron(collapsed)}
+							</button>
+							<div class="novel-section-content ${collapsed ? "collapsed" : ""}" ?inert=${collapsed} aria-hidden=${String(collapsed)}><div class="novel-section-content-inner">
+							${(() => {
+								const record = latestWorkflow;
+								const openWorkflow = () => this.setMode("review");
+								return html`<section class="novel-workflow-card novel-workflow-card-clickable" role="button" tabindex="0" aria-label=${`查看第 ${record.chapter} 章验收`} @click=${openWorkflow} @keydown=${(event: KeyboardEvent) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openWorkflow(); } }}>
+									<div class="novel-workflow-title"><span>第 ${record.chapter} 章</span><span class="novel-document-meta ${isMissingChapterCard(record) ? "planned" : record.state}">${isMissingChapterCard(record) ? "待规划" : workflowStateLabels[record.state] ?? record.state}</span></div>
+									${isMissingChapterArchitecture(record) ? html`<div class="novel-workflow-detail">章节架构尚未登记，等待规划 Agent 完成前置合同。</div>` : isMissingChapterCard(record) ? html`<div class="novel-workflow-detail">尚未创建章节卡，等待规划 Agent 准备下一章。</div>` : nothing}
+									${record.candidatePath ? html`<div class="novel-workflow-detail">候选正文已就绪${record.manuscriptAcceptance ? " · 已绑定人工验收" : ""}</div>` : nothing}
+									${record.reasons.map((reason) => html`<div class="novel-workflow-detail">${workflowReasonLabel(reason)}</div>`)}
+								</section>`;
+							})()}
+							</div></div>
+						</section>
+					`;
+				})() : nothing}
+				${categories.map((category) => {
+					const documents = state.documents.filter((doc) => doc.category === category);
+					const sectionKey = `category:${category}`;
+					const collapsed = this.collapsedNovelSections.has(sectionKey);
+					return html`
+						<section class="novel-category">
+							<button class="novel-category-heading novel-section-toggle" aria-expanded=${String(!collapsed)} @click=${() => this.toggleNovelSection(sectionKey)}>
+								<span>${labels[category]}</span><span class="novel-category-count">${documents.length}</span>${this.renderNovelSectionChevron(collapsed)}
+							</button>
+							<div class="novel-section-content ${collapsed ? "collapsed" : ""}" ?inert=${collapsed} aria-hidden=${String(collapsed)}><div class="novel-section-content-inner novel-document-list">
+							${documents.length === 0 ? html`<div class="novel-category-empty">暂无文件</div>` : documents.map((doc) => {
+								const activeDocument = normalizePath(doc.path) === this.activeFilePath;
+								return html`
+								<button
+									class="novel-document-row ${activeDocument ? "active" : ""}"
+									title=${doc.relativePath}
+									@click=${() => {
+										this.activeFilePath = normalizePath(doc.path);
+										this.render();
+										this.onFileOpen?.(active.id, doc.path);
+									}}
+								>
+									<span class="novel-document-name">${doc.name}</span><span class="novel-document-meta ${doc.classification.authority}">${doc.classification.authority}</span>
+								</button>
+								`;
+							})}
+							</div></div>
+						</section>
+					`;
+				})}
+			</div>
+		`;
+	}
+
+	private renderNovelReviewMode(): TemplateResult {
+		const active = this.getActiveProject();
+		if (!active) return html`<div class="sidebar-empty">请选择小说项目。</div>`;
+		const state = this.novelProjects.get(active.id);
+		if (!state || state.loading) return html`<div class="sidebar-empty">正在读取章节验收…</div>`;
+		if (state.error) return html`<div class="sidebar-empty">无法读取章节验收。<br /><small>${state.error}</small></div>`;
+		if (!state.project) return html`<div class="sidebar-empty">当前项目尚未初始化为小说项目。</div>`;
+		const activeRecord = state.active;
+		const selectedRecord = this.reviewChapterOverride ? state.workflow.find((entry) => entry.chapter === this.reviewChapterOverride) ?? null : null;
+		const record = selectedRecord ?? activeRecord;
+		if (!record) return html`<div class="sidebar-empty">尚未找到章节卡。</div>`;
+		const viewingHistory = Boolean(selectedRecord && activeRecord && selectedRecord.chapter !== activeRecord.chapter);
+		const historyRecords = [...state.workflow].sort((left, right) => chapterNumber(right.chapter) - chapterNumber(left.chapter));
+		const placeholder = isMissingChapterCard(record);
+		const stateLabel: Partial<Record<NovelChapterRecord["state"], string>> = {
+			"awaiting-card-review": "待确认章节卡", "card-revision-requested": "章节卡待返工", planned: "待起草",
+			"awaiting-user-review": "等待确认", "manuscript-revision-requested": "正文待返工", accepted: "已接受", promoted: "已晋升", blocked: "已阻止",
+		};
+		const reasonLabel = (reason: string): string => ({
+			"Missing chapter architecture: planning/chapter-architecture.md": "未找到章节架构；请由规划 Agent 建立。",
+			"No proposed candidate manuscript found.": "未找到候选正文。",
+			"No continuity proposal found; promotion will not update associated records.": "未找到连续性提案。",
+			"A user revision request is open for the chapter card.": "章节卡已有待处理的返工请求。",
+			"A user revision request is open for the candidate manuscript.": "正文已有待处理的返工请求。",
+		})[reason] ?? (reason.startsWith("Missing chapter architecture registration:") ? "章节尚未登记到章节架构；请由规划 Agent 先完成登记。" : reason);
+		const openDocument = (relativePath: string | null, openable = true): void => {
+			if (!relativePath || !openable) return;
+			const document = state.documents.find((entry) => entry.relativePath === relativePath);
+			if (!document) return;
+			this.activeFilePath = normalizePath(document.path);
+			this.render();
+			this.onFileOpen?.(active.id, document.path);
+		};
+		const fileRow = (label: string, relativePath: string | null, openable = true): TemplateResult | typeof nothing => {
+			if (!relativePath) return nothing;
+			const available = Boolean(state.documents.find((entry) => entry.relativePath === relativePath));
+			const canOpen = openable && available;
+			return html`<button class="novel-review-file" ?disabled=${!canOpen} title=${canOpen ? `在编辑器中打开 ${relativePath}` : relativePath} @click=${() => openDocument(relativePath, canOpen)}><span>${label}</span><code>${relativePath}</code></button>`;
+		};
+		const previousRecord = [...state.workflow]
+			.filter((entry) => chapterNumber(entry.chapter) < chapterNumber(record.chapter))
+			.sort((left, right) => chapterNumber(right.chapter) - chapterNumber(left.chapter))[0] ?? null;
+		const contextPaths = [
+			previousRecord?.canonicalPath,
+			previousRecord?.proposalPath,
+			state.project.config.authority?.currentState,
+			state.project.config.authority?.continuityLedger,
+			state.project.config.authority?.canonicalTextIndex,
+		].filter((path): path is string => Boolean(path && state.documents.some((document) => document.relativePath === path)));
+		return html`
+			<div class="novel-review-panel">
+				<div class="novel-project-caption">${state.project.config.name || active.name}</div>
+				<div class="novel-review-toolbar">
+					<div class="novel-review-toolbar-title">章节验收${viewingHistory ? html`<span class="novel-review-history-badge">正在查看历史</span>` : nothing}</div>
+					<button class="novel-review-history-toggle" aria-expanded=${String(this.reviewHistoryOpen)} @click=${() => { this.reviewHistoryOpen = !this.reviewHistoryOpen; this.render(); }}>章节历史 <span>${historyRecords.length}</span></button>
+				</div>
+				${this.reviewHistoryOpen ? html`
+					<div class="novel-review-history" aria-label="章节历史">
+						${activeRecord ? html`<button class="novel-review-history-item ${!viewingHistory ? "active" : ""}" @click=${() => { this.reviewChapterOverride = null; this.reviewHistoryOpen = false; this.render(); }}><span>当前推进线 · 第 ${activeRecord.chapter} 章</span><small>${isMissingChapterCard(activeRecord) ? "待规划" : stateLabel[activeRecord.state] ?? activeRecord.state}</small></button>` : nothing}
+						${historyRecords.map((entry) => html`<button class="novel-review-history-item ${entry.chapter === record.chapter ? "active" : ""}" @click=${() => { this.reviewChapterOverride = entry.chapter; this.reviewHistoryOpen = false; this.render(); }}><span>第 ${entry.chapter} 章</span><small>${stateLabel[entry.state] ?? entry.state}</small></button>`)}
+					</div>
+				` : nothing}
+				<section class="novel-review-chapter">
+					<div class="novel-workflow-title"><span>第 ${record.chapter} 章</span><span class="novel-document-meta ${placeholder ? "planned" : record.state}">${placeholder ? "待规划" : stateLabel[record.state] ?? record.state}</span></div>
+					${placeholder ? html`<div class="novel-review-empty-state"><strong>尚未创建章节卡</strong><span>下一章的规划输入将来自上一章 Canon、Continuity Proposal、当前故事状态和相关事件纲要。</span></div>` : nothing}
+					${hasPlanningContractFailure(record) ? html`<div class="novel-workflow-detail">${planningContractMessage(record)}</div>` : nothing}
+					${record.reasons.map((reason) => html`<div class="novel-workflow-detail">${reasonLabel(reason)}</div>`)}
+				</section>
+				<section class="novel-review-files" aria-label="关联文件">
+					<div class="novel-review-section-title">关联文件</div>
+					${fileRow("章节卡", record.cardPath)}
+					${fileRow("候选正文", record.candidatePath)}
+					${fileRow("连续性提案", record.proposalPath)}
+					${fileRow(`机械验证报告 · ${({ pass: "PASS", "pass-with-warnings": "有警告", failed: "失败", missing: "缺失" } as const)[record.verification]}`, record.verificationPath)}
+					${fileRow(record.state === "promoted" ? "当前 Canon" : "新 Canon 目标", record.canonicalPath, record.state === "promoted")}
+					${fileRow("章节卡返工请求", record.cardRevisionRequestPath)}
+					${fileRow("正文返工请求", record.manuscriptRevisionRequestPath)}
+				</section>
+				<section class="novel-review-actions" aria-label="验收操作">
+					${isMissingChapterArchitecture(record) || placeholder ? html`
+						<button class="sidebar-primary-action" @click=${() => this.onNovelAgentTask?.(active, { role: "plan", kind: "plan-chapter", chapter: record.chapter, contextPaths })}>开始第 ${record.chapter} 章规划</button>
+						<span class="novel-review-status">规划 Agent 会先登记章节架构，再建立或补全章节卡；检查后再发送。</span>
+					` : nothing}
+					${hasPlanningContractFailure(record) ? html`
+						<button class="sidebar-primary-action" @click=${() => this.onNovelAgentTask?.(active, {
+							role: "plan",
+							kind: "plan-chapter",
+							chapter: record.chapter,
+							contextPaths: [...contextPaths, record.architecturePath, record.cardPath, record.verificationPath].filter((path, index, paths): path is string => Boolean(path) && paths.indexOf(path) === index),
+							instruction: "机械验证在章节规划合同层失败。请读取验证报告、章节架构和章节卡，修复规划文件；不得修改候选正文。章节卡只能保留一个 yaml fenced block，所有机器字段必须在其中。完成后将 approval_status 设为 PROPOSED_PENDING_USER_ACCEPTANCE，停下等待用户重新确认。",
+						})}>交给规划 Agent 修复合同</button>
+						<span class="novel-review-status">写作 Agent 已停止；此修复会使章节卡重新进入人工确认。</span>
+					` : nothing}
+					${record.state === "awaiting-card-review" ? html`<button class="sidebar-primary-action" @click=${() => this.onNovelPromote?.(active, record, "accept-card")}>确认章节卡</button><button class="sidebar-secondary-action" @click=${() => this.onNovelPromote?.(active, record, "request-card-revision")}>需要修改章节卡</button>` : nothing}
+					${record.state === "awaiting-user-review" && !requiresWriterVerification(record) ? html`
+						<button class="sidebar-primary-action" @click=${() => this.onNovelPromote?.(active, record, "accept-manuscript")}>确认正文通过验收</button>
+						<div class="novel-review-secondary-actions">
+							<button class="sidebar-secondary-action" @click=${() => this.onNovelPromote?.(active, record, "request-manuscript-revision")}>需要修改正文</button>
+							${record.cardAccepted ? html`<button class="sidebar-secondary-action" @click=${() => this.onNovelPromote?.(active, record, "request-card-revision")}>需要修改章节卡</button>` : nothing}
+						</div>
+					` : nothing}
+					${record.state === "accepted" ? html`<button class="sidebar-primary-action" @click=${() => this.onNovelPromote?.(active, record, "promote")}>晋升至 Canon</button>` : nothing}
+					${record.cardAccepted && record.state !== "promoted" && record.state !== "card-revision-requested" && record.state !== "awaiting-user-review" ? html`<button class="sidebar-secondary-action" @click=${() => this.onNovelPromote?.(active, record, "request-card-revision")}>需要修改章节卡</button>` : nothing}
+					${record.state === "promoted" && record.rollbackHistory ? html`<button class="sidebar-secondary-action novel-rollback-action" @click=${() => this.onNovelPromote?.(active, record, "rollback")}>回滚本次晋升</button>` : nothing}
+					${record.state === "card-revision-requested" ? html`
+						<button class="sidebar-primary-action" @click=${() => this.onNovelAgentTask?.(active, {
+							role: "plan",
+							kind: "review-card",
+							chapter: record.chapter,
+							contextPaths: [...contextPaths, record.cardRevisionRequestPath].filter((path, index, paths): path is string => Boolean(path) && paths.indexOf(path) === index),
+							instruction: "请读取已有的章节卡返工请求，继续处理这次返工。用户已经提交过意见，不要再次创建返工请求；完成更新后的章节卡后停下，等待用户重新确认。",
+						})}>继续章节卡返工</button>
+						<span class="novel-review-status">已有返工请求，可继续唤起规划 Agent 处理。</span>
+					` : nothing}
+					${record.state === "manuscript-revision-requested" ? html`
+						<button class="sidebar-primary-action" @click=${() => this.onNovelAgentTask?.(active, {
+							role: "write",
+							kind: "review-manuscript",
+							chapter: record.chapter,
+							contextPaths: [...contextPaths, record.manuscriptRevisionRequestPath].filter((path, index, paths): path is string => Boolean(path) && paths.indexOf(path) === index),
+							instruction: "请读取已有的正文返工请求，继续处理这次返工。用户已经提交过意见，不要再次创建返工请求；完成更新后的候选正文和必要的连续性提案后停下，等待用户重新验收。",
+						})}>继续正文返工</button>
+						<span class="novel-review-status">已有返工请求，可继续唤起写作 Agent 处理。</span>
+					` : nothing}
+					${record.state === "planned" && !hasPlanningContractFailure(record) ? html`
+						<button class="sidebar-primary-action" @click=${() => this.onNovelAgentTask?.(active, { role: "write", kind: "write-chapter", chapter: record.chapter, contextPaths: [...contextPaths, record.cardPath].filter((path, index, paths) => paths.indexOf(path) === index) })}>开始第 ${record.chapter} 章写作</button>
+						<span class="novel-review-status">写作 Agent 将读取已确认章节卡和必要上下文，生成候选正文。</span>
+					` : nothing}
+					${requiresWriterVerification(record) ? html`
+						<button class="sidebar-primary-action" @click=${() => this.onNovelAgentTask?.(active, {
+							role: "write",
+							kind: "write-chapter",
+							chapter: record.chapter,
+							contextPaths: [...contextPaths, record.cardPath, record.candidatePath, record.proposalPath, record.verificationPath].filter((path, index, paths): path is string => Boolean(path) && paths.indexOf(path) === index),
+							instruction: "章节卡合同现已满足，但候选正文尚无当前 PASS 验证。请重读章节卡和候选正文，按需修订正文与 Continuity Proposal，然后调用 verify_chapter。验证通过后停下等待用户人工验收。",
+						})}>交给写作 Agent 重新验证</button>
+						<span class="novel-review-status">候选正文未绑定当前 PASS 验证，暂不能人工验收。</span>
+					` : nothing}
+					${record.state === "blocked" ? html`<span class="novel-review-status">当前条件不足，无法执行晋升。</span>` : nothing}
+				</section>
+			</div>
+		`;
 	}
 
 	getProjectById(projectId: string | null | undefined): { id: string; name: string; path: string } | null {
@@ -936,6 +1291,12 @@ export class Sidebar {
 		const active = this.getActiveProject();
 		if (!active) return;
 		void this.ensureFileTreeForProject(active.id, forceReload);
+	}
+
+	refreshActiveNovelProject(): void {
+		const active = this.getActiveProject();
+		if (!active) return;
+		void this.ensureNovelForActiveProject(true);
 	}
 
 	setNewFilePlacementHint(projectId: string, newFilePath: string, anchorPath: string): void {
@@ -1354,6 +1715,10 @@ export class Sidebar {
 			this.triggerNewFileForActiveProject();
 			return;
 		}
+		if (this.mode === "novel") {
+			await this.initializeActiveNovelProject();
+			return;
+		}
 		this.triggerNewSessionForActiveProject();
 	}
 
@@ -1509,6 +1874,12 @@ export class Sidebar {
 		if (this.mode === "files") {
 			void this.ensureFileTreeForProject(project.id);
 		}
+		// Selecting another document also synchronizes the active project. Keep the
+		// already-built explorer snapshot in that case; an explicit refresh remains
+		// available from the explorer toolbar.
+		// A project change must invalidate the novel snapshot so the previous
+		// project's documents cannot remain visible after Explorer navigation.
+		if (this.mode === "novel" || this.mode === "review") void this.ensureNovelForActiveProject(changed);
 		if (!project.sessionsLoaded && !project.loadingSessions) {
 			void this.loadSessionsForProject(project.id);
 		}
@@ -2270,6 +2641,7 @@ export class Sidebar {
 						@dragend=${() => this.handleFileDragEnd()}
 						@click=${() => {
 							clearActiveDraggedFilePaths();
+							this.selectProject(projectId, true);
 							if (node.isDirectory) {
 								void this.toggleDirectory(projectId, node);
 							} else {
@@ -3098,19 +3470,19 @@ export class Sidebar {
 		return html`
 			<div class="sidebar-workspace-switcher" data-tauri-drag-region>
 				<div class="sidebar-workspace-switcher-row" data-tauri-drag-region>
-					<div class="sidebar-window-controls" @click=${(e: Event) => e.stopPropagation()}>
-						<button class="sidebar-window-dot red" title="Close" @click=${(e: Event) => {
-							e.stopPropagation();
-							void this.invokeWindowControl("close");
-						}}></button>
-						<button class="sidebar-window-dot yellow" title="Minimize" @click=${(e: Event) => {
+					<div class="sidebar-window-controls windows-window-controls" aria-hidden="true" @click=${(e: Event) => e.stopPropagation()}>
+						<button class="sidebar-window-button minimize" title="Minimize" @click=${(e: Event) => {
 							e.stopPropagation();
 							void this.invokeWindowControl("minimize");
-						}}></button>
-						<button class="sidebar-window-dot green" title="Maximize" @click=${(e: Event) => {
+						}}>_</button>
+						<button class="sidebar-window-button maximize" title="Maximize" @click=${(e: Event) => {
 							e.stopPropagation();
 							void this.invokeWindowControl("maximize");
-						}}></button>
+						}}>□</button>
+						<button class="sidebar-window-button close" title="Close" @click=${(e: Event) => {
+							e.stopPropagation();
+							void this.invokeWindowControl("close");
+						}}>×</button>
 					</div>
 					<div
 						class="sidebar-workspace-trigger ${this.workspaceMenuOpen ? "open" : ""}"
@@ -3136,18 +3508,13 @@ export class Sidebar {
 						<span class="sidebar-workspace-chevron" aria-hidden="true">${this.workspaceMenuOpen ? "▴" : "▾"}</span>
 					</div>
 					<button
-						class="workspace-sidebar-toggle"
-						title="Collapse sidebar"
+						class="sidebar-workspace-create-compact"
+						title="Create workspace"
 						@click=${(e: Event) => {
 							e.stopPropagation();
-							this.toggleCollapsed();
+							this.openWorkspaceCreateDialog();
 						}}
-					>
-						<svg viewBox="0 0 16 16" aria-hidden="true">
-							<path d="M3 3.5h10v9H3z" />
-							<path d="M6 3.5v9" />
-						</svg>
-					</button>
+					>＋</button>
 				</div>
 				${this.workspaceMenuOpen
 					? html`
@@ -3249,19 +3616,19 @@ export class Sidebar {
 	private renderWorkspaceWindowRow(): TemplateResult {
 		return html`
 			<div class="sidebar-window-row" data-tauri-drag-region>
-				<div class="sidebar-window-controls" @click=${(e: Event) => e.stopPropagation()}>
-					<button class="sidebar-window-dot red" title="Close" @click=${(e: Event) => {
-						e.stopPropagation();
-						void this.invokeWindowControl("close");
-					}}></button>
-					<button class="sidebar-window-dot yellow" title="Minimize" @click=${(e: Event) => {
+				<div class="sidebar-window-controls windows-window-controls" @click=${(e: Event) => e.stopPropagation()}>
+					<button class="sidebar-window-button minimize" title="Minimize" @click=${(e: Event) => {
 						e.stopPropagation();
 						void this.invokeWindowControl("minimize");
-					}}></button>
-					<button class="sidebar-window-dot green" title="Maximize" @click=${(e: Event) => {
+					}}>_</button>
+					<button class="sidebar-window-button maximize" title="Maximize" @click=${(e: Event) => {
 						e.stopPropagation();
 						void this.invokeWindowControl("maximize");
-					}}></button>
+					}}>□</button>
+					<button class="sidebar-window-button close" title="Close" @click=${(e: Event) => {
+						e.stopPropagation();
+						void this.invokeWindowControl("close");
+					}}>×</button>
 				</div>
 				<button
 					class="workspace-sidebar-toggle"
@@ -3689,6 +4056,10 @@ export class Sidebar {
 										title=${project.expanded ? "Collapse" : "Expand"}
 										@click=${(e: Event) => {
 											e.stopPropagation();
+											// The folder affordance is part of selecting a project in the
+											// Explorer. Keeping it expand-only leaves Novel Resources on
+											// the previously selected project.
+											this.selectProject(project.id, true);
 											this.toggleProject(project.id);
 										}}
 									>
@@ -3865,6 +4236,7 @@ export class Sidebar {
 										title=${project.expanded ? "Collapse" : "Expand"}
 										@click=${(e: Event) => {
 											e.stopPropagation();
+											this.selectProject(project.id, true);
 											this.toggleProject(project.id);
 										}}
 									>
@@ -3980,6 +4352,8 @@ export class Sidebar {
 	private renderModeBody(): TemplateResult {
 		if (this.settingsShellActive) return this.renderSettingsShellBody();
 		if (this.mode === "files") return this.renderFilesMode();
+		if (this.mode === "novel") return this.renderNovelMode();
+		if (this.mode === "review") return this.renderNovelReviewMode();
 		return this.renderProjectsMode();
 	}
 
@@ -3994,6 +4368,12 @@ export class Sidebar {
 
 
 	private renderModeIcon(mode: SidebarMode): TemplateResult {
+		if (mode === "review") {
+			return html`<svg class="sidebar-mode-svg" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="2.5" width="10" height="11" rx="1"/><path d="M5.5 5.5h4.5M5.5 8h2.5M5.5 10.5l1.1 1.1L10.8 7.4"/></svg>`;
+		}
+		if (mode === "novel") {
+			return html`<svg class="sidebar-mode-svg" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.2h10v9.6H3z"/><path d="M5.2 5.5h5.6M5.2 8h5.6M5.2 10.5h3.7"/></svg>`;
+		}
 		if (mode === "projects") {
 			return html`
 				<svg class="sidebar-mode-svg" viewBox="0 0 16 16" aria-hidden="true">
@@ -4017,6 +4397,8 @@ export class Sidebar {
 		const modes: Array<{ id: SidebarMode; label: string }> = [
 			{ id: "projects", label: "Sessions" },
 			{ id: "files", label: "Files" },
+			{ id: "novel", label: "Novel" },
+			{ id: "review", label: "Review" },
 		];
 
 		return html`${modes.map(
@@ -4030,7 +4412,6 @@ export class Sidebar {
 
 	render(): void {
 		this.container.classList.toggle("collapsed", this.collapsed);
-		const hasActiveProject = Boolean(this.getActiveProject());
 
 		const template = html`
 			<div
@@ -4112,10 +4493,28 @@ export class Sidebar {
 					if (changed) this.render();
 				}}
 			>
-				${this.renderWorkspaceWindowRow()}
-
+				<nav class="sidebar-activity-rail" aria-label="Views" @dblclick=${() => this.toggleCollapsed()}>
+					${(["projects", "files", "novel", "review"] as SidebarMode[]).map((mode) => html`
+						<button
+							class="sidebar-activity-btn ${!this.settingsShellActive && this.mode === mode ? "active" : ""}"
+							title=${mode === "projects" ? "会话" : mode === "files" ? "文件" : mode === "novel" ? "小说资源" : "章节验收"}
+							@click=${() => this.setMode(mode)}
+						>
+							${this.renderModeIcon(mode)}
+						</button>
+					`)}
+					<div class="sidebar-activity-spacer"></div>
+					<button
+						class="sidebar-activity-btn ${this.settingsShellActive ? "active" : ""}"
+						title=${this.settingsShellActive ? "Return to workspace" : "Settings"}
+						@click=${() => this.onOpenSettings?.()}
+					>
+						<svg class="sidebar-mode-svg" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.6 1.9h2.8l.3 1.5c.4.1.7.3 1 .5l1.4-.6 1.4 2.4-1.1 1c.1.4.1.8 0 1.2l1.1 1-1.4 2.4-1.4-.6c-.3.2-.6.4-1 .5l-.3 1.5H6.6l-.3-1.5c-.4-.1-.7-.3-1-.5l-1.4.6-1.4-2.4 1.1-1a3.8 3.8 0 0 1 0-1.2l-1.1-1 1.4-2.4 1.4.6c.3-.2.6-.4 1-.5z"/><circle cx="8" cy="8" r="2.1"/></svg>
+					</button>
+				</nav>
+				<div class="sidebar-content-column">
 				<div class="sidebar-topbar" data-tauri-drag-region>
-					${this.settingsShellActive ? nothing : this.renderWorkspaceHeader()}
+					${this.settingsShellActive ? nothing : this.renderWorkspaceSwitcher()}
 					${this.settingsShellActive
 						? html`
 							<div class="sidebar-settings-shell-header">
@@ -4144,19 +4543,6 @@ export class Sidebar {
 									</button>
 								`
 								: nothing}
-							<div class="sidebar-top-actions sidebar-top-actions-primary">
-								<button
-									class="sidebar-top-action-btn"
-									title=${this.mode === "files" ? "New file" : "New session"}
-									?disabled=${!hasActiveProject}
-									@click=${() => void this.triggerPrimaryTopAction()}
-								>
-									<span>${this.mode === "files" ? "New file" : "New session"}</span>
-								</button>
-								<button class="sidebar-top-action-btn ${this.packagesOpen ? "active" : ""}" title="Packages" @click=${() => this.onTogglePackages?.()}>
-									<span>Packages</span>
-								</button>
-							</div>
 						`}
 				</div>
 
@@ -4167,20 +4553,17 @@ export class Sidebar {
 					: html`
 						<div class="sidebar-mode-row">
 							<div class="sidebar-mode-meta">
-								<div class="sidebar-mode-current">${this.mode === "projects" ? "Sessions" : "Files"}</div>
-								<div class="sidebar-mode-switch">
-									${this.renderModeSwitch()}
-								</div>
+								<div class="sidebar-mode-current">${this.mode === "review" ? "章节验收" : "资源管理器"}</div>
 							</div>
 							<div class="sidebar-mode-actions">
-								<button class="sidebar-mode-create-btn" title="Add project" @click=${() => void this.handleModeCreateAction()}>
+								${this.mode === "review" ? nothing : html`<button class="sidebar-mode-create-btn" title="Add project" @click=${() => void this.handleModeCreateAction()}>
 									<svg class="sidebar-icon-svg" viewBox="0 0 16 16" aria-hidden="true">
 										<path d="M2.5 4.5h4l1.3 1.5h5.7v5a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z" />
 										<path d="M8 7.2v3.6" />
 										<path d="M6.2 9h3.6" />
 									</svg>
-								</button>
-								<button class="sidebar-mode-filter-btn" title=${this.mode === "projects" ? "Organize sessions" : "Filter files"} @click=${() => this.toggleModeFilterMenu()}>
+								</button>`}
+								<button class="sidebar-mode-filter-btn" title=${this.mode === "projects" ? "Organize sessions" : this.mode === "files" ? "Filter files" : "刷新小说文件"} @click=${() => (this.mode === "novel" || this.mode === "review") ? void this.ensureNovelForActiveProject(true) : this.toggleModeFilterMenu()}>
 									<svg class="sidebar-icon-svg" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4h10"/><path d="M5 8h6"/><path d="M7 12h2"/></svg>
 								</button>
 								${this.renderModeFilterMenu()}
@@ -4192,8 +4575,6 @@ export class Sidebar {
 					${this.renderModeBody()}
 				</div>
 
-				<div class="sidebar-footer">
-					${this.renderWorkspaceDock()}
 				</div>
 
 				${this.renderWorkspaceEmojiPicker()}

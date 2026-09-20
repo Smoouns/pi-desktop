@@ -44,6 +44,16 @@
 				"$HOME/**/.*/**"
 			]
 		},
+		"fs:read-all",
+		"fs:write-all",
+		{
+			"identifier": "fs:scope",
+			"allow": [
+				"D:/PycharmProjects/**",
+				"D:/PycharmProjects/**/.*",
+				"D:/PycharmProjects/**/.*/**"
+			]
+		},
 		"dialog:default",
 		"dialog:allow-open",
 		"notification:default",

@@ -42,6 +42,14 @@ interface MapBackendMessagesParams {
 	extractToolOutput: (payload: unknown) => string;
 }
 
+/** Remove desktop-only context envelopes from persisted user messages before rendering. */
+export function stripNovelContextForDisplay(text: string): string {
+	return text
+		.replace(/\s*<novel-context>\s*[\s\S]*?<\/novel-context>\s*/gi, "\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
 function pickNumber(source: Record<string, unknown>, paths: string[]): number | null {
 	for (const key of paths) {
 		const value = source[key];
@@ -72,7 +80,7 @@ export function mapBackendMessages({
 
 		switch (role) {
 			case "user": {
-				const text = extractText(raw.content);
+				const text = stripNovelContextForDisplay(extractText(raw.content));
 				const attachments = extractImages(raw.content);
 				mapped.push({
 					id: createId("user"),
@@ -212,6 +220,7 @@ export function mapBackendMessages({
 			}
 			case "custom": {
 				const customType = typeof raw.customType === "string" ? raw.customType : "custom";
+				if (raw.display === false || customType === "novel-request-context") break;
 				const content = extractText(raw.content);
 				mapped.push({
 					id: createId("custom"),

@@ -9,6 +9,7 @@ interface SendMessageFlowParams<ImageItem> {
 	bindingStatusText: string | null;
 	isComposerInteractionLocked: () => boolean;
 	inputText: string;
+	displayInputText?: string;
 	selectedSkillCommandText: string;
 	pendingImages: ImageItem[];
 	slashQueryFromInput: () => string | null;
@@ -33,6 +34,7 @@ export async function sendMessageFlow<ImageItem>({
 	bindingStatusText,
 	isComposerInteractionLocked,
 	inputText,
+	displayInputText,
 	selectedSkillCommandText,
 	pendingImages,
 	slashQueryFromInput,
@@ -58,13 +60,17 @@ export async function sendMessageFlow<ImageItem>({
 	const promptText = inputText.trim();
 	const selectedSkillCommand = selectedSkillCommandText.trim();
 	const text = selectedSkillCommand ? (promptText ? `${selectedSkillCommand}\n\n${promptText}` : selectedSkillCommand) : promptText;
+	const displayPromptText = (displayInputText ?? inputText).trim();
+	const displayText = selectedSkillCommand ? (displayPromptText ? `${selectedSkillCommand}\n\n${displayPromptText}` : selectedSkillCommand) : displayPromptText;
 	const images = [...pendingImages];
-	if (!selectedSkillCommand && images.length === 0 && slashQueryFromInput() !== null) {
+	// A slash command is an explicit composer action even when a skill draft is
+	// staged. Execute it first and keep the staged skill for the next prompt.
+	if (images.length === 0 && slashQueryFromInput() !== null) {
 		await executeSlashCommandFromComposer();
 		return;
 	}
 	if (!text && images.length === 0) return;
-	if (text) rememberComposerHistoryEntry(text);
+	if (displayText) rememberComposerHistoryEntry(displayText);
 
 	let streaming = currentIsStreaming();
 	if (streaming) {
@@ -89,10 +95,10 @@ export async function sendMessageFlow<ImageItem>({
 
 	let queuedMessageId: string | null = null;
 	if (actualMode === "followUp") {
-		queuedMessageId = enqueueComposerQueueMessage(text, images);
+		queuedMessageId = enqueueComposerQueueMessage(displayText, images);
 		pushNotice("Queued message", "info");
 	} else {
-		pushUserEcho(text, actualMode, images);
+		pushUserEcho(displayText, actualMode, images);
 	}
 	clearComposer();
 	setSendingPrompt(true);

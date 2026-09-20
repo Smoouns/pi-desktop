@@ -55,6 +55,7 @@ export class ContentTabs {
 	private contextX = 0;
 	private contextY = 0;
 	private overflowMeasureFrame: number | null = null;
+	private activeTabScrollFrame: number | null = null;
 	private pendingDragTabKey: string | null = null;
 	private pendingDragPointerId: number | null = null;
 	private dragStartX = 0;
@@ -114,6 +115,7 @@ export class ContentTabs {
 
 		this.syncGlobalDismissListener();
 		this.render();
+		this.scheduleActiveTabVisibility();
 	}
 
 	setOnSelect(cb: (id: string) => void): void {
@@ -486,6 +488,32 @@ export class ContentTabs {
 		});
 	}
 
+	private handleTabWheel(event: WheelEvent): void {
+		if (this.draggingTabKey) return;
+		const strip = event.currentTarget as HTMLElement;
+		if (strip.scrollWidth <= strip.clientWidth) return;
+		const delta = event.deltaX || event.deltaY;
+		if (!delta) return;
+
+		const previous = strip.scrollLeft;
+		strip.scrollLeft += delta;
+		if (strip.scrollLeft !== previous) event.preventDefault();
+	}
+
+	private scheduleActiveTabVisibility(): void {
+		if (this.activeTabScrollFrame !== null) cancelAnimationFrame(this.activeTabScrollFrame);
+		this.activeTabScrollFrame = requestAnimationFrame(() => {
+			this.activeTabScrollFrame = null;
+			const strip = this.container.querySelector<HTMLElement>(".content-tabs-scroll");
+			const activeTab = this.container.querySelector<HTMLElement>(".content-tab.active");
+			if (!strip || !activeTab) return;
+			const stripBounds = strip.getBoundingClientRect();
+			const tabBounds = activeTab.getBoundingClientRect();
+			if (tabBounds.left < stripBounds.left) strip.scrollLeft -= stripBounds.left - tabBounds.left;
+			else if (tabBounds.right > stripBounds.right) strip.scrollLeft += tabBounds.right - stripBounds.right;
+		});
+	}
+
 	private renderTab(tab: MainContentTab, index: number, placeholder = false): ReturnType<typeof html> {
 		const key = this.tabKey(tab);
 		const color = this.tabColors[key] ?? "";
@@ -541,11 +569,11 @@ export class ContentTabs {
 					this.closeContext();
 				}}
 			>
-				<div class="content-tabs-scroll" data-tauri-drag-region>
+				<div class="content-tabs-scroll" data-tauri-drag-region @wheel=${(event: WheelEvent) => this.handleTabWheel(event)}>
 					${renderedTabs.map((tab, index) => this.renderTab(tab, index, this.draggingTabKey === this.tabKey(tab)))}
 					<button
 						class="content-tabs-add-btn content-tab-add-inline"
-						title="New tab"
+						title="新建文件"
 						@click=${(event: Event) => {
 							event.stopPropagation();
 							this.onCreateTab?.();

@@ -54,7 +54,6 @@ interface ResolveWorkflowExpansionStateParams {
 	workflowId: string;
 	toolCalls: WorkflowToolCall[];
 	isTerminal: boolean;
-	keepWorkflowExpandedUntilAssistantText: boolean;
 	runSawToolActivity: boolean;
 	expandedWorkflowIds: ReadonlySet<string>;
 	collapsedAutoWorkflowIds: ReadonlySet<string>;
@@ -267,7 +266,6 @@ export function resolveWorkflowExpansionState({
 	workflowId,
 	toolCalls,
 	isTerminal,
-	keepWorkflowExpandedUntilAssistantText,
 	runSawToolActivity,
 	expandedWorkflowIds,
 	collapsedAutoWorkflowIds,
@@ -281,7 +279,7 @@ export function resolveWorkflowExpansionState({
 	const running = toolCalls.filter((toolCall) => toolCall.isRunning).length;
 	const manualExpanded = expandedWorkflowIds.has(workflowId);
 	const autoExpanded =
-		isTerminal && keepWorkflowExpandedUntilAssistantText && (running > 0 || runSawToolActivity || total === 0);
+		isTerminal && (running > 0 || runSawToolActivity || total === 0);
 	const expanded = (autoExpanded && !collapsedAutoWorkflowIds.has(workflowId)) || manualExpanded;
 	return {
 		total,

@@ -8,6 +8,11 @@ import { CommandPalette } from "./components/command-palette.js";
 import { ContentTabs } from "./components/content-tabs.js";
 import { ExtensionUiHandler, normalizeExtensionUiRequest, type NotificationActionTarget } from "./components/extension-ui-handler.js";
 import { FileViewer } from "./components/file-viewer.js";
+import { ContextInspector } from "./components/context-inspector.js";
+import { NovelWorkflowDialog, type NovelWorkflowAction } from "./components/novel-workflow-dialog.js";
+import { WorldChangeDialog } from "./components/world-change-dialog.js";
+import { loadStoryMemorySnapshot, searchStoryMemory } from "./novel/memory-io.js";
+import { loadWorldChangeHistory, rollbackWorldChange } from "./novel/world-change.js";
 import { PackagesView } from "./components/packages-view.js";
 import { SessionBrowser } from "./components/session-browser.js";
 import { SettingsPanel, type SettingsSectionId } from "./components/settings-panel.js";
@@ -25,10 +30,13 @@ import {
 import { syncDesktopThemeWithPiTheme } from "./theme/pi-theme-bridge.js";
 import { DESKTOP_THEME_CHANGED_EVENT, getResolvedDesktopTheme, initializeDesktopTheme, toggleDesktopTheme } from "./theme/theme-manager.js";
 import { ensureBundledThemesInstalled } from "./theme/bundled-themes.js";
+import { installChineseUiLocalization } from "./i18n/ui-chinese.js";
 import { ensureDesktopNotifyBridgeExtensionInstalled } from "./extensions/desktop-notify-bridge-extension.js";
 import { isExtensionConfigIntent, normalizeExtensionCommandName } from "./extensions/extension-command-intent.js";
 import { ensureDesktopSdkCompatExtensionInstalled } from "./extensions/sdk-compat-extension.js";
 import { ensureSmartVoiceNotifyDesktopHostMode } from "./extensions/smart-voice-notify-config.js";
+import { ensureNovelToolsExtensionInstalled } from "./extensions/novel-tools-extension.js";
+import { acceptChapterCard, acceptChapterManuscript, applyWorldChange, buildNovelAgentPrompt, buildNovelContext, canPromoteChapter, canRollbackPromotion, findAdjacentCanonicalChapters, findMentionedDocuments, inspectChapterWorkflow, listWorldChangeProposals, loadNovelProject, NOVEL_AGENT_LABELS, planChapterRecordUpdates, prepareRevisionRequestForWork, promoteChapter, requestChapterRevision, requestWorldChange, rollbackPromotion, scanNovelDocuments, serializeNovelContextManifest, type NovelAgentRole, type NovelAgentTask, type NovelChapterRecord, type NovelDocument } from "./novel/index.js";
 import "./styles/app.css";
 
 interface WorkspaceSessionTab {
@@ -36,6 +44,7 @@ interface WorkspaceSessionTab {
 	projectId: string | null;
 	projectPath: string | null;
 	sessionPath: string | null;
+	novelRole: NovelAgentRole | null;
 	title: string;
 	messageCount: number | null;
 	ephemeral: boolean;
@@ -53,6 +62,8 @@ interface WorkspaceFileTab {
 	draftAnchorPath: string | null;
 }
 
+type ActiveProjectSource = "workspace" | "session" | "file";
+
 interface WorkspaceState {
 	id: string;
 	title: string;
@@ -63,6 +74,7 @@ interface WorkspaceState {
 	pane: "chat" | "file" | "packages" | "settings" | "terminal";
 	activeProjectId: string | null;
 	activeProjectPath: string | null;
+	activeProjectSource: ActiveProjectSource;
 	filePath: string | null;
 	terminalOpen: boolean;
 	sessionTitle: string;
@@ -110,6 +122,7 @@ const NEW_FILE_TAB_TITLE = "New file";
 const NEW_GENERIC_TAB_TITLE = "New tab";
 const DEFAULT_AUTO_CONTENT_TAB_LIMIT = 2;
 const DEBUG_OVERLAY_STORAGE_KEY = "pi-desktop.debug-overlay.v1";
+const runtimeEnsurePromises = new Map<string, Promise<SessionRuntime>>();
 const CLI_UPDATE_NOTICE_STORAGE_KEY = "pi-desktop.cli-update-notice-at.v1";
 const DESKTOP_UPDATE_NOTICE_STORAGE_KEY = "pi-desktop.desktop-update-notice-at.v1";
 const UPDATE_NOTICE_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -128,14 +141,20 @@ const SESSION_ATTENTION_MESSAGES = [
 
 let sidebar: Sidebar | null = null;
 let chatView: ChatView | null = null;
+let routeNovelAgentTask: ((project: { id: string; name: string; path: string }, task: NovelAgentTask) => void) | null = null;
 let workspaceTabsBar: WorkspaceTabs | null = null;
 let contentTabsBar: ContentTabs | null = null;
 let fileViewer: FileViewer | null = null;
+let contextInspector: ContextInspector | null = null;
 let terminalPanel: TerminalPanel | null = null;
 let packagesView: PackagesView | null = null;
 let connectionError: string | null = null;
+let novelDocumentsByProjectPath = new Map<string, NovelDocument[]>();
+let novelContextRefreshVersion = 0;
 
 let settingsPanel: SettingsPanel | null = null;
+let novelWorkflowDialog: NovelWorkflowDialog | null = null;
+let worldChangeDialog: WorldChangeDialog | null = null;
 let commandPalette: CommandPalette | null = null;
 let sessionBrowser: SessionBrowser | null = null;
 let shortcutsPanel: ShortcutsPanel | null = null;
@@ -182,6 +201,7 @@ let sidebarSessionsWarmInterval: ReturnType<typeof setInterval> | null = null;
 let sidebarSessionsWarmStopTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionRuntimes = new Map<string, SessionRuntime>();
 let activeSessionRuntimeKey: string | null = null;
+const pendingRuntimeBootstrapKeys = new Set<string>();
 let runningSessionPollInterval: ReturnType<typeof setInterval> | null = null;
 let runningSessionPollInFlight = false;
 let debugOverlayInterval: ReturnType<typeof setInterval> | null = null;
@@ -500,6 +520,30 @@ function baseName(path: string): string {
 	return parts[parts.length - 1] || path;
 }
 
+function relativeFileTabPath(path: string, projectPath: string | null): string {
+	const normalizedPath = path.replace(/\\/g, "/").replace(/\/+$|^\/+$/g, "");
+	const normalizedProjectPath = (projectPath ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+	if (normalizedProjectPath && normalizeProjectPath(normalizedPath).startsWith(`${normalizeProjectPath(normalizedProjectPath)}/`)) {
+		return normalizedPath.slice(normalizedProjectPath.length + 1);
+	}
+	return normalizedPath;
+}
+
+function fileTabDisplayTitles(fileTabs: WorkspaceFileTab[]): Map<string, string> {
+	const nameCounts = new Map<string, number>();
+	for (const tab of fileTabs) {
+		if (!tab.path) continue;
+		const name = baseName(tab.path).toLowerCase();
+		nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+	}
+
+	return new Map(fileTabs.map((tab) => {
+		const fileName = tab.path ? baseName(tab.path) : tab.title || NEW_FILE_TAB_TITLE;
+		const duplicate = Boolean(tab.path && (nameCounts.get(fileName.toLowerCase()) ?? 0) > 1);
+		return [tab.id, duplicate && tab.path ? relativeFileTabPath(tab.path, tab.projectPath) : tab.title || fileName];
+	}));
+}
+
 function normalizeSessionPath(path: string | null | undefined): string {
 	if (!path) return "";
 	return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -547,6 +591,14 @@ function getOrCreateRuntimeForTab(workspaceId: string, tabId: string, projectPat
 		eventUnlisten: null,
 	};
 	runtime.eventUnlisten = runtime.bridge.onEvent((event) => {
+		const type = typeof event.type === "string" ? event.type : "unknown";
+		if (type === "rpc_disconnected") {
+			runtime.phase = "failed";
+			runtime.lastError ??= "Pi process disconnected";
+			setRuntimeRunning(runtime, false, { suppressNotify: true });
+			syncRunningSessionIndicators();
+			syncDebugOverlay();
+		}
 		handleBackgroundRuntimeNotifyEvent(runtime.key, event);
 	});
 	sessionRuntimes.set(key, runtime);
@@ -846,12 +898,18 @@ function normalizeStoredPath(value: unknown): string | null {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function isNovelAgentRole(value: unknown): value is NovelAgentRole {
+	return value === "world" || value === "plan" || value === "write";
+}
+
 function setWorkspaceActiveProject(
 	workspace: WorkspaceState,
 	project: { id?: string | null; path?: string | null } | null,
+	source: ActiveProjectSource = "workspace",
 ): void {
 	workspace.activeProjectId = normalizeStoredId(project?.id ?? null);
 	workspace.activeProjectPath = normalizeStoredPath(project?.path ?? null);
+	workspace.activeProjectSource = source;
 }
 
 function setSessionTabProject(tab: WorkspaceSessionTab, projectId: string | null, projectPath: string | null): void {
@@ -880,20 +938,134 @@ function getFileTabProjectId(tab: WorkspaceFileTab | null | undefined): string |
 	return normalizeStoredId(tab?.projectId ?? null);
 }
 
+function workspaceTargetsProject(
+	workspace: WorkspaceState,
+	project: { id: string | null; path: string | null },
+): boolean {
+	const activeProjectId = normalizeStoredId(workspace.activeProjectId);
+	const activeProjectPath = normalizeStoredPath(workspace.activeProjectPath);
+	if (activeProjectId && project.id && activeProjectId === project.id) return true;
+	return Boolean(
+		activeProjectPath &&
+		project.path &&
+		normalizeProjectPath(activeProjectPath) === normalizeProjectPath(project.path),
+	);
+}
+
 function getWorkspaceActiveProjectPath(workspace: WorkspaceState): string | null {
 	const activeFile = workspace.fileTabs.find((tab) => tab.id === workspace.activeFileTabId) ?? null;
 	const activeSession = workspace.sessionTabs.find((tab) => tab.id === workspace.activeSessionTabId) ?? workspace.sessionTabs[0] ?? null;
+	const activeFileProject = { id: getFileTabProjectId(activeFile), path: getFileTabProjectPath(activeFile) };
+	const activeSessionProject = { id: getSessionTabProjectId(activeSession), path: getSessionTabProjectPath(activeSession) };
+	if (workspace.activeProjectSource === "workspace") {
+		return normalizeStoredPath(workspace.activeProjectPath) ?? activeSessionProject.path ?? activeFileProject.path;
+	}
+	if (workspace.activeProjectSource === "file") {
+		return activeFileProject.path ?? normalizeStoredPath(workspace.activeProjectPath) ?? activeSessionProject.path;
+	}
+	if (workspace.activeProjectSource === "session") {
+		return activeSessionProject.path ?? normalizeStoredPath(workspace.activeProjectPath) ?? activeFileProject.path;
+	}
+	// Compatibility for workspaces saved before activeProjectSource existed.
+	if (workspaceTargetsProject(workspace, activeFileProject)) return activeFileProject.path;
+	if (workspaceTargetsProject(workspace, activeSessionProject)) return activeSessionProject.path;
 	return workspace.pane === "file"
-		? getFileTabProjectPath(activeFile) ?? getSessionTabProjectPath(activeSession) ?? normalizeStoredPath(workspace.activeProjectPath)
-		: getSessionTabProjectPath(activeSession) ?? getFileTabProjectPath(activeFile) ?? normalizeStoredPath(workspace.activeProjectPath);
+		? activeFileProject.path ?? activeSessionProject.path ?? normalizeStoredPath(workspace.activeProjectPath)
+		: activeSessionProject.path ?? activeFileProject.path ?? normalizeStoredPath(workspace.activeProjectPath);
 }
 
 function getWorkspaceActiveProjectId(workspace: WorkspaceState): string | null {
 	const activeFile = workspace.fileTabs.find((tab) => tab.id === workspace.activeFileTabId) ?? null;
 	const activeSession = workspace.sessionTabs.find((tab) => tab.id === workspace.activeSessionTabId) ?? workspace.sessionTabs[0] ?? null;
+	const activeFileProject = { id: getFileTabProjectId(activeFile), path: getFileTabProjectPath(activeFile) };
+	const activeSessionProject = { id: getSessionTabProjectId(activeSession), path: getSessionTabProjectPath(activeSession) };
+	if (workspace.activeProjectSource === "workspace") {
+		return normalizeStoredId(workspace.activeProjectId) ?? activeSessionProject.id ?? activeFileProject.id;
+	}
+	if (workspace.activeProjectSource === "file") {
+		return activeFileProject.id ?? normalizeStoredId(workspace.activeProjectId) ?? activeSessionProject.id;
+	}
+	if (workspace.activeProjectSource === "session") {
+		return activeSessionProject.id ?? normalizeStoredId(workspace.activeProjectId) ?? activeFileProject.id;
+	}
+	if (workspaceTargetsProject(workspace, activeFileProject)) return activeFileProject.id;
+	if (workspaceTargetsProject(workspace, activeSessionProject)) return activeSessionProject.id;
 	return workspace.pane === "file"
-		? getFileTabProjectId(activeFile) ?? getSessionTabProjectId(activeSession) ?? normalizeStoredId(workspace.activeProjectId)
-		: getSessionTabProjectId(activeSession) ?? getFileTabProjectId(activeFile) ?? normalizeStoredId(workspace.activeProjectId);
+		? activeFileProject.id ?? activeSessionProject.id ?? normalizeStoredId(workspace.activeProjectId)
+		: activeSessionProject.id ?? activeFileProject.id ?? normalizeStoredId(workspace.activeProjectId);
+}
+
+function getActiveSessionProjectPath(workspace: WorkspaceState): string | null {
+	const activeSession = workspace.sessionTabs.find((tab) => tab.id === workspace.activeSessionTabId) ?? workspace.sessionTabs[0] ?? null;
+	return getSessionTabProjectPath(activeSession) ?? getWorkspaceActiveProjectPath(workspace);
+}
+
+async function refreshNovelContext(workspace: WorkspaceState | null, prompt = "", options: { rescan?: boolean } = {}): Promise<void> {
+	if (!contextInspector) return;
+	const version = ++novelContextRefreshVersion;
+	const projectPath = workspace ? getWorkspaceActiveProjectPath(workspace) : null;
+	const stillCurrent = () => {
+		const active = getActiveWorkspace();
+		return Boolean(active && workspace && version === novelContextRefreshVersion && active.id === workspace.id && normalizeProjectPath(getWorkspaceActiveProjectPath(active)) === normalizeProjectPath(projectPath));
+	};
+	contextInspector.setProjectPath(projectPath);
+	if (!workspace || !projectPath) {
+		contextInspector.setItems([]);
+		return;
+	}
+	try {
+		const project = await loadNovelProject(projectPath);
+		if (!stillCurrent()) return;
+		if (!project) {
+			contextInspector.setItems([]);
+			return;
+		}
+		// Changing editor tabs rebuilds the context inspector. Reuse the project
+		// snapshot for that cheap operation instead of walking the full novel tree
+		// again; the sidebar's refresh action remains the deliberate rescan path.
+		let documents = novelDocumentsByProjectPath.get(projectPath);
+		if (!documents || options.rescan) {
+			documents = await scanNovelDocuments(project);
+			if (!stillCurrent()) return;
+			novelDocumentsByProjectPath.set(projectPath, documents);
+		}
+		const activeFile = getActiveFileTab(workspace)?.path ?? null;
+		const activeDocument = activeFile ? documents.find((document) => normalizeProjectPath(document.path) === normalizeProjectPath(activeFile)) ?? null : null;
+		const pinnedPaths = new Set(contextInspector.getPinnedPaths().map((path) => normalizeProjectPath(path)));
+		const pinnedDocuments = documents.filter((document) => pinnedPaths.has(normalizeProjectPath(document.path)));
+		const relevantDocuments = documents.filter((document) => document.relativePath === project.config.authority?.currentState || document.relativePath === project.config.authority?.continuityLedger);
+		const styleDocuments = documents.filter((document) => document.category === "craft" && /style|writing-guide/i.test(document.name));
+		contextInspector.setAvailableDocuments(documents.map((document) => ({ path: document.path, relativePath: document.relativePath, authority: document.classification.authority })));
+		const manualPaths = new Set(contextInspector.getManuallyAddedPaths().map((path) => normalizeProjectPath(path)));
+		const manualDocuments = documents.filter((document) => manualPaths.has(normalizeProjectPath(document.path)));
+		const items = buildNovelContext({
+			activeDocument,
+			pinnedDocuments,
+			adjacentDocuments: findAdjacentCanonicalChapters(documents, activeDocument),
+			mentionedDocuments: findMentionedDocuments(documents, prompt),
+			relevantDocuments,
+			styleDocuments,
+			manualDocuments,
+			tokenBudget: 16_000,
+		});
+		if (contextInspector.getSelectedMemories().length) {
+			const snapshot = await loadStoryMemorySnapshot(projectPath);
+			if (!stillCurrent()) return;
+			contextInspector.retainMemorySelections(snapshot.memories);
+			for (const memory of contextInspector.getSelectedMemories()) items.push({
+				path: joinFsPath(projectPath, memory.path), relativePath: memory.path,
+				contentType: "memory", authority: memory.authority, readRequirement: "required",
+				reason: `用户选择记忆；${memory.reason}`, estimatedTokens: memory.estimatedTokens,
+				priority: 3, pinned: false, memory,
+			});
+		}
+		contextInspector.setItems(items);
+	} catch (err) {
+		if (!stillCurrent()) return;
+		console.warn("Failed to build novel context:", err);
+		contextInspector.retainMemorySelections([]);
+		contextInspector.setItems([]);
+	}
 }
 
 function createSessionTab(
@@ -901,6 +1073,7 @@ function createSessionTab(
 	sessionPath: string | null = null,
 	projectId: string | null = null,
 	projectPath: string | null = null,
+	options: { novelRole?: NovelAgentRole | null } = {},
 ): WorkspaceSessionTab {
 	const normalizedSessionPath = normalizeStoredPath(sessionPath);
 	return {
@@ -908,6 +1081,7 @@ function createSessionTab(
 		projectId: normalizeStoredId(projectId),
 		projectPath: normalizeStoredPath(projectPath),
 		sessionPath: normalizedSessionPath,
+		novelRole: options.novelRole ?? null,
 		title: title.trim() || NEW_SESSION_TAB_TITLE,
 		messageCount: normalizedSessionPath ? null : 0,
 		ephemeral: !normalizedSessionPath,
@@ -937,6 +1111,7 @@ function ensureWorkspaceContentState(workspace: WorkspaceState): void {
 		.filter((tab) => tab && typeof tab.id === "string" && tab.id.length > 0)
 		.map((tab) => {
 			const sessionPath = normalizeStoredPath(tab.sessionPath);
+			const storedNovelRole = (tab as Partial<WorkspaceSessionTab>).novelRole;
 			const storedMessageCount = (tab as Partial<WorkspaceSessionTab>).messageCount;
 			const needsAttentionRaw = (tab as Partial<WorkspaceSessionTab>).needsAttention;
 			const attentionMessageRaw = (tab as Partial<WorkspaceSessionTab>).attentionMessage;
@@ -945,6 +1120,7 @@ function ensureWorkspaceContentState(workspace: WorkspaceState): void {
 				projectId: normalizeStoredId((tab as Partial<WorkspaceSessionTab>).projectId),
 				projectPath: normalizeStoredPath((tab as Partial<WorkspaceSessionTab>).projectPath),
 				sessionPath,
+				novelRole: isNovelAgentRole(storedNovelRole) ? storedNovelRole : null,
 				title: typeof tab.title === "string" && tab.title.trim().length > 0 ? tab.title.trim() : NEW_SESSION_TAB_TITLE,
 				messageCount: typeof storedMessageCount === "number" && Number.isFinite(storedMessageCount) ? storedMessageCount : sessionPath ? null : 0,
 				ephemeral: typeof (tab as Partial<WorkspaceSessionTab>).ephemeral === "boolean" ? Boolean((tab as Partial<WorkspaceSessionTab>).ephemeral) : !sessionPath,
@@ -1002,12 +1178,6 @@ function ensureWorkspaceContentState(workspace: WorkspaceState): void {
 
 	if (!workspace.activeFileTabId || !workspace.fileTabs.some((tab) => tab.id === workspace.activeFileTabId)) {
 		workspace.activeFileTabId = workspace.fileTabs[0]?.id ?? null;
-	}
-
-	if (workspace.fileTabs.length > 1) {
-		const activeFileTab = workspace.fileTabs.find((tab) => tab.id === workspace.activeFileTabId) ?? workspace.fileTabs[0] ?? null;
-		workspace.fileTabs = activeFileTab ? [activeFileTab] : [];
-		workspace.activeFileTabId = activeFileTab?.id ?? null;
 	}
 
 	const activeSession = workspace.sessionTabs.find((tab) => tab.id === workspace.activeSessionTabId) ?? workspace.sessionTabs[0] ?? null;
@@ -1133,7 +1303,7 @@ function setActiveSessionTab(workspace: WorkspaceState, tabId: string): Workspac
 	clearSessionAttention(tab);
 	workspace.activeSessionTabId = tab.id;
 	workspace.sessionTitle = tab.title;
-	setWorkspaceActiveProject(workspace, { id: tab.projectId, path: tab.projectPath });
+	setWorkspaceActiveProject(workspace, { id: tab.projectId, path: tab.projectPath }, "session");
 	workspace.pane = "chat";
 	return tab;
 }
@@ -1212,7 +1382,7 @@ function openOrActivateSessionTab(
 	clearSessionAttention(tab);
 	workspace.activeSessionTabId = tab.id;
 	workspace.sessionTitle = tab.title;
-	setWorkspaceActiveProject(workspace, { id: tab.projectId, path: tab.projectPath });
+	setWorkspaceActiveProject(workspace, { id: tab.projectId, path: tab.projectPath }, "session");
 	workspace.pane = "chat";
 	return tab;
 }
@@ -1260,6 +1430,7 @@ function openOrActivateFileTab(
 	}
 	workspace.activeFileTabId = tab.id;
 	workspace.filePath = tab.path;
+	setWorkspaceActiveProject(workspace, { id: tab.projectId, path: tab.projectPath }, "file");
 	workspace.pane = "chat";
 	return tab;
 }
@@ -1286,6 +1457,7 @@ function createAndActivateEmptyFileTab(
 		activeFileTab.draftAnchorPath = normalizedDraftAnchorPath;
 		workspace.activeFileTabId = activeFileTab.id;
 		workspace.filePath = null;
+		setWorkspaceActiveProject(workspace, { id: activeFileTab.projectId, path: activeFileTab.projectPath }, "file");
 		workspace.pane = "chat";
 		return activeFileTab;
 	}
@@ -1301,6 +1473,7 @@ function createAndActivateEmptyFileTab(
 	workspace.fileTabs.push(tab);
 	workspace.activeFileTabId = tab.id;
 	workspace.filePath = null;
+	setWorkspaceActiveProject(workspace, { id: tab.projectId, path: tab.projectPath }, "file");
 	workspace.pane = "chat";
 	return tab;
 }
@@ -1330,12 +1503,13 @@ function createAndActivateEmptySessionTab(
 	title = NEW_SESSION_TAB_TITLE,
 	projectId: string | null = workspace.activeProjectId,
 	projectPath: string | null = workspace.activeProjectPath,
-	options: { forceNewTab?: boolean } = {},
+	options: { forceNewTab?: boolean; novelRole?: NovelAgentRole | null } = {},
 ): WorkspaceSessionTab {
 	ensureWorkspaceContentState(workspace);
 	const forceNewTab = options.forceNewTab ?? false;
 	const activeSessionTab = workspace.sessionTabs.find((entry) => entry.id === workspace.activeSessionTabId) ?? workspace.sessionTabs[0] ?? null;
-	if (activeSessionTab && !forceNewTab && !isSessionTabRuntimeRunning(workspace.id, activeSessionTab.id)) {
+	const activeIsDedicatedNovelSession = Boolean(activeSessionTab?.novelRole);
+	if (activeSessionTab && !forceNewTab && !activeIsDedicatedNovelSession && !isSessionTabRuntimeRunning(workspace.id, activeSessionTab.id)) {
 		if (isEphemeralSessionTab(activeSessionTab) && activeSessionTab.sessionPath && (activeSessionTab.messageCount ?? 0) <= 0) {
 			scheduleDiscardEphemeralSessionPaths([activeSessionTab.sessionPath]);
 		}
@@ -1343,21 +1517,22 @@ function createAndActivateEmptySessionTab(
 		activeSessionTab.title = title.trim() || NEW_SESSION_TAB_TITLE;
 		activeSessionTab.messageCount = 0;
 		activeSessionTab.ephemeral = true;
+		if (options.novelRole !== undefined) activeSessionTab.novelRole = options.novelRole;
 		clearSessionAttention(activeSessionTab);
 		setSessionTabProject(activeSessionTab, projectId, projectPath);
 		workspace.activeSessionTabId = activeSessionTab.id;
 		workspace.sessionTitle = activeSessionTab.title;
-		setWorkspaceActiveProject(workspace, { id: activeSessionTab.projectId, path: activeSessionTab.projectPath });
+		setWorkspaceActiveProject(workspace, { id: activeSessionTab.projectId, path: activeSessionTab.projectPath }, "session");
 		workspace.pane = "chat";
 		return activeSessionTab;
 	}
-	const tab = createSessionTab(title, null, projectId, projectPath);
+	const tab = createSessionTab(title, null, projectId, projectPath, { novelRole: options.novelRole ?? null });
 	tab.messageCount = 0;
 	tab.ephemeral = true;
 	workspace.sessionTabs.push(tab);
 	workspace.activeSessionTabId = tab.id;
 	workspace.sessionTitle = tab.title;
-	setWorkspaceActiveProject(workspace, { id: tab.projectId, path: tab.projectPath });
+	setWorkspaceActiveProject(workspace, { id: tab.projectId, path: tab.projectPath }, "session");
 	workspace.pane = "chat";
 	return tab;
 }
@@ -2039,6 +2214,7 @@ function defaultWorkspace(): WorkspaceState {
 		pane: "chat",
 		activeProjectId: null,
 		activeProjectPath: null,
+		activeProjectSource: "workspace",
 		filePath: null,
 		terminalOpen: false,
 		sessionTitle: NEW_SESSION_TAB_TITLE,
@@ -2063,6 +2239,7 @@ function createWorkspace(title?: string, emoji?: string | null): WorkspaceState 
 		pane: "chat",
 		activeProjectId: null,
 		activeProjectPath: null,
+		activeProjectSource: "workspace",
 		filePath: null,
 		terminalOpen: false,
 		sessionTitle: NEW_SESSION_TAB_TITLE,
@@ -2140,6 +2317,7 @@ function loadWorkspaces(): void {
 								projectId: normalizeStoredId(tab.projectId),
 								projectPath: normalizeStoredPath(tab.projectPath),
 								sessionPath,
+								novelRole: isNovelAgentRole(tab.novelRole) ? tab.novelRole : null,
 								title: typeof tab.title === "string" && tab.title.trim().length > 0 ? tab.title.trim() : fallbackSessionTitle,
 								messageCount: typeof storedMessageCount === "number" && Number.isFinite(storedMessageCount) ? storedMessageCount : sessionPath ? null : 0,
 								ephemeral: typeof tab.ephemeral === "boolean" ? Boolean(tab.ephemeral) : !sessionPath,
@@ -2201,10 +2379,14 @@ function loadWorkspaces(): void {
 						color: typeof w.color === "string" && w.color.trim().length > 0 ? w.color : null,
 						emoji: typeof w.emoji === "string" && w.emoji.trim().length > 0 ? w.emoji.trim() : null,
 						pinned: false,
-						leftMode: w.leftMode === "files" ? "files" : "projects",
+						leftMode: w.leftMode === "files" ? "files" : w.leftMode === "novel" ? "novel" : w.leftMode === "review" ? "review" : "projects",
 						pane: w.pane === "packages" || w.pane === "settings" ? w.pane : "chat",
 						activeProjectId: normalizeStoredId(w.activeProjectId),
 						activeProjectPath: normalizeStoredPath(w.activeProjectPath),
+						activeProjectSource:
+							w.activeProjectSource === "file" || w.activeProjectSource === "session" || w.activeProjectSource === "workspace"
+								? w.activeProjectSource
+								: "workspace",
 						filePath: typeof w.filePath === "string" ? w.filePath : null,
 						terminalOpen: Boolean(w.terminalOpen || w.pane === "terminal"),
 						sessionTitle: fallbackSessionTitle,
@@ -2379,10 +2561,13 @@ function syncSidebarSelectionFromWorkspace(workspace: WorkspaceState | null = ge
 	}
 
 	ensureWorkspaceContentState(workspace);
-	if (!workspace.activeProjectId && workspace.activeProjectPath) {
-		const project = sidebar.getProjectByPath(workspace.activeProjectPath);
-		if (project) {
-			setWorkspaceActiveProject(workspace, project);
+	if (workspace.activeProjectPath) {
+		const projectAtActivePath = sidebar.getProjectByPath(workspace.activeProjectPath);
+		// File tabs persisted by older versions can retain a project's previous ID
+		// after their path has changed. The sidebar's Novel view keys its cache by
+		// ID, so always reconcile it from the authoritative project path.
+		if (projectAtActivePath && workspace.activeProjectId !== projectAtActivePath.id) {
+			setWorkspaceActiveProject(workspace, projectAtActivePath, workspace.activeProjectSource);
 		}
 	}
 	if (workspace.activeProjectId) {
@@ -2439,6 +2624,10 @@ function syncActiveChatRuntimeBinding(
 	const activeSessionTab = getActiveSessionTab(workspace);
 	const projectPath = getSessionTabProjectPath(activeSessionTab) ?? getWorkspaceActiveProjectPath(workspace);
 	const expectedRuntime = getRuntimeForTab(workspace.id, activeSessionTab.id);
+	// A failed child process is retained for diagnostics and for the explicit
+	// reload action. Do not turn ordinary editor renders into a fresh session
+	// switch while that failure is unresolved.
+	if (expectedRuntime?.phase === "failed" && !options.forceReset) return;
 	const expectedRuntimeKey = expectedRuntime?.key ?? null;
 	const runtimeChanged = expectedRuntimeKey !== activeSessionRuntimeKey;
 	if (runtimeChanged) {
@@ -2485,17 +2674,29 @@ function syncContentTabsBar(workspace: WorkspaceState | null = getActiveWorkspac
 
 	ensureWorkspaceContentState(workspace);
 
-	const visibleSessionTabs = listVisibleSessionTabsForContentBar(workspace);
-	const tabs = visibleSessionTabs.map((tab) => ({
+	const hasOpenFiles = workspace.fileTabs.length > 0;
+	const visibleSessionTabs = hasOpenFiles ? [] : listVisibleSessionTabsForContentBar(workspace);
+	const displayTitles = fileTabDisplayTitles(workspace.fileTabs);
+	const fileTabs = workspace.fileTabs.map((tab) => ({
+		id: tab.id,
+		type: "file" as const,
+		title: displayTitles.get(tab.id) ?? tab.title ?? NEW_FILE_TAB_TITLE,
+		path: tab.path ?? undefined,
+		closable: true,
+	}));
+	const tabs = [
+		...fileTabs,
+		...visibleSessionTabs.map((tab) => ({
 		id: tab.id,
 		type: "session" as const,
 		title: tab.title || NEW_SESSION_TAB_TITLE,
 		needsAttention: Boolean(tab.needsAttention),
 		attentionLabel: tab.attentionMessage ?? undefined,
 		closable: visibleSessionTabs.length > 1 || Boolean(tab.sessionPath),
-	}));
+		})),
+	];
 
-	const activeTabId = workspace.activeSessionTabId;
+	const activeTabId = hasOpenFiles ? workspace.activeFileTabId : workspace.activeSessionTabId;
 
 	contentTabsBar.setTerminalActive(workspace.pane === "chat" && workspace.terminalOpen);
 	contentTabsBar.setTabs(tabs, activeTabId);
@@ -2512,14 +2713,16 @@ function setPaneVisibility(
 	const terminalPane = document.getElementById("terminal-pane");
 	const packagesPane = document.getElementById("packages-pane");
 	const settingsPane = document.getElementById("settings-pane");
+	const editorEmptyState = document.getElementById("editor-empty-state");
 	if (!chatFileLayout || !sessionPane || !fileSplitResizeHandle || !filePane || !packagesPane || !settingsPane) return;
 
-	const showChatLayout = pane === "chat" || pane === "file";
+	const showChatLayout = pane !== "packages";
 	const showFileSplit = showChatLayout && Boolean(options.showFileSplit);
 	chatFileLayout.classList.toggle("hidden-pane", !showChatLayout);
 	sessionPane.classList.toggle("hidden-pane", !showChatLayout);
 	fileSplitResizeHandle.classList.toggle("hidden-pane", !showFileSplit);
 	filePane.classList.toggle("hidden-pane", !showFileSplit);
+	editorEmptyState?.classList.toggle("hidden-pane", showFileSplit || !showChatLayout);
 	if (showFileSplit) applyFileSplitWidth();
 	packagesPane.classList.toggle("hidden-pane", pane !== "packages");
 	settingsPane.classList.toggle("hidden-pane", pane !== "settings");
@@ -2527,6 +2730,7 @@ function setPaneVisibility(
 		terminalPane?.classList.add("hidden-pane");
 		terminalPane?.classList.remove("terminal-dock-visible");
 	}
+
 }
 
 function syncTerminalDockVisibility(workspace: WorkspaceState | null = getActiveWorkspace()): void {
@@ -2537,7 +2741,7 @@ function syncTerminalDockVisibility(workspace: WorkspaceState | null = getActive
 	terminalPane.classList.toggle("hidden-pane", !shouldShow);
 	terminalPane.classList.toggle("terminal-dock-visible", shouldShow);
 	if (shouldShow && workspace) {
-		terminalPanel?.setProjectPath(getWorkspaceActiveProjectPath(workspace));
+		terminalPanel?.setProjectPath(getActiveSessionProjectPath(workspace));
 	}
 }
 
@@ -2577,6 +2781,7 @@ async function applyWorkspacePane(workspace: WorkspaceState | null = getActiveWo
 		syncWorkspaceTabsBar();
 	}
 	const workspaceProjectPath = getWorkspaceActiveProjectPath(workspace);
+	const sessionProjectPath = getActiveSessionProjectPath(workspace);
 	const resolved = getResolvedDesktopTheme();
 	const profiles = loadDesktopAppearanceProfiles();
 	void syncDesktopThemeWithPiTheme(workspaceProjectPath).finally(() => {
@@ -2584,9 +2789,13 @@ async function applyWorkspacePane(workspace: WorkspaceState | null = getActiveWo
 	});
 	if (isStale()) return;
 
-	chatView?.setProjectPath(workspaceProjectPath);
+	// A file tab may belong to another project. Keep the existing Pi runtime and
+	// chat actions bound to its session's cwd while project navigation follows
+	// the selected file.
+	chatView?.setProjectPath(sessionProjectPath);
+	void refreshNovelContext(workspace);
 	packagesView?.setProjectPath(workspaceProjectPath);
-	terminalPanel?.setProjectPath(workspaceProjectPath);
+	terminalPanel?.setProjectPath(sessionProjectPath);
 	if (workspace.pane === "file") {
 		workspace.pane = "chat";
 		persistWorkspaces();
@@ -2653,6 +2862,7 @@ async function applyWorkspacePane(workspace: WorkspaceState | null = getActiveWo
 	if (isStale()) return;
 	settingsPanel?.hideWithoutClearing();
 	syncActiveChatRuntimeBinding(workspace);
+	ensureActiveChatRuntimeAvailable(workspace);
 	setPaneVisibility("chat", { showFileSplit });
 	syncTerminalDockVisibility(workspace);
 	if (workspace.terminalOpen) {
@@ -2670,12 +2880,34 @@ async function ensureRuntimeForSessionTab(
 	makeActive = true,
 	taskVersion?: number,
 ): Promise<SessionRuntime> {
+	const runtimeKey = sessionRuntimeKey(workspace.id, sessionTab.id);
+	const existing = runtimeEnsurePromises.get(runtimeKey);
+	if (existing) return existing;
+
+	const task = ensureRuntimeForSessionTabImpl(workspace, sessionTab, projectPath, makeActive, taskVersion);
+	runtimeEnsurePromises.set(runtimeKey, task);
+	try {
+		return await task;
+	} finally {
+		if (runtimeEnsurePromises.get(runtimeKey) === task) {
+			runtimeEnsurePromises.delete(runtimeKey);
+		}
+	}
+}
+
+async function ensureRuntimeForSessionTabImpl(
+	workspace: WorkspaceState,
+	sessionTab: WorkspaceSessionTab,
+	projectPath: string,
+	makeActive = true,
+	taskVersion?: number,
+): Promise<SessionRuntime> {
 	if (typeof taskVersion === "number") {
 		assertProjectTaskCurrent(taskVersion);
 	}
 	setSessionTabProject(sessionTab, sessionTab.projectId ?? workspace.activeProjectId, projectPath);
-	if (makeActive) {
-		setWorkspaceActiveProject(workspace, { id: sessionTab.projectId, path: projectPath });
+	if (makeActive && workspace.activeProjectSource !== "file") {
+		setWorkspaceActiveProject(workspace, { id: sessionTab.projectId, path: projectPath }, "session");
 		chatView?.setProjectPath(projectPath);
 		packagesView?.setProjectPath(projectPath);
 		terminalPanel?.setProjectPath(projectPath);
@@ -2709,7 +2941,8 @@ async function ensureRuntimeForSessionTab(
 		if (!bridge.isConnected) {
 			runtime.phase = "starting";
 			recordDebugTrace(`ensureRuntime:start-bridge instance=${runtime.instanceId}`);
-			await bridge.start({ cliPath: findCliPath(), piPath: findPiBinaryPath(), cwd: projectPath });
+			const novelRoleEnv = sessionTab.novelRole ? { PI_DESKTOP_NOVEL_ROLE: sessionTab.novelRole } : undefined;
+			await bridge.start({ cliPath: findCliPath(), piPath: findPiBinaryPath(), cwd: projectPath, env: novelRoleEnv });
 			recordDebugTrace(`ensureRuntime:bridge-started instance=${runtime.instanceId} discovery=${bridge.discoveryInfo ?? "-"}`);
 			if (typeof taskVersion === "number") {
 				assertProjectTaskCurrent(taskVersion);
@@ -2786,8 +3019,53 @@ async function ensureRpcForProject(projectPath: string, taskVersion?: number): P
 	ensureWorkspaceContentState(workspace);
 	const activeSessionTab = getActiveSessionTab(workspace);
 	setSessionTabProject(activeSessionTab, activeSessionTab.projectId ?? workspace.activeProjectId, projectPath);
-	setWorkspaceActiveProject(workspace, { id: activeSessionTab.projectId, path: projectPath });
+	if (workspace.activeProjectSource !== "file") {
+		setWorkspaceActiveProject(workspace, { id: activeSessionTab.projectId, path: projectPath }, "session");
+	}
 	return ensureRuntimeForSessionTab(workspace, activeSessionTab, projectPath, true, taskVersion);
+}
+
+function ensureActiveChatRuntimeAvailable(workspace: WorkspaceState): void {
+	if (workspace.pane !== "chat") return;
+	ensureWorkspaceContentState(workspace);
+	const activeSession = getActiveSessionTab(workspace);
+	const projectPath = getSessionTabProjectPath(activeSession) ?? getWorkspaceActiveProjectPath(workspace);
+	if (!projectPath) return;
+
+	const runtimeKey = sessionRuntimeKey(workspace.id, activeSession.id);
+	const runtime = getRuntimeForTab(workspace.id, activeSession.id);
+	if (runtime?.bridge.isConnected && runtime.phase === "ready") return;
+	// A disconnected runtime must be restarted deliberately. Retrying it on each
+	// editor click only produces repeated failure notices and never restores input.
+	if (runtime?.phase === "failed") return;
+	if (pendingRuntimeBootstrapKeys.has(runtimeKey)) return;
+
+	pendingRuntimeBootstrapKeys.add(runtimeKey);
+	void queueProjectTask(
+		async (version) => {
+			const currentWorkspace = getActiveWorkspace();
+			if (!currentWorkspace || currentWorkspace.id !== workspace.id) return;
+			const currentSession = getActiveSessionTab(currentWorkspace);
+			if (currentSession.id !== activeSession.id) return;
+			const currentProjectPath = getSessionTabProjectPath(currentSession) ?? getWorkspaceActiveProjectPath(currentWorkspace);
+			if (!currentProjectPath) return;
+
+			await ensureRuntimeForSessionTab(currentWorkspace, currentSession, currentProjectPath, true, version);
+			assertProjectTaskCurrent(version);
+			await chatView?.refreshFromBackend({ throwOnError: true });
+			assertProjectTaskCurrent(version);
+			await chatView?.refreshModels();
+			assertProjectTaskCurrent(version);
+			await applyWorkspacePane(currentWorkspace);
+		},
+		(err) => {
+			console.error("Failed to initialize active chat runtime:", err);
+			chatView?.notify("无法启动 Pi 会话，请检查 Pi CLI 是否可用。", "error");
+		},
+		{ invalidatePending: false, label: "ensure-active-chat-runtime" },
+	).finally(() => {
+		pendingRuntimeBootstrapKeys.delete(runtimeKey);
+	});
 }
 
 async function activateWorkspace(workspaceId: string, taskVersion?: number): Promise<void> {
@@ -3079,6 +3357,10 @@ async function initialize(): Promise<void> {
 	if (notifyBridgeInstall.error && !notifyBridgeInstall.skipped) {
 		console.warn("Failed to install desktop notify bridge extension:", notifyBridgeInstall.error);
 	}
+	const novelToolsInstall = await ensureNovelToolsExtensionInstalled();
+	if (novelToolsInstall.error && !novelToolsInstall.skipped) {
+		console.warn("Failed to install Novel Tools extension:", novelToolsInstall.error);
+	}
 	const smartVoiceNotifyHostMode = await ensureSmartVoiceNotifyDesktopHostMode();
 	if (smartVoiceNotifyHostMode.error && !smartVoiceNotifyHostMode.skipped) {
 		console.warn("Failed to enforce smart voice notify desktop host mode:", smartVoiceNotifyHostMode.error);
@@ -3101,6 +3383,28 @@ async function initialize(): Promise<void> {
 		if (!chatContainer) throw new Error("Chat container missing");
 		chatView = new ChatView(chatContainer);
 		chatView.setProjectPath(null);
+		chatView.setNovelContextProvider(async (prompt) => {
+			await refreshNovelContext(getActiveWorkspace(), prompt);
+			const items = contextInspector?.getItems() ?? [];
+			return serializeNovelContextManifest(items);
+		});
+		chatView.setOnNovelRoleCommand((commandName, args) => {
+			const workspace = getActiveWorkspace();
+			const projectPath = workspace ? getWorkspaceActiveProjectPath(workspace) : null;
+			const project = projectPath ? sidebar?.getProjectByPath(projectPath) ?? null : null;
+			if (!project) return false;
+			const normalized = commandName.toLowerCase();
+			const task = normalized === "novel-world"
+				? { role: "world" as const, kind: "world-discussion" as const }
+				: normalized === "novel-plan"
+					? { role: "plan" as const, kind: "plan-chapter" as const }
+					: normalized === "novel-write"
+						? { role: "write" as const, kind: "write-chapter" as const }
+						: { role: "plan" as const, kind: "review-manuscript" as const };
+			if (!routeNovelAgentTask) return false;
+			routeNovelAgentTask(project, { ...task, contextPaths: [], instruction: args });
+			return true;
+		});
 		chatView.connect();
 		chatView.setOnStateChange((state) => {
 			const runtime = getActiveRuntime();
@@ -3125,13 +3429,14 @@ async function initialize(): Promise<void> {
 			ensureWorkspaceContentState(workspace);
 			const incomingName = (state.sessionName || "").trim();
 			const nextTitle = incomingName || "Chat";
-			const activeSession = getActiveSessionTab(workspace);
-			if (state.sessionFile) {
-				activeSession.sessionPath = state.sessionFile;
-				const currentTitle = (activeSession.title || "").trim().toLowerCase();
-				const keepNewSessionLabel =
-					(incomingName.length === 0 || incomingName.toLowerCase() === "chat") &&
-					["chat", "new session", ""].includes(currentTitle);
+				const activeSession = getActiveSessionTab(workspace);
+				if (state.sessionFile) {
+					activeSession.sessionPath = state.sessionFile;
+					const currentTitle = (activeSession.title || "").trim().toLowerCase();
+					const keepNovelAgentLabel = Boolean(activeSession.novelRole) && (incomingName.length === 0 || incomingName.toLowerCase() === "chat");
+					const keepNewSessionLabel =
+						(incomingName.length === 0 || incomingName.toLowerCase() === "chat") &&
+						(["chat", "new session", ""].includes(currentTitle) || keepNovelAgentLabel);
 				activeSession.title = keepNewSessionLabel ? NEW_SESSION_TAB_TITLE : nextTitle;
 			} else if (incomingName && activeSession.sessionPath) {
 				activeSession.title = nextTitle;
@@ -3298,6 +3603,11 @@ async function initialize(): Promise<void> {
 				stopSidebarSessionsWarmRefresh();
 				scheduleSidebarSessionsRefresh(0);
 				flushPendingAuthConfigReload();
+				// Agent writes happen outside the sidebar projection. Rescan after every
+				// run completes, even when the user is viewing another sidebar mode: a
+				// revision overwrites its existing source file instead of adding a file.
+				sidebar?.refreshActiveNovelProject();
+				void refreshNovelContext(getActiveWorkspace(), "", { rescan: true });
 			}
 		});
 		chatView.render();
@@ -3324,8 +3634,9 @@ async function initialize(): Promise<void> {
 				},
 				(err) => {
 					console.error("Startup workspace activation failed:", err);
-					recordDebugTrace(`startup-activation-error: ${err instanceof Error ? err.message : String(err)}`);
-					chatView?.notify("Failed to restore workspace runtime", "error");
+					const reason = err instanceof Error ? err.message : String(err);
+					recordDebugTrace(`startup-activation-error: ${reason}`);
+					chatView?.notify(`恢复工作区失败：${reason}`, "error");
 				},
 				{ label: "startup-activate-workspace" },
 			);
@@ -3670,6 +3981,15 @@ function requestOpenSettingsPanel(sectionId?: string): void {
 	const workspace = getActiveWorkspace();
 	if (!workspace) return;
 	const targetSection = normalizeSettingsSectionId(sectionId);
+	// The Settings activity icon is also the return affordance. Calls that name a
+	// section (for example from the chat UI) keep settings open and simply focus it.
+	if (workspace.pane === "settings" && !targetSection) {
+		workspace.pane = "chat";
+		persistWorkspaces();
+		syncWorkspaceTabsBar();
+		void applyWorkspacePane(workspace);
+		return;
+	}
 	workspace.pane = "settings";
 	persistWorkspaces();
 	syncWorkspaceTabsBar();
@@ -3865,6 +4185,16 @@ function setupKeyboardShortcuts(): void {
 				settingsPanel.close();
 				return;
 			}
+			if (novelWorkflowDialog?.isVisible()) {
+				e.preventDefault();
+				novelWorkflowDialog.close();
+				return;
+			}
+			if (worldChangeDialog?.isVisible()) {
+				e.preventDefault();
+				worldChangeDialog.close();
+				return;
+			}
 			return;
 		}
 
@@ -3946,20 +4276,6 @@ function renderApp(): void {
 					<div id="sidebar-container"></div>
 					<div id="sidebar-resize-handle" title="Resize sidebar"></div>
 					<div id="main-pane">
-						<button
-							id="sidebar-collapse-toggle"
-							class="workspace-sidebar-toggle ${isSidebarCollapsedState() ? "collapsed" : "hidden"}"
-							title="Toggle sidebar"
-							@click=${() => {
-								sidebar?.toggleCollapsed();
-								syncSidebarCollapseToggleButton();
-							}}
-						>
-							<svg viewBox="0 0 16 16" aria-hidden="true">
-								<path d="M3 3.5h10v9H3z" />
-								<path d="M6 3.5v9" />
-							</svg>
-						</button>
 						<div id="content-tabs-container" data-tauri-drag-region></div>
 						<div id="chat-file-layout">
 							<div id="session-pane">
@@ -3968,14 +4284,22 @@ function renderApp(): void {
 							</div>
 							<div id="file-split-resize-handle" class="hidden-pane" title="Resize file panel"></div>
 							<div id="file-pane" class="hidden-pane"></div>
+							<div id="editor-empty-state" class="editor-empty-state">
+								<div class="editor-empty-icon">P</div>
+								<strong>Select a file to start editing</strong>
+								<span>Choose a document from the Explorer or create a new tab.</span>
+							</div>
 						</div>
 						<div id="packages-pane" class="hidden-pane"></div>
 						<div id="settings-pane" class="hidden-pane"></div>
+						<div id="context-inspector-pane"></div>
+						<div id="novel-workflow-dialog-pane"></div>
+						<div id="world-change-dialog-pane"></div>
 					</div>
 				</div>
 			</div>
 		`,
-		app,
+	app,
 	);
 	const settingsPaneContainer = document.getElementById("settings-pane");
 	if (settingsPanel && settingsPaneContainer) {
@@ -4014,6 +4338,19 @@ function renderApp(): void {
 			}
 
 
+			const fileTab = workspace.fileTabs.find((tab) => tab.id === tabId) ?? null;
+			if (fileTab) {
+				workspace.activeFileTabId = fileTab.id;
+				workspace.filePath = fileTab.path;
+				setWorkspaceActiveProject(workspace, { id: fileTab.projectId, path: fileTab.projectPath }, "file");
+				workspace.pane = "chat";
+				persistWorkspaces();
+				syncWorkspaceTabsBar();
+				syncContentTabsBar(workspace);
+				void applyWorkspacePane(workspace);
+				return;
+			}
+
 			const candidateSessionTab = workspace.sessionTabs.find((tab) => tab.id === tabId) ?? null;
 			if (!candidateSessionTab) return;
 
@@ -4049,7 +4386,14 @@ function renderApp(): void {
 			toggleTerminalDock();
 		});
 		contentTabsBar.setOnCreateTab(() => {
-			void startFreshSessionTab({ forceNewTab: true, title: NEW_GENERIC_TAB_TITLE });
+			const workspace = getActiveWorkspace();
+			if (!workspace) return;
+			ensureWorkspaceContentState(workspace);
+			createAndActivateEmptyFileTab(workspace, NEW_FILE_TAB_TITLE, workspace.activeProjectId, workspace.activeProjectPath, workspace.activeProjectPath, null, { forceNewTab: true });
+			persistWorkspaces();
+			syncWorkspaceTabsBar();
+			syncContentTabsBar(workspace);
+			void applyWorkspacePane(workspace);
 		});
 		contentTabsBar.setOnRename((tabId, nextTitle) => {
 			const workspace = getActiveWorkspace();
@@ -4057,6 +4401,14 @@ function renderApp(): void {
 			ensureWorkspaceContentState(workspace);
 			const title = nextTitle.trim();
 			if (!title) return;
+
+			const fileTab = workspace.fileTabs.find((tab) => tab.id === tabId);
+			if (fileTab) {
+				fileTab.title = title;
+				persistWorkspaces();
+				syncContentTabsBar(workspace);
+				return;
+			}
 
 			const sessionTab = workspace.sessionTabs.find((tab) => tab.id === tabId);
 			if (sessionTab) {
@@ -4084,6 +4436,24 @@ function renderApp(): void {
 				return;
 			}
 
+
+			const fileIndex = workspace.fileTabs.findIndex((tab) => tab.id === tabId);
+			if (fileIndex !== -1) {
+				const wasActive = workspace.activeFileTabId === tabId;
+				workspace.fileTabs.splice(fileIndex, 1);
+				if (wasActive) {
+					const nextFile = workspace.fileTabs[fileIndex] ?? workspace.fileTabs[fileIndex - 1] ?? null;
+					workspace.activeFileTabId = nextFile?.id ?? null;
+					workspace.filePath = nextFile?.path ?? null;
+					setWorkspaceActiveProject(workspace, nextFile ? { id: nextFile.projectId, path: nextFile.projectPath } : null, nextFile ? "file" : "session");
+				}
+				persistWorkspaces();
+				syncWorkspaceTabsBar();
+				syncContentTabsBar(workspace);
+				syncSidebarSelectionFromWorkspace(workspace);
+				void applyWorkspacePane(workspace);
+				return;
+			}
 
 			const sessionIndex = workspace.sessionTabs.findIndex((tab) => tab.id === tabId);
 			if (sessionIndex === -1) return;
@@ -4163,9 +4533,12 @@ function renderApp(): void {
 			const workspace = getActiveWorkspace();
 			if (!workspace) return;
 			ensureWorkspaceContentState(workspace);
-			workspace.fileTabs = [];
-			workspace.activeFileTabId = null;
-			workspace.filePath = null;
+			const activeIndex = workspace.fileTabs.findIndex((tab) => tab.id === workspace.activeFileTabId);
+			if (activeIndex >= 0) workspace.fileTabs.splice(activeIndex, 1);
+			const nextFile = workspace.fileTabs[activeIndex] ?? workspace.fileTabs[activeIndex - 1] ?? null;
+			workspace.activeFileTabId = nextFile?.id ?? null;
+			workspace.filePath = nextFile?.path ?? null;
+			setWorkspaceActiveProject(workspace, nextFile ? { id: nextFile.projectId, path: nextFile.projectPath } : null, nextFile ? "file" : "session");
 			persistWorkspaces();
 			syncWorkspaceTabsBar();
 			syncSidebarSelectionFromWorkspace(workspace);
@@ -4201,6 +4574,39 @@ function renderApp(): void {
 			sidebar?.refreshActiveProjectFiles(true);
 			void applyWorkspacePane(workspace);
 		});
+	}
+
+	const contextInspectorPane = document.getElementById("context-inspector-pane");
+	if (contextInspectorPane) {
+		contextInspector = new ContextInspector(contextInspectorPane);
+		contextInspector.setOnChange(() => {
+			chatView?.refreshNovelContextOnNextRequest();
+			void refreshNovelContext(getActiveWorkspace());
+		});
+		contextInspector.setMemorySearch(async (projectPath, query) => {
+			const result = await searchStoryMemory(projectPath, query);
+			const workspace = getActiveWorkspace();
+			if (!workspace || normalizeProjectPath(getWorkspaceActiveProjectPath(workspace)) !== normalizeProjectPath(projectPath)) throw new Error("活动项目已切换，请在当前项目重新检索。");
+			return result;
+		});
+		contextInspector.setOnOpenSource((relativePath) => {
+			const workspace = getActiveWorkspace();
+			const projectPath = workspace ? getWorkspaceActiveProjectPath(workspace) : null;
+			const project = projectPath ? sidebar?.getProjectByPath(projectPath) : null;
+			if (!workspace || !project || !projectPath) return;
+			openOrActivateFileTab(workspace, joinFsPath(projectPath, relativePath), project.id, projectPath, { allowCreateTab: true });
+			persistWorkspaces();
+			syncContentTabsBar(workspace);
+			void applyWorkspacePane(workspace);
+		});
+	}
+	const novelWorkflowDialogPane = document.getElementById("novel-workflow-dialog-pane");
+	if (novelWorkflowDialogPane) {
+		novelWorkflowDialog ??= new NovelWorkflowDialog(novelWorkflowDialogPane);
+	}
+	const worldChangeDialogPane = document.getElementById("world-change-dialog-pane");
+	if (worldChangeDialogPane) {
+		worldChangeDialog ??= new WorldChangeDialog(worldChangeDialogPane);
 	}
 
 	const terminalPane = document.getElementById("terminal-pane");
@@ -4348,6 +4754,12 @@ function renderApp(): void {
 		workspace.leftMode = mode;
 		persistWorkspaces();
 		syncWorkspaceTabsBar();
+		if (mode === "novel" || mode === "review") {
+			// setMode renders before this callback. Reapply the workspace project and
+			// refresh afterwards so a stale sidebar selection cannot leak into Novel.
+			syncSidebarSelectionFromWorkspace(workspace);
+			sidebar?.refreshActiveNovelProject();
+		}
 	});
 
 	sidebar.setOnSettingsNavSelect((sectionId) => {
@@ -4360,6 +4772,20 @@ function renderApp(): void {
 		const workspace = getActiveWorkspace();
 		if (!workspace) return;
 		ensureWorkspaceContentState(workspace);
+		const selectingFromExplorer = sidebar?.getMode() === "files";
+
+		// Selecting a project from the Explorer is navigation, not a request to
+		// replace the active Pi session with that project's preferred session.
+		// Keeping it side-effect free makes the Explorer and Novel views track the
+		// same folder even while another session remains open in the chat pane.
+		if (project && selectingFromExplorer) {
+			setWorkspaceActiveProject(workspace, project, "workspace");
+			persistWorkspaces();
+			syncWorkspaceTabsBar();
+			syncSidebarSelectionFromWorkspace(workspace);
+			void applyWorkspacePane(workspace);
+			return;
+		}
 
 		const currentProjectId = getWorkspaceActiveProjectId(workspace);
 		const currentProjectPath = getWorkspaceActiveProjectPath(workspace);
@@ -4469,7 +4895,6 @@ function renderApp(): void {
 	sidebar.setOnNewSessionInProject((project) => {
 		const workspace = getActiveWorkspace();
 		if (!workspace) return;
-
 		setWorkspaceActiveProject(workspace, project);
 		pruneInactiveEphemeralSessionTabs(workspace);
 		createAndActivateEmptySessionTab(workspace, NEW_SESSION_TAB_TITLE, project.id, project.path, { forceNewTab: true });
@@ -4498,18 +4923,205 @@ function renderApp(): void {
 	});
 
 	sidebar.setOnNewFileInProject((project) => {
-		const workspace = getActiveWorkspace();
-		if (!workspace) return;
-		const draftDirectoryPath = normalizeStoredPath(project.directoryPath) ?? normalizeStoredPath(project.path);
-		const draftAnchorPath = normalizeStoredPath(project.anchorPath);
-		setWorkspaceActiveProject(workspace, project);
-		createAndActivateEmptyFileTab(workspace, NEW_FILE_TAB_TITLE, project.id, project.path, draftDirectoryPath, draftAnchorPath);
-		fileViewer?.setProjectPath(draftDirectoryPath ?? project.path);
-		persistWorkspaces();
-		syncWorkspaceTabsBar();
-		syncContentTabsBar(workspace);
-		void applyWorkspacePane(workspace);
+		void (async () => {
+			const workspace = getActiveWorkspace();
+			if (!workspace) return;
+			const novel = await loadNovelProject(project.path);
+			const draftDirectoryPath = novel ? joinFsPath(project.path, "manuscript") : normalizeStoredPath(project.directoryPath) ?? normalizeStoredPath(project.path);
+			const draftAnchorPath = novel ? null : normalizeStoredPath(project.anchorPath);
+			setWorkspaceActiveProject(workspace, project);
+			createAndActivateEmptyFileTab(workspace, NEW_FILE_TAB_TITLE, project.id, project.path, draftDirectoryPath, draftAnchorPath);
+			fileViewer?.setProjectPath(draftDirectoryPath ?? project.path);
+			persistWorkspaces();
+			syncWorkspaceTabsBar();
+			syncContentTabsBar(workspace);
+			void applyWorkspacePane(workspace);
+		})();
 	});
+
+	const openNovelWorkflow = (project: { id: string; name: string; path: string }, record: NovelChapterRecord, action: NovelWorkflowAction): void => {
+		void (async () => {
+			try {
+				const novel = await loadNovelProject(project.path);
+				if (!novel) throw new Error("Novel project metadata is missing.");
+				if (action === "resume-card-revision" || action === "resume-manuscript-revision") {
+					const revisingCard = action === "resume-card-revision";
+					const requestPath = revisingCard ? record.cardRevisionRequestPath : record.manuscriptRevisionRequestPath;
+					if (!requestPath) throw new Error("The saved revision request could not be found.");
+					await prepareRevisionRequestForWork(novel, record, revisingCard ? "chapter-card" : "manuscript", requestPath);
+					const contextPaths = [
+						requestPath,
+						revisingCard ? record.cardPath : record.candidatePath,
+						record.cardPath,
+						record.proposalPath,
+						novel.config.authority?.currentState,
+						novel.config.authority?.continuityLedger,
+					].filter((path, index, paths): path is string => Boolean(path) && paths.indexOf(path) === index);
+					activateNovelAgentTask(project, {
+						role: revisingCard ? "plan" : "write",
+						kind: revisingCard ? "review-card" : "review-manuscript",
+						chapter: record.chapter,
+						contextPaths,
+						instruction: revisingCard
+							? "请读取已有的章节卡返工请求并继续处理。不要创建新的返工请求；完成章节卡更新后停下，等待用户重新确认。"
+							: "请读取已有的正文返工请求并继续处理。不要创建新的返工请求；完成候选正文和必要的连续性提案后停下，等待用户重新验收。",
+					});
+					chatView?.notify(`已重新预填写第 ${record.chapter} 章返工任务`, "info");
+					return;
+				}
+				if (action === "inspect") {
+					novelWorkflowDialog?.open({
+						action,
+						projectName: project.name,
+						record,
+						onAction: (nextAction) => openNovelWorkflow(project, record, nextAction),
+						onOpenFile: (relativePath) => {
+							const workspace = getActiveWorkspace();
+							if (!workspace) return;
+							setWorkspaceActiveProject(workspace, project);
+							openOrActivateFileTab(workspace, joinFsPath(project.path, relativePath), project.id, project.path, { allowCreateTab: true });
+							persistWorkspaces();
+							syncWorkspaceTabsBar();
+							syncContentTabsBar(workspace);
+							void applyWorkspacePane(workspace);
+						},
+					});
+					return;
+				}
+				const acceptingCard = action === "accept-card";
+				const acceptingManuscript = action === "accept-manuscript";
+				const requestingRevision = action === "request-card-revision" || action === "request-manuscript-revision";
+				const rollingBack = action === "rollback";
+				if (rollingBack) {
+					const guard = canRollbackPromotion(record);
+					if (!guard.allowed || !record.rollbackHistory) throw new Error(guard.reason);
+				} else if (action === "promote") {
+					const guard = canPromoteChapter(record);
+					if (!guard.allowed) throw new Error(guard.reason);
+				}
+				const recordUpdates = action === "promote" ? await planChapterRecordUpdates(novel, record) : [];
+				novelWorkflowDialog?.open({
+					action,
+					projectName: project.name,
+					record,
+					recordUpdates,
+					promotionHistory: rollingBack ? record.rollbackHistory ?? undefined : undefined,
+				onConfirm: async (selectedRecordUpdates, feedback) => {
+					if (acceptingCard) await acceptChapterCard(novel, record);
+					else if (acceptingManuscript) await acceptChapterManuscript(novel, record);
+					else if (requestingRevision) {
+						const revisionScope = action === "request-card-revision" ? "chapter-card" : "manuscript";
+						await requestChapterRevision(novel, record, revisionScope, feedback ?? "");
+						const revisionContextPaths = [
+							revisionScope === "chapter-card" ? record.cardPath : record.candidatePath,
+							record.proposalPath,
+							novel.config.authority?.currentState,
+							novel.config.authority?.continuityLedger,
+						].filter((path): path is string => Boolean(path));
+						activateNovelAgentTask(project, {
+							role: revisionScope === "chapter-card" ? "plan" : "write",
+							kind: revisionScope === "chapter-card" ? "review-card" : "review-manuscript",
+							chapter: record.chapter,
+							contextPaths: [...new Set(revisionContextPaths)],
+							feedback: feedback ?? "",
+						});
+					}
+					else if (rollingBack) await rollbackPromotion(novel, record);
+						else await promoteChapter(novel, record, selectedRecordUpdates);
+						sidebar?.refreshActiveProjectFiles(true);
+						sidebar?.refreshActiveNovelProject();
+						chatView?.notify(acceptingCard ? "已确认章节卡" : acceptingManuscript ? "已确认正文通过人工验收" : requestingRevision ? "已保存修改意见" : rollingBack ? "已回滚 Canon 晋升" : "已晋升章节至 Canon", "info");
+					},
+				});
+			} catch (err) {
+				chatView?.notify(err instanceof Error ? err.message : String(err), "error");
+			}
+		})();
+	};
+
+	const openWorldChangeDialog = (project: { id: string; name: string; path: string }): void => {
+		void (async () => {
+			try {
+				const novel = await loadNovelProject(project.path);
+				if (!novel) throw new Error("Novel project metadata is missing.");
+				const reload = async () => {
+					const [documents, histories] = await Promise.all([scanNovelDocuments(novel), loadWorldChangeHistory(novel)]);
+					return { canonDocuments: documents.filter((document) => document.classification.contentType === "canon"), histories, proposals: listWorldChangeProposals(novel, documents, histories) };
+				};
+				const data = await reload();
+				const assertActiveProject = () => {
+					const workspace = getActiveWorkspace();
+					if (!workspace || normalizeProjectPath(getWorkspaceActiveProjectPath(workspace)) !== normalizeProjectPath(project.path)) throw new Error("活动项目已切换，请关闭窗口并在目标项目中重新打开世界观变更。");
+				};
+				const refreshAfterWorldChange = (targetPath: string) => {
+					fileViewer?.invalidateFile(joinFsPath(project.path, targetPath));
+					sidebar?.refreshActiveProjectFiles(true);
+					sidebar?.refreshActiveNovelProject();
+					void refreshNovelContext(getActiveWorkspace()).catch((error) => console.warn("World change context refresh failed:", error));
+				};
+				const openProjectFile = (relativePath: string): void => {
+					const workspace = getActiveWorkspace();
+					if (!workspace) return;
+					setWorkspaceActiveProject(workspace, project);
+					openOrActivateFileTab(workspace, joinFsPath(project.path, relativePath), project.id, project.path, { allowCreateTab: true });
+					persistWorkspaces();
+					syncWorkspaceTabsBar();
+					syncContentTabsBar(workspace);
+					void applyWorkspacePane(workspace);
+				};
+				worldChangeDialog?.open({
+					projectName: project.name,
+					...data,
+					onReload: reload,
+					onRollback: async (entry) => {
+						assertActiveProject();
+						fileViewer?.assertFileReadyForChange(joinFsPath(project.path, entry.targetPath));
+						await rollbackWorldChange(novel, entry);
+						refreshAfterWorldChange(entry.targetPath);
+						chatView?.notify("已回滚此世界观变更；历史快照保留，关联文件未修改", "info");
+					},
+					onOpenFile: openProjectFile,
+					onRequest: async (targetPath, feedback) => {
+						assertActiveProject();
+						const change = await requestWorldChange(novel, targetPath, feedback);
+						activateNovelAgentTask(project, {
+							role: "world",
+							kind: "world-change",
+							contextPaths: [change.requestPath, change.targetPath],
+							feedback,
+							instruction: "请根据用户的世界观变更请求创建完整替换提案。完成后停下，等待用户在世界观变更窗口审阅。",
+						});
+						sidebar?.refreshActiveProjectFiles(true);
+						sidebar?.refreshActiveNovelProject();
+						chatView?.notify("已创建世界观变更请求，并预填写世界观 Agent 任务", "info");
+					},
+					onRevise: async (proposal, feedback) => {
+						assertActiveProject();
+						activateNovelAgentTask(project, {
+							role: "world",
+							kind: "world-revision",
+							contextPaths: [proposal.proposalPath, proposal.targetPath, ...proposal.affectedPaths],
+							feedback,
+							instruction: "请根据补充意见返工已有世界观提案。完成后停下，等待用户重新审阅；不要修改 Canon。",
+						});
+						chatView?.notify("已预填写世界观提案返工任务", "info");
+					},
+					onApply: async (proposal) => {
+						assertActiveProject();
+						fileViewer?.assertFileReadyForChange(joinFsPath(project.path, proposal.targetPath));
+						await applyWorldChange(novel, proposal);
+						refreshAfterWorldChange(proposal.targetPath);
+						chatView?.notify("世界观变更已合并至 Canon；历史快照和审计记录已保存", "info");
+					},
+				});
+			} catch (error) {
+				chatView?.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		})();
+	};
+
+	sidebar.setOnNovelPromote((project, record, action) => openNovelWorkflow(project, record, action));
+	sidebar.setOnWorldChange((project) => openWorldChangeDialog(project));
 
 	const activateSidebarSession = (
 		projectId: string,
@@ -4556,6 +5168,57 @@ function renderApp(): void {
 			{ label: options?.label ?? "sidebar-session-select" },
 		);
 	};
+
+	const stageNovelAgentTask = (task: NovelAgentTask): void => {
+		const command = buildNovelAgentPrompt(task);
+		chatView?.prepareNovelAgentTask();
+		chatView?.stageComposerCommand(command);
+		clearVisibleActiveSessionAttention();
+	};
+
+	const activateNovelAgentTask = (project: { id: string; name: string; path: string }, task: NovelAgentTask): void => {
+		const workspace = getActiveWorkspace();
+		if (!workspace) return;
+		const projectPath = normalizeProjectPath(project.path);
+		ensureWorkspaceContentState(workspace);
+		let sessionTab = workspace.sessionTabs.find((tab) => tab.novelRole === task.role && normalizeProjectPath(tab.projectPath) === projectPath) ?? null;
+		if (sessionTab) {
+			setActiveSessionTab(workspace, sessionTab.id);
+			setSessionTabProject(sessionTab, project.id, project.path);
+		} else {
+			setWorkspaceActiveProject(workspace, project, "session");
+			sessionTab = createAndActivateEmptySessionTab(workspace, NOVEL_AGENT_LABELS[task.role], project.id, project.path, { forceNewTab: true, novelRole: task.role });
+		}
+		sessionTab.novelRole = task.role;
+		if (["", "chat", NEW_SESSION_TAB_TITLE.toLowerCase()].includes(sessionTab.title.trim().toLowerCase())) {
+			sessionTab.title = NOVEL_AGENT_LABELS[task.role];
+		}
+		persistWorkspaces();
+		syncWorkspaceTabsBar();
+		syncContentTabsBar(workspace);
+		syncActiveChatRuntimeBinding(workspace, { forceReset: true, statusText: `${NOVEL_AGENT_LABELS[task.role]} 正在准备…` });
+		void applyWorkspacePane(workspace);
+		void queueProjectTask(
+			async (version) => {
+				await ensureRuntimeForSessionTab(workspace, sessionTab!, project.path, true, version);
+				assertProjectTaskCurrent(version);
+				await chatView?.refreshFromBackend({ throwOnError: true });
+				assertProjectTaskCurrent(version);
+				await chatView?.refreshModels();
+				assertProjectTaskCurrent(version);
+				await applyWorkspacePane(workspace);
+				stageNovelAgentTask(task);
+			},
+			(err) => {
+				console.error(`Failed to prepare Novel ${task.role} Agent session:`, err);
+				chatView?.notify(`无法准备${NOVEL_AGENT_LABELS[task.role]}会话，请检查 Pi CLI 是否可用。`, "error");
+			},
+			{ label: `novel-agent-${task.role}-${task.kind}` },
+		);
+	};
+	routeNovelAgentTask = activateNovelAgentTask;
+
+	sidebar.setOnNovelAgentTask((project, task) => activateNovelAgentTask(project, task));
 
 	sidebar.setOnSessionSelect((projectId, sessionPath, sessionName) => {
 		activateSidebarSession(projectId, sessionPath, sessionName, { label: "sidebar-session-select" });
@@ -4718,9 +5381,12 @@ function renderApp(): void {
 			const nextFile = workspace.fileTabs[firstRemovedIndex] ?? workspace.fileTabs[firstRemovedIndex - 1] ?? workspace.fileTabs[0] ?? null;
 			workspace.activeFileTabId = nextFile?.id ?? null;
 			workspace.filePath = nextFile?.path ?? null;
+			setWorkspaceActiveProject(workspace, nextFile ? { id: nextFile.projectId, path: nextFile.projectPath } : null, nextFile ? "file" : "session");
 		} else if (!workspace.fileTabs.some((tab) => tab.id === workspace.activeFileTabId)) {
 			workspace.activeFileTabId = workspace.fileTabs[0]?.id ?? null;
 			workspace.filePath = workspace.fileTabs[0]?.path ?? null;
+			const nextFile = workspace.fileTabs[0] ?? null;
+			setWorkspaceActiveProject(workspace, nextFile ? { id: nextFile.projectId, path: nextFile.projectPath } : null, nextFile ? "file" : "session");
 		}
 
 		ensureWorkspaceContentState(workspace);
@@ -4735,8 +5401,8 @@ function renderApp(): void {
 		const project = sidebar?.getProjectById(projectId);
 		if (!workspace || !project) return;
 
-		setWorkspaceActiveProject(workspace, project);
-		openOrActivateFileTab(workspace, filePath, project.id, project.path, { allowCreateTab: false });
+		setWorkspaceActiveProject(workspace, project, "file");
+		openOrActivateFileTab(workspace, filePath, project.id, project.path, { allowCreateTab: true });
 		persistWorkspaces();
 		syncWorkspaceTabsBar();
 		syncContentTabsBar(workspace);
@@ -4764,6 +5430,7 @@ function setupThemeSyncListeners(): void {
 }
 
 applyInitialTheme();
+installChineseUiLocalization();
 void applyNativeWindowVisualFixes();
 setupThemeSyncListeners();
 setupKeyboardShortcuts();
