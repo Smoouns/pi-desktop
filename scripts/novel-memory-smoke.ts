@@ -94,8 +94,8 @@ assert.ok(bounded.warnings.some((warning) => warning.includes("canon/oversized.m
 assert.ok(bounded.memories.every((memory) => memory.text.length <= 8000));
 files.delete("canon/oversized.md");
 
-// Real project data is read only. Assertions freeze useful retrieval cases, not wording.
-const fixtureRoot = path.resolve("fixtures/novel-projects/fate-control-cycle-sample");
+// Public synthetic fixture is read only. Assertions freeze useful retrieval cases, not general recall quality.
+const fixtureRoot = path.resolve("fixtures/harness-novel");
 const fixtureIO: MemoryIO = {
 	async read(relative) { return readFile(path.join(fixtureRoot, relative), "utf8"); },
 	async list(relative) {
@@ -103,12 +103,12 @@ const fixtureIO: MemoryIO = {
 	},
 };
 const fixture = await engine.snapshot(fixtureRoot, fixtureIO);
-assert.ok(fixture.sourceCount >= 16);
+assert.ok(fixture.sourceCount >= 7);
 const cases = [
-	{ query: "九级最低 一级最高", expected: "02-cultivation-and-combat.md" },
-	{ query: "地级以下 天地规则", expected: "02-cultivation-and-combat.md" },
-	{ query: "周静宜 不知道", expected: "current-story-state.md" },
-	{ query: "塑料文件袋 书桌抽屉", expected: "current-story-state.md" },
+	{ query: "白潮栓 校准潮位刻度 不能预测风暴", expected: "canon/world.md" },
+	{ query: "林岚 北窗七码", expected: "canon/characters.md" },
+	{ query: "林澜 不知道 北窗七码", expected: "canon/characters.md" },
+	{ query: "红色拨轮 复位", expected: "drafts/candidates/chapters/002.md" },
 ];
 let passed = 0;
 for (const test of cases) {
@@ -117,5 +117,8 @@ for (const test of cases) {
 	console.log(JSON.stringify({ query: test.query, found, paths: results.hits.map((hit) => `${hit.path}:${hit.startLine}`) }));
 	assert.ok(found, `fixture retrieval: ${test.query}`); passed++;
 }
-assert.ok(!engine.search(fixture, { query: "017" }).hits.some((hit) => hit.path.startsWith("drafts/candidates")));
-console.log(`Novel memory smoke passed; real fixture recall ${passed}/${cases.length}, ${fixture.sourceCount} sources, ${fixture.memories.length} excerpts`);
+assert.ok(!engine.search(fixture, { query: "南堤铜铃 回声铃" }).hits.some((hit) => hit.path.endsWith("003.md")));
+assert.ok(!engine.search(fixture, { query: "海底旧钟塔 遥控" }).hits.some((hit) => hit.path.includes("continuity-proposals")));
+assert.ok(!engine.search(fixture, { query: "绿色记录册", includePlanned: false }).hits.some((hit) => hit.temporal === "planned"));
+assert.ok(engine.search(fixture, { query: "绿色记录册", includePlanned: true }).hits.some((hit) => hit.temporal === "planned"));
+console.log(`Novel memory smoke passed; public fixture recall ${passed}/${cases.length}, ${fixture.sourceCount} sources, ${fixture.memories.length} excerpts`);

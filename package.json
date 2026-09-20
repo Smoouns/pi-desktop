@@ -20,7 +20,12 @@
 		"build": "tauri build",
 		"preview": "vite preview",
 		"check": "tsc --noEmit",
-		"test:novel-domain": "powershell -ExecutionPolicy Bypass -File scripts/test-novel-domain.ps1 && powershell -ExecutionPolicy Bypass -File scripts/test-novel-tools-extension.ps1 && powershell -ExecutionPolicy Bypass -File scripts/test-novel-verifier.ps1 && powershell -ExecutionPolicy Bypass -File scripts/test-world-change.ps1 && npm run test:novel-memory",
+		"check:harness-tests": "tsc --project tsconfig.harness.json",
+		"test": "npm run test:harness && npm run test:novel-domain",
+		"test:harness": "node scripts/run-public-tests.mjs harness",
+		"test:harness:baseline": "node scripts/run-harness-baseline.mjs",
+		"test:harness:isolated": "node scripts/test-harness-isolated.mjs",
+		"test:novel-domain": "node scripts/run-public-tests.mjs regression",
 		"test:novel-memory": "node --experimental-strip-types scripts/novel-memory-smoke.ts"
 	},
 	"dependencies": {
@@ -39,6 +44,9 @@
 		"pi-cursor-agent": "^0.4.2"
 	},
 	"devDependencies": {
+		"@mariozechner/pi-coding-agent": "0.63.1",
+		"@types/node": "25.5.0",
+		"esbuild": "0.27.3",
 		"@tauri-apps/cli": "^2.0.0",
 		"typescript": "^5.7.3",
 		"vite": "^7.1.6"

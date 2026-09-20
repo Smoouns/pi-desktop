@@ -115,7 +115,7 @@ export function serializeNovelContextManifest(items: ContextItem[]): string {
 		"带 memory_id 的条目必须使用 read_story_memory(id) 重新核验并读取；失效时重新搜索，勿引用旧片段。设定被确认不代表角色已经知情。",
 	];
 	for (const item of items) {
-		lines.push(`### ${item.relativePath}\ncontentType: ${item.contentType}\nauthority: ${item.authority}\nread_requirement: ${item.readRequirement}\nreason: ${item.reason}\nestimated_tokens: ${item.estimatedTokens}${item.memory ? `\nmemory_id: ${item.memory.id}\nsource_sha256: ${item.memory.sourceFingerprint}\nsource_lines: ${item.memory.startLine}-${item.memory.endLine}\nlayer: ${item.memory.layer}\ntime_scope: ${item.memory.temporal}\nsource_kind: ${item.memory.kind}` : ""}`);
+		lines.push(`### ${item.relativePath}\ncontentType: ${item.contentType}\nauthority: ${item.authority}\nread_requirement: ${item.readRequirement}\nreason: ${item.reason}\nactive_document: ${item.reason === "active document" ? "true" : "false"}\nestimated_tokens: ${item.estimatedTokens}${item.memory ? `\nmemory_id: ${item.memory.id}\nsource_sha256: ${item.memory.sourceFingerprint}\nsource_lines: ${item.memory.startLine}-${item.memory.endLine}\nlayer: ${item.memory.layer}\ntime_scope: ${item.memory.temporal}\nsource_kind: ${item.memory.kind}` : ""}`);
 	}
 	return lines.join("\n\n");
 }

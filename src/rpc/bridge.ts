@@ -121,6 +121,17 @@ export interface RpcCompatibilityReport {
 
 export type RpcEventCallback = (event: Record<string, unknown>) => void;
 
+export interface RpcBridgeDiagnosticEvent {
+	type: "accepted_legacy_event" | "discarded_event" | "unmatched_response";
+	channel: "stdout" | "closed" | "stderr";
+	reason: "missing_generation" | "instance_mismatch" | "generation_mismatch" | "no_pending_request";
+	instanceId: string;
+	generation: number | null;
+	requestId?: string;
+}
+
+export type RpcBridgeDiagnosticCallback = (event: RpcBridgeDiagnosticEvent) => void;
+
 interface RpcLineEventPayload {
 	instance_id?: string;
 	instanceId?: string;
@@ -236,6 +247,7 @@ function extractRuntimeErrorFromTextLine(line: string): string | null {
 
 export class RpcBridge {
 	private readonly instanceId: string;
+	private readonly onDiagnostic: RpcBridgeDiagnosticCallback | null;
 	private requestId = 0;
 	private pendingRequests = new Map<
 		string,
@@ -255,8 +267,9 @@ export class RpcBridge {
 	private preferredPiPath: string | null = null;
 	private parseFailureCount = 0;
 
-	constructor(instanceId = "default") {
+	constructor(instanceId = "default", onDiagnostic: RpcBridgeDiagnosticCallback | null = null) {
 		this.instanceId = normalizeInstanceId(instanceId);
+		this.onDiagnostic = onDiagnostic;
 	}
 
 	getInstanceId(): string {
@@ -631,6 +644,49 @@ export class RpcBridge {
 		return generation === this.currentGeneration;
 	}
 
+	private diagnose(
+		type: RpcBridgeDiagnosticEvent["type"],
+		channel: RpcBridgeDiagnosticEvent["channel"],
+		reason: RpcBridgeDiagnosticEvent["reason"],
+		payload: RpcLineEventPayload | RpcClosedEventPayload,
+		requestId?: string,
+	): void {
+		this.emitDiagnostic({
+			type,
+			channel,
+			reason,
+			instanceId: payloadInstanceId(payload),
+			generation: payloadGeneration(payload),
+			...(requestId ? { requestId } : {}),
+		});
+	}
+
+	private emitDiagnostic(event: RpcBridgeDiagnosticEvent): void {
+		try {
+			this.onDiagnostic?.(event);
+		} catch (err) {
+			traceBridge(`diagnostic-listener-error instance=${this.instanceId}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private acceptsPayload(
+		payload: RpcLineEventPayload | RpcClosedEventPayload,
+		channel: RpcBridgeDiagnosticEvent["channel"],
+	): boolean {
+		if (payloadInstanceId(payload) !== this.instanceId) {
+			this.diagnose("discarded_event", channel, "instance_mismatch", payload);
+			return false;
+		}
+		if (!this.matchesPayloadGeneration(payload)) {
+			this.diagnose("discarded_event", channel, "generation_mismatch", payload);
+			return false;
+		}
+		if (payloadGeneration(payload) === null) {
+			this.diagnose("accepted_legacy_event", channel, "missing_generation", payload);
+		}
+		return true;
+	}
+
 	private emitToListeners(event: Record<string, unknown>): void {
 		for (const listener of this.eventListeners) {
 			try {
@@ -655,8 +711,7 @@ export class RpcBridge {
 			try {
 				unlistenEventLocal = await listen<RpcLineEventPayload>("rpc-event", (event) => {
 					const payload = event.payload;
-					if (payloadInstanceId(payload) !== this.instanceId) return;
-					if (!this.matchesPayloadGeneration(payload)) return;
+					if (!this.acceptsPayload(payload, "stdout")) return;
 					const line = typeof payload.line === "string" ? payload.line : "";
 					if (!line) return;
 					this.handleLine(line);
@@ -664,8 +719,7 @@ export class RpcBridge {
 
 				unlistenClosedLocal = await listen<RpcClosedEventPayload>("rpc-closed", (event) => {
 					const payload = event.payload;
-					if (payloadInstanceId(payload) !== this.instanceId) return;
-					if (!this.matchesPayloadGeneration(payload)) return;
+					if (!this.acceptsPayload(payload, "closed")) return;
 					this._isConnected = false;
 					traceBridge(`closed instance=${this.instanceId} generation=${payload.generation ?? -1} reason=${typeof payload.reason === "string" ? payload.reason : "RPC process closed"}`);
 					this.rejectAllPending(typeof payload.reason === "string" ? payload.reason : "RPC process closed");
@@ -674,8 +728,7 @@ export class RpcBridge {
 
 				unlistenStderrLocal = await listen<RpcLineEventPayload>("rpc-stderr", (event) => {
 					const payload = event.payload;
-					if (payloadInstanceId(payload) !== this.instanceId) return;
-					if (!this.matchesPayloadGeneration(payload)) return;
+					if (!this.acceptsPayload(payload, "stderr")) return;
 					const line = typeof payload.line === "string" ? payload.line : "";
 					if (!line) return;
 					console.debug(`[pi stderr:${this.instanceId}]`, line);
@@ -738,6 +791,16 @@ export class RpcBridge {
 			traceBridge(`response instance=${this.instanceId} id=${data.id} command=${String(data.command ?? "-")} success=${data.success === false ? "no" : "yes"}`);
 			pending.resolve(data);
 			return;
+		}
+		if (data.type === "response" && typeof data.id === "string") {
+			this.emitDiagnostic({
+				type: "unmatched_response",
+				channel: "stdout",
+				reason: "no_pending_request",
+				instanceId: this.instanceId,
+				generation: this.currentGeneration,
+				requestId: data.id,
+			});
 		}
 
 		this.emitToListeners(data);

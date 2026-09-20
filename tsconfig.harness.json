@@ -1,0 +1,16 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"types": ["node", "vite/client"]
+	},
+	"include": [
+		"tests/**/*.ts",
+		"scripts/novel-domain-smoke.ts",
+		"scripts/novel-tools-extension-smoke.ts",
+		"scripts/novel-verifier-smoke.ts",
+		"scripts/novel-memory-smoke.ts",
+		"scripts/world-change-smoke.ts",
+		"scripts/world-change-test-fs.ts",
+		"scripts/verify-novel-chapter.ts"
+	]
+}

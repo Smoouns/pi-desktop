@@ -39,6 +39,7 @@ import {
 	resolveProviderHintFromModelArg,
 } from "../models/model-selection.js";
 import { isExtensionConfigIntent, normalizeExtensionCommandName } from "../extensions/extension-command-intent.js";
+import { shouldAttachNovelContext } from "../novel/context-attachment.js";
 import { renderComposerControlsView } from "./chat-view/composer-controls-view.js";
 import {
 	renderComposerSkillDraftPillView,
@@ -3427,8 +3428,12 @@ export class ChatView {
 	async sendMessage(mode: DeliveryMode = this.pendingDeliveryMode): Promise<void> {
 		const rawInputText = this.composedPromptText(this.inputText);
 		const isSlashCommand = !this.selectedSkillDraft && rawInputText.trim().startsWith("/");
-		const shouldAttachNovelContext = !isSlashCommand && !this.novelContextAttachedForSession && rawInputText.trim().length > 0;
-		const novelContext = shouldAttachNovelContext && this.novelContextProvider ? await this.novelContextProvider(rawInputText) : "";
+		const attachNovelContext = shouldAttachNovelContext({
+			text: rawInputText,
+			isSlashCommand,
+			alreadyAttached: this.novelContextAttachedForSession,
+		});
+		const novelContext = attachNovelContext && this.novelContextProvider ? await this.novelContextProvider(rawInputText) : "";
 		const inputText = novelContext ? `${rawInputText}\n\n<novel-context>\n${novelContext}\n</novel-context>` : rawInputText;
 		await sendMessageFlow({
 			mode,

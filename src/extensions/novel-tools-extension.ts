@@ -1,7 +1,7 @@
 import { createNovelMemoryEngine } from "../novel/memory-engine.ts";
 
 const NOVEL_TOOLS_EXTENSION_FILE = "pi-desktop-novel-tools.ts";
-const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v6";
+const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v7";
 const NOVEL_TOOLS_EXTENSION_MARKER_PREFIX = "pi-desktop-novel-tools-extension/";
 
 export const NOVEL_TOOLS_EXTENSION_CONTENT = `/**
@@ -97,24 +97,53 @@ function projectRoot(ctx) {
 
 async function loadProject(ctx) {
 	const root = projectRoot(ctx);
+	const metadataPath = path.join(root, ".novel", "project.json");
 	try {
-		const raw = await readFile(path.join(root, ".novel", "project.json"), "utf8");
+		await assertNoLinkedSegments(root, metadataPath, false);
+		const raw = await readFile(metadataPath, "utf8");
 		const config = JSON.parse(raw.replace(/^\uFEFF/, ""));
-		if (!config || typeof config !== "object") throw new Error("invalid project metadata");
+		if (!config || typeof config !== "object" || config.formatVersion !== 1) throw new Error("invalid project metadata");
 		return { root, config };
-	} catch {
-		throw new Error("This tool is available only when the active project contains .novel/project.json.");
+	} catch (error) {
+		const missing = error && typeof error === "object" && error.code === "ENOENT";
+		const failure = new Error(missing
+			? "This tool is available only when the active project contains .novel/project.json."
+			: "The active Novel Project metadata is invalid or unsafe.");
+		failure.code = missing ? "NOVEL_PROJECT_MISSING" : "NOVEL_PROJECT_INVALID";
+		throw failure;
 	}
 }
 
 function resolveStoryPath(root, relativePath) {
 	if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("A non-empty project-relative path is required.");
-	if (path.isAbsolute(relativePath)) throw new Error("Absolute paths are not allowed.");
+	if (relativePath.includes("\\\\") || path.isAbsolute(relativePath) || /^[A-Za-z]:/.test(relativePath) || relativePath.includes(":")) throw new Error("Absolute, mixed-separator, and stream paths are not allowed.");
+	if (relativePath.split("/").some((part) => !part || part === "." || part === ".." || /[. ]$/.test(part))) throw new Error("Path must use canonical project-relative segments.");
 	const target = path.resolve(root, relativePath);
 	const relative = path.relative(root, target);
 	if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) {
 		throw new Error("Path must remain inside the active Novel Project.");
 	}
+	return target;
+}
+
+async function assertNoLinkedSegments(root, target, allowMissing) {
+	const relative = path.relative(root, target);
+	if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error("Path must remain inside the active Novel Project.");
+	let current = root;
+	for (const segment of relative.split(path.sep)) {
+		current = path.join(current, segment);
+		try {
+			if ((await lstat(current)).isSymbolicLink()) throw new Error("Novel tools do not follow symbolic links or junctions.");
+		} catch (error) {
+			if (allowMissing && error && typeof error === "object" && error.code === "ENOENT") return;
+			throw error;
+		}
+	}
+}
+
+async function secureStoryPath(root, relativePath, allowMissing = false) {
+	const target = resolveStoryPath(root, relativePath);
+	await assertNoLinkedSegments(root, target, allowMissing);
 	return target;
 }
 
@@ -151,7 +180,7 @@ function categoryFor(relativePath, config) {
 }
 
 async function readStoryFile(root, relativePath) {
-	const target = resolveStoryPath(root, relativePath);
+	const target = await secureStoryPath(root, relativePath);
 	const info = await stat(target);
 	if (!info.isFile()) throw new Error("The requested story path is not a file.");
 	return { relativePath: relativeTo(root, target), text: truncate(await readFile(target, "utf8")) };
@@ -192,8 +221,16 @@ function currentDocumentFromSession(ctx) {
 		const entry = branch[index];
 		const message = entry?.type === "message" ? entry.message : null;
 		if (message?.role !== "user") continue;
-		const match = /<novel-context>\\s*\\n### ([^\\r\\n]+)\\ncontentType:/m.exec(messageText(message));
-		if (match?.[1]) return match[1].trim();
+		const extracted = extractNovelContext(messageText(message));
+		if (!extracted) continue;
+		const entries = [...extracted.context.matchAll(/^### ([^\\r\\n]+)\\r?\\n([\\s\\S]*?)(?=^### |(?![\\s\\S]))/gm)];
+		for (const entry of entries) {
+			const metadata = entry[2] ?? "";
+			if (/^active_document:\\s*true\\s*$/im.test(metadata) || /^reason:\\s*active(?: document)?\\s*$/im.test(metadata)) return entry[1].trim();
+		}
+		// The newest request context is authoritative. Never fall back to an older
+		// active document when this request explicitly contains no active file.
+		return null;
 	}
 	return null;
 }
@@ -211,12 +248,21 @@ function currentNovelRole(ctx) {
 	return null;
 }
 
-function projectRelativeWritePath(root, candidate) {
+async function projectRelativeWritePath(root, candidate) {
 	if (typeof candidate !== "string" || !candidate.trim()) return null;
-	const target = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(root, candidate);
-	const relative = path.relative(root, target);
-	if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) return null;
-	return normalized(relative);
+	try {
+		let target;
+		if (path.isAbsolute(candidate)) {
+			if ((candidate.includes("/") && candidate.includes("\\\\")) || (process.platform === "win32" && candidate.slice(2).includes(":"))) return null;
+			target = path.resolve(candidate);
+			const relative = path.relative(root, target);
+			if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) return null;
+			await assertNoLinkedSegments(root, target, true);
+		} else {
+			target = await secureStoryPath(root, candidate, true);
+		}
+		return normalized(path.relative(root, target));
+	} catch { return null; }
 }
 
 function isRoleWriteAllowed(role, relativePath) {
@@ -278,7 +324,11 @@ export default function (pi) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		let project;
-		try { project = await loadProject(ctx); } catch { return; }
+		try { project = await loadProject(ctx); } catch (error) {
+			if (error && typeof error === "object" && error.code === "NOVEL_PROJECT_MISSING") return;
+			if (["bash", "write", "edit"].includes(event.toolName)) return { block: true, reason: "Novel Project metadata is invalid or unsafe; write-capable tools are blocked." };
+			return;
+		}
 		if (event.toolName === "bash") {
 			return { block: true, reason: "Novel Agent 禁止使用 bash；请使用受角色权限限制的文件工具。" };
 		}
@@ -287,7 +337,7 @@ export default function (pi) {
 		if (!role) {
 			return { block: true, reason: "Novel Agent 写入需要通过 /novel-world、/novel-plan、/novel-write 或 /novel-review 选择角色。" };
 		}
-		const relativePath = projectRelativeWritePath(project.root, event.input?.path);
+		const relativePath = await projectRelativeWritePath(project.root, event.input?.path);
 		if (!relativePath) {
 			return { block: true, reason: "Novel Agent 只能写入当前小说项目内的明确文件路径。" };
 		}

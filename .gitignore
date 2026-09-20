@@ -43,3 +43,6 @@ yarn-error.log*
 # Private local novel sample and temporary application database copies
 /fixtures/novel-projects/fate-control-cycle-sample/
 /tmp-leveldb-read/
+
+# Reproducible synthetic harness outputs (never private project data)
+/artifacts/harness/

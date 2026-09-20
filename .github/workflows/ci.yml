@@ -10,6 +10,41 @@ permissions:
   contents: read
 
 jobs:
+  harness:
+    name: Public harness (${{ matrix.os }}, Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            node: 22
+          - os: windows-latest
+            node: 24
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run check:harness-tests
+      - run: npm run test:harness:baseline
+      - run: npm run test:harness
+      - run: npm run test:novel-domain
+      - run: npm run build:frontend
+      - name: Upload synthetic traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-${{ matrix.os }}-node${{ matrix.node }}
+          path: artifacts/harness/*.json
+          retention-days: 7
+          if-no-files-found: warn
+
   validate:
     name: Validate (TypeScript + Rust)
     runs-on: ubuntu-22.04

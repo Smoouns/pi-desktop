@@ -1,0 +1,25 @@
+{
+  "formatVersion": 1,
+  "name": "白潮站公开测试小说",
+  "localFirst": true,
+  "layout": {
+    "manuscript": ["manuscript"],
+    "canon": ["canon"],
+    "planning": ["planning"],
+    "drafts": ["drafts"],
+    "craft": ["craft"],
+    "notes": ["notes"],
+    "memory": ["memory"],
+    "research": ["research"],
+    "assets": ["assets"],
+    "archive": ["archive"],
+    "exports": ["exports"]
+  },
+  "authority": {
+    "canonicalPaths": ["manuscript/chapters"],
+    "proposedPaths": ["drafts/candidates"],
+    "canonicalTextIndex": "canon/canonical-text-index.md",
+    "currentState": "canon/current-state.md",
+    "continuityLedger": "canon/continuity-ledger.md"
+  }
+}

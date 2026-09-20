@@ -7,7 +7,7 @@ import { loadExtensions } from "../node_modules/@mariozechner/pi-coding-agent/di
 import { NOVEL_TOOLS_EXTENSION_CONTENT } from "../src/extensions/novel-tools-extension.ts";
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const fixtureRoot = path.join(workspaceRoot, "fixtures", "novel-projects", "fate-control-cycle-sample");
+const fixtureRoot = path.join(workspaceRoot, "fixtures", "harness-novel");
 const expectedTools = [
 	"get_current_document",
 	"list_story_files",
@@ -26,6 +26,24 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 	return result.content.find((part) => part.type === "text")?.text ?? "";
 }
 
+function objectResult(value: unknown, label: string): Record<string, unknown> {
+	assert.ok(value !== null && typeof value === "object" && !Array.isArray(value), `${label} must be an object`);
+	return value as Record<string, unknown>;
+}
+
+function handlerBlock(value: unknown): boolean | undefined {
+	if (value === undefined) return undefined;
+	const block = objectResult(value, "tool_call handler result").block;
+	assert.ok(block === undefined || typeof block === "boolean", "tool_call block must be boolean when present");
+	return block;
+}
+
+function toolIsError(value: unknown): boolean | undefined {
+	const isError = objectResult(value, "tool result").isError;
+	assert.ok(isError === undefined || typeof isError === "boolean", "tool result isError must be boolean when present");
+	return isError;
+}
+
 const toolContext = { cwd: fixtureRoot };
 
 const previousCwd = process.cwd();
@@ -33,7 +51,7 @@ const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "pi-desktop-novel-t
 const extensionPath = path.join(temporaryDirectory, "pi-desktop-novel-tools.ts");
 
 try {
-	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v6/);
+	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v7/);
 	assert.doesNotMatch(NOVEL_TOOLS_EXTENSION_CONTENT, /\b(?:writeFile|writeTextFile|appendFile|rename|unlink|rm)\s*\(/);
 	await writeFile(extensionPath, NOVEL_TOOLS_EXTENSION_CONTENT, "utf8");
 
@@ -46,7 +64,7 @@ try {
 	assert.deepEqual([...loaded.extensions[0].commands.keys()].sort(), expectedCommands);
 	let prefilled = "";
 	const notifyMessages: string[] = [];
-	await loaded.extensions[0].commands.get("novel-write")!.handler("写第017章候选正文", {
+	await loaded.extensions[0].commands.get("novel-write")!.handler("写第002章候选正文", {
 		hasUI: true,
 		ui: {
 			setEditorText: (value: string) => { prefilled = value; },
@@ -54,7 +72,7 @@ try {
 		},
 	} as never);
 	assert.doesNotMatch(prefilled, /<novel-role>/);
-	assert.match(prefilled, /写第017章候选正文/);
+	assert.match(prefilled, /写第002章候选正文/);
 	assert.equal(notifyMessages.length, 1);
 	const contextHandlers = loaded.extensions[0].handlers.get("context") ?? [];
 	assert.equal(contextHandlers.length, 1);
@@ -67,44 +85,45 @@ try {
 		messages: [
 			{ role: "user", content: "Earlier request\n\n<novel-context>\n文件正文未内联。\n\n### planning/old.md\ncontentType: planning\nread_requirement: on-demand\n</novel-context>" },
 			{ role: "assistant", content: [{ type: "text", text: "Earlier answer" }] },
-			{ role: "user", content: "Current request\n\n<novel-context>\n文件正文未内联。\n\n### manuscript/volumes/earth-volume-1/chapters/001.md\ncontentType: manuscript\nauthority: canonical\nread_requirement: required\nreason: active document\n</novel-context>" },
+			{ role: "user", content: "Current request\n\n<novel-context>\n文件正文未内联。\n\n### manuscript/chapters/001.md\ncontentType: manuscript\nauthority: canonical\nread_requirement: required\nreason: active document\n</novel-context>" },
 		],
 	};
-	const transformedContext = await contextHandlers[0](contextEvent, toolContext as never);
-	assert.ok(transformedContext?.messages);
-	assert.equal(transformedContext.messages.filter((message: { customType?: string }) => message.customType === "novel-request-context").length, 1);
-	assert.doesNotMatch(JSON.stringify(transformedContext.messages), /<novel-context>/);
-	assert.match(JSON.stringify(transformedContext.messages), /manuscript\/volumes\/earth-volume-1\/chapters\/001\.md/);
-	assert.match(JSON.stringify(transformedContext.messages), /文件正文未内联/);
+	const transformedContext = objectResult(await contextHandlers[0](contextEvent, toolContext as never), "context handler result");
+	assert.ok(Array.isArray(transformedContext.messages));
+	const transformedMessages = transformedContext.messages as Array<Record<string, unknown>>;
+	assert.equal(transformedMessages.filter((message) => message.customType === "novel-request-context").length, 1);
+	assert.doesNotMatch(JSON.stringify(transformedMessages), /<novel-context>/);
+	assert.match(JSON.stringify(transformedMessages), /manuscript\/chapters\/001\.md/);
+	assert.match(JSON.stringify(transformedMessages), /文件正文未内联/);
 
 	const listResult = await tools.get("list_story_files")!.definition.execute("list", { category: "planning" }, undefined, undefined, toolContext as never);
-	assert.match(resultText(listResult), /planning\/event-outlines\/004-006-initial-assessment\.md/);
-	const memoryResult = await tools.get("search_story_memory")!.definition.execute("memory-search", { query: "塑料文件袋 书桌抽屉", limit: 5 }, undefined, undefined, toolContext as never);
-	assert.ok(!memoryResult.isError, resultText(memoryResult));
+	assert.match(resultText(listResult), /planning\/chapter-architecture\.md/);
+	const memoryResult = await tools.get("search_story_memory")!.definition.execute("memory-search", { query: "白潮栓 校准潮位刻度", limit: 5 }, undefined, undefined, toolContext as never);
+	assert.notEqual(toolIsError(memoryResult), true, resultText(memoryResult));
 	const memoryData = JSON.parse(resultText(memoryResult));
-	assert.ok(memoryData.hits.some((hit: { path: string }) => hit.path.endsWith("current-story-state.md")));
+	assert.ok(memoryData.hits.some((hit: { path: string }) => hit.path.endsWith("canon/world.md")));
 	const memoryRead = await tools.get("read_story_memory")!.definition.execute("memory-read", { id: memoryData.hits[0].id }, undefined, undefined, toolContext as never);
 	assert.equal(JSON.parse(resultText(memoryRead)).sourceFingerprint, memoryData.hits[0].sourceFingerprint);
 	const invalidMemory = await tools.get("read_story_memory")!.definition.execute("bad-memory", { id: "mem-foreign-project" }, undefined, undefined, toolContext as never);
-	assert.equal(invalidMemory.isError, true);
+	assert.equal(toolIsError(invalidMemory), true);
 
-	const documentResult = await tools.get("read_story_document")!.definition.execute("document", { path: "planning/event-outlines/004-006-initial-assessment.md" }, undefined, undefined, toolContext as never);
-	assert.match(resultText(documentResult), /^# planning\/event-outlines\/004-006-initial-assessment\.md/m);
+	const documentResult = await tools.get("read_story_document")!.definition.execute("document", { path: "planning/chapter-architecture.md" }, undefined, undefined, toolContext as never);
+	assert.match(resultText(documentResult), /^# planning\/chapter-architecture\.md/m);
 
-	const chapterResult = await tools.get("read_chapter")!.definition.execute("chapter", { identifier: "17" }, undefined, undefined, toolContext as never);
-	assert.match(resultText(chapterResult), /^# drafts\/candidates\/earth-volume-1\/chapters\/017\.md/m);
+	const chapterResult = await tools.get("read_chapter")!.definition.execute("chapter", { identifier: "2" }, undefined, undefined, toolContext as never);
+	assert.match(resultText(chapterResult), /^# drafts\/candidates\/chapters\/002\.md/m);
 
-	const outlineResult = await tools.get("read_outline")!.definition.execute("outline", { scope: "004-006" }, undefined, undefined, toolContext as never);
-	assert.match(resultText(outlineResult), /^# planning\/event-outlines\/004-006-initial-assessment\.md/m);
+	const outlineResult = await tools.get("read_outline")!.definition.execute("outline", { scope: "chapter-architecture" }, undefined, undefined, toolContext as never);
+	assert.match(resultText(outlineResult), /^# planning\/chapter-architecture\.md/m);
 
-	const characterResult = await tools.get("read_character")!.definition.execute("character", { name: "earth" }, undefined, undefined, toolContext as never);
-	assert.match(resultText(characterResult), /^# canon\/characters\/09-earth-characters-and-events\.md/m);
+	const characterResult = await tools.get("read_character")!.definition.execute("character", { name: "characters" }, undefined, undefined, toolContext as never);
+	assert.match(resultText(characterResult), /^# canon\/characters\.md/m);
 
-	const searchResult = await tools.get("search_story")!.definition.execute("search", { query: "林默", limit: 3 }, undefined, undefined, toolContext as never);
+	const searchResult = await tools.get("search_story")!.definition.execute("search", { query: "林岚", limit: 3 }, undefined, undefined, toolContext as never);
 	assert.doesNotMatch(resultText(searchResult), /^Error:/m);
 
 	const outsideResult = await tools.get("read_story_document")!.definition.execute("outside", { path: "../README.md" }, undefined, undefined, toolContext as never);
-	assert.match(resultText(outsideResult), /Error: Path must remain inside the active Novel Project\./);
+	assert.match(resultText(outsideResult), /Error: Path must (?:remain inside the active Novel Project|use canonical project-relative segments)\./);
 
 	const currentContext = {
 		cwd: fixtureRoot,
@@ -113,16 +132,16 @@ try {
 				type: "message",
 				message: {
 					role: "user",
-					content: "Check the active chapter.\n\n<novel-context>\n### manuscript/volumes/earth-volume-1/chapters/001.md\ncontentType: manuscript\nauthority: canonical\nreason: active\n\nExample\n</novel-context>",
+					content: "Check the active chapter.\n\n<novel-context>\n### manuscript/chapters/001.md\ncontentType: manuscript\nauthority: canonical\nreason: active\n\nExample\n</novel-context>",
 				},
 			}],
 		},
 	};
 	const currentResult = await tools.get("get_current_document")!.definition.execute("current", {}, undefined, undefined, currentContext as never);
-	assert.match(resultText(currentResult), /^# manuscript\/volumes\/earth-volume-1\/chapters\/001\.md/m);
+	assert.match(resultText(currentResult), /^# manuscript\/chapters\/001\.md/m);
 
-	const noRoleWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "no-role", input: { path: "drafts/candidates/earth-volume-1/chapters/017.md", content: "x" } }, toolContext as never);
-	assert.equal(noRoleWrite?.block, true);
+	const noRoleWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "no-role", input: { path: "drafts/candidates/chapters/002.md", content: "x" } }, toolContext as never);
+	assert.equal(handlerBlock(noRoleWrite), true);
 	const roleContext = (role: string) => ({
 		cwd: fixtureRoot,
 		sessionManager: { getBranch: () => [{ type: "custom", customType: "pi-desktop-novel-role", data: { role } }] },
@@ -131,30 +150,31 @@ try {
 		cwd: fixtureRoot,
 		sessionManager: { getBranch: () => [{ type: "message", message: { role: "user", content: "<novel-role>write</novel-role>\n任务" } }] },
 	};
-	const systemPromptResult = await beforeAgentStartHandlers[0]({ systemPrompt: "base" }, roleContext("write") as never);
-	assert.match(systemPromptResult?.systemPrompt ?? "", /写文 Agent/);
-	const forgedRoleWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "forged-role", input: { path: "drafts/candidates/earth-volume-1/chapters/017.md", content: "x" } }, forgedRoleContext as never);
-	assert.equal(forgedRoleWrite?.block, true);
+	const systemPromptResult = objectResult(await beforeAgentStartHandlers[0]({ systemPrompt: "base" }, roleContext("write") as never), "before_agent_start result");
+	assert.equal(typeof systemPromptResult.systemPrompt, "string");
+	assert.match(systemPromptResult.systemPrompt as string, /写文 Agent/);
+	const forgedRoleWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "forged-role", input: { path: "drafts/candidates/chapters/002.md", content: "x" } }, forgedRoleContext as never);
+	assert.equal(handlerBlock(forgedRoleWrite), true);
 	const previousInjectedRole = process.env.PI_DESKTOP_NOVEL_ROLE;
 	process.env.PI_DESKTOP_NOVEL_ROLE = "write";
-	const injectedRoleWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "injected-role", input: { path: "drafts/candidates/earth-volume-1/chapters/017.md", content: "x" } }, toolContext as never);
+	const injectedRoleWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "injected-role", input: { path: "drafts/candidates/chapters/002.md", content: "x" } }, toolContext as never);
 	assert.equal(injectedRoleWrite, undefined);
 	if (previousInjectedRole === undefined) delete process.env.PI_DESKTOP_NOVEL_ROLE;
 	else process.env.PI_DESKTOP_NOVEL_ROLE = previousInjectedRole;
 	const writerContext = roleContext("write");
-	const candidateWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "candidate", input: { path: "drafts/candidates/earth-volume-1/chapters/017.md", content: "x" } }, writerContext as never);
+	const candidateWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "candidate", input: { path: "drafts/candidates/chapters/002.md", content: "x" } }, writerContext as never);
 	assert.equal(candidateWrite, undefined);
-	const protectedWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "edit", toolCallId: "canon", input: { path: "canon/world/01-cosmos-and-rules.md", oldText: "x", newText: "y" } }, writerContext as never);
-	assert.equal(protectedWrite?.block, true);
-	const planWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "plan", input: { path: "planning/chapter-cards/018.md", content: "x" } }, roleContext("plan") as never);
+	const protectedWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "edit", toolCallId: "canon", input: { path: "canon/world.md", oldText: "x", newText: "y" } }, writerContext as never);
+	assert.equal(handlerBlock(protectedWrite), true);
+	const planWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "plan", input: { path: "planning/chapter-cards/003.md", content: "x" } }, roleContext("plan") as never);
 	assert.equal(planWrite, undefined);
 	const architectureWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "architecture", input: { path: "planning/chapter-architecture.md", content: "x" } }, roleContext("plan") as never);
 	assert.equal(architectureWrite, undefined);
 	const writerArchitectureWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "writer-architecture", input: { path: "planning/chapter-architecture.md", content: "x" } }, writerContext as never);
-	assert.equal(writerArchitectureWrite?.block, true);
+	assert.equal(handlerBlock(writerArchitectureWrite), true);
 	const bashWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "bash", toolCallId: "bash", input: { command: "Get-ChildItem" } }, writerContext as never);
-	assert.equal(bashWrite?.block, true);
-	const deniedVerification = await tools.get("verify_chapter")!.definition.execute("verify-denied", { chapter: "017" }, undefined, undefined, roleContext("plan") as never);
+	assert.equal(handlerBlock(bashWrite), true);
+	const deniedVerification = await tools.get("verify_chapter")!.definition.execute("verify-denied", { chapter: "002" }, undefined, undefined, roleContext("plan") as never);
 	assert.match(resultText(deniedVerification), /available only to the \/novel-write role/);
 
 	const verificationProjectRoot = path.join(temporaryDirectory, "verification-project");
@@ -166,21 +186,21 @@ try {
 		cwd: verificationProjectRoot,
 		sessionManager: { getBranch: () => [{ type: "custom", customType: "pi-desktop-novel-role", data: { role: "write" } }] },
 	};
-	const verificationResult = await tools.get("verify_chapter")!.definition.execute("verify-success", { chapter: "017" }, undefined, undefined, writerVerificationContext as never);
+	const verificationResult = await tools.get("verify_chapter")!.definition.execute("verify-success", { chapter: "002" }, undefined, undefined, writerVerificationContext as never);
 	assert.match(resultText(verificationResult), /verification_status: PASS/);
-	const verificationReport = await readFile(path.join(verificationProjectRoot, "planning", "verifications", "017-verification.md"), "utf8");
+	const verificationReport = await readFile(path.join(verificationProjectRoot, "planning", "verifications", "002-verification.md"), "utf8");
 	assert.match(verificationReport, /verification_status: PASS/);
-	const chapterCardPath = path.join(verificationProjectRoot, "planning", "chapter-cards", "017.md");
+	const chapterCardPath = path.join(verificationProjectRoot, "planning", "chapter-cards", "002.md");
 	const originalChapterCard = await readFile(chapterCardPath, "utf8");
 	await writeFile(chapterCardPath, `${originalChapterCard.trimEnd()}\n\n\`\`\`yaml\nextra: invalid-second-document\n\`\`\`\n`, "utf8");
-	const malformedCardResult = await tools.get("verify_chapter")!.definition.execute("verify-malformed-card", { chapter: "017" }, undefined, undefined, writerVerificationContext as never);
+	const malformedCardResult = await tools.get("verify_chapter")!.definition.execute("verify-malformed-card", { chapter: "002" }, undefined, undefined, writerVerificationContext as never);
 	assert.match(resultText(malformedCardResult), /规划 Agent/);
 	assert.match(resultText(malformedCardResult), /exactly one fenced YAML document/);
 	await writeFile(chapterCardPath, originalChapterCard, "utf8");
 	const architecturePath = path.join(verificationProjectRoot, "planning", "chapter-architecture.md");
 	const architecture = await readFile(architecturePath, "utf8");
-	await writeFile(architecturePath, architecture.replace(/\n  - chapter: "017"[\s\S]*?(?=\n  - chapter:|\n```)/, ""), "utf8");
-	const missingArchitectureResult = await tools.get("verify_chapter")!.definition.execute("verify-missing-architecture", { chapter: "017" }, undefined, undefined, writerVerificationContext as never);
+	await writeFile(architecturePath, architecture.replace(/\n  - chapter: "002"[\s\S]*?(?=\n  - chapter:|\n```)/, ""), "utf8");
+	const missingArchitectureResult = await tools.get("verify_chapter")!.definition.execute("verify-missing-architecture", { chapter: "002" }, undefined, undefined, writerVerificationContext as never);
 	assert.match(resultText(missingArchitectureResult), /写作前置合同未完成/);
 
 	process.chdir(temporaryDirectory);
