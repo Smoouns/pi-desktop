@@ -70,6 +70,7 @@ import {
 	handleMessageStreamEvent,
 } from "./chat-view/event-stream-handlers.js";
 import { handleRuntimeStatusEvent } from "./chat-view/event-runtime-status-handlers.js";
+import { SessionRefreshScope } from "./chat-view/session-refresh-scope.js";
 import {
 	createAndCheckoutBranchAction,
 	fetchGitRemotesAction,
@@ -491,6 +492,10 @@ export class ChatView {
 	private oauthProviderCatalogLoading = false;
 	private oauthProviderCatalog = new Map<string, OAuthProviderCatalogEntry>();
 	private lastBackendRefreshError: string | null = null;
+	private readonly sessionRefreshScope = new SessionRefreshScope();
+	private backendRefreshSequence = 0;
+	private sessionStatsRequestSequence = 0;
+	private availableModelsRuntimeIdentity: string | null = null;
 	private lastModelLoadError: string | null = null;
 	private lastBackendSessionFile: string | null = null;
 	private settingModel = false;
@@ -751,7 +756,10 @@ export class ChatView {
 
 	setProjectPath(path: string | null): void {
 		if (this.projectPath === path) return;
+		this.sessionRefreshScope.invalidate();
 		const previous = this.projectPath;
+		this.sessionStatsRequestSequence += 1;
+		this.refreshingSessionStats = false;
 		this.projectPath = path;
 		this.novelContextAttachedForSession = false;
 		const push = (window as typeof window & {
@@ -791,6 +799,12 @@ export class ChatView {
 	}
 
 	prepareForSessionSwitch(projectPath: string | null, statusText?: string): void {
+		this.sessionRefreshScope.invalidate();
+		this.modelLoadRequestSeq += 1;
+		this.loadingModels = false;
+		this.sessionStatsRequestSequence += 1;
+		this.refreshingSessionStats = false;
+		this.cancelStreamingUiReconcile();
 		if (this.projectPath !== projectPath) {
 			this.setProjectPath(projectPath);
 		}
@@ -810,6 +824,18 @@ export class ChatView {
 
 	getState(): RpcSessionState | null {
 		return this.state;
+	}
+
+	/** Update just the verified name without rebuilding messages or scrolling. */
+	refreshSessionTitle(state: RpcSessionState): void {
+		if (!this.state || this.state.sessionId !== state.sessionId || this.state.sessionFile !== state.sessionFile) return;
+		this.state = { ...this.state, sessionName: state.sessionName };
+		this.onStateChange?.(this.state);
+		this.render();
+	}
+
+	private captureSessionScope(): () => boolean {
+		return this.sessionRefreshScope.capture(rpcBridge.getRuntimeIdentity(), () => rpcBridge.getRuntimeIdentity());
 	}
 
 	private getComposerTextarea(): HTMLTextAreaElement | null {
@@ -1077,10 +1103,12 @@ export class ChatView {
 		const stale = Date.now() - this.modelCatalogLoadedAt > MODEL_PICKER_CATALOG_CACHE_MS;
 		if (!force && this.modelCatalogLoadedAt > 0 && !stale) return;
 		this.loadingModelCatalog = true;
+		const projectPath = this.projectPath;
 		try {
 			const result = await rpcBridge.runPiCliCommand(["--list-models"], {
-				cwd: this.projectPath || ".",
+				cwd: projectPath || ".",
 			});
+			if (projectPath !== this.projectPath) return;
 			if (result.exit_code !== 0) {
 				throw new Error(result.stderr || result.stdout || `pi --list-models failed with exit ${result.exit_code}`);
 			}
@@ -1091,6 +1119,7 @@ export class ChatView {
 			console.error("Failed to load model catalog:", err);
 		} finally {
 			this.loadingModelCatalog = false;
+			if (projectPath !== this.projectPath && this.projectPath) void this.loadModelCatalog();
 			this.render();
 		}
 	}
@@ -1631,6 +1660,7 @@ export class ChatView {
 	}
 
 	disconnect(): void {
+		this.sessionRefreshScope.invalidate();
 		this.unsubscribeEvents?.();
 		this.unsubscribeEvents = null;
 		if (this.pendingRenderFrame !== null) {
@@ -1665,10 +1695,13 @@ export class ChatView {
 			__PI_DESKTOP_PUSH_TRACE__?: (message: string) => void;
 		}).__PI_DESKTOP_PUSH_TRACE__;
 		const requestInstanceId = rpcBridge.getInstanceId();
+		const isCurrentScope = this.captureSessionScope();
+		const sequence = ++this.backendRefreshSequence;
+		const isCurrent = () => sequence === this.backendRefreshSequence && isCurrentScope();
 		push?.(`chat:refreshFromBackend start instance=${requestInstanceId}`);
 		try {
 			const [state, backendMessages] = await Promise.all([rpcBridge.getState(), rpcBridge.getMessages()]);
-			if (requestInstanceId !== rpcBridge.getInstanceId()) {
+			if (!isCurrent()) {
 				push?.(`chat:refreshFromBackend stale instance=${requestInstanceId} active=${rpcBridge.getInstanceId()}`);
 				return;
 			}
@@ -1754,21 +1787,18 @@ export class ChatView {
 			this.render();
 			this.scrollToBottom();
 			void this.refreshSessionStats(true);
-			void this.refreshGitSummary(true);
-			if (!this.loadingModels && this.availableModels.length === 0) {
+			void this.refreshGitSummary();
+			if (!this.loadingModels && this.availableModelsRuntimeIdentity !== rpcBridge.getRuntimeIdentity()) {
 				void this.loadAvailableModels();
 			}
-			if (!this.loadingProviderAuth && this.providerAuthLoadedAt === 0) {
-				void this.loadProviderAuthStatus();
-			}
-			if (!this.oauthProviderCatalogLoading && this.oauthProviderCatalogLoadedAt === 0) {
-				void this.loadOAuthProviderCatalog();
-			}
-			if (!this.loadingModelCatalog && this.modelCatalog.length === 0) {
-				void this.loadModelCatalog();
-			}
+			// Ancillary catalogs already have TTL caches. Neither force them nor
+			// make session activation wait for CLI/network work.
+			void this.loadProviderAuthStatus();
+			void this.loadOAuthProviderCatalog();
+			void this.loadModelCatalog();
 			push?.(`chat:refreshFromBackend ok session=${state.sessionFile ?? "-"} messages=${backendMessages.length}`);
 		} catch (err) {
+			if (!isCurrent()) return;
 			console.error("Failed to refresh chat state:", err);
 			this.lastBackendRefreshError = err instanceof Error ? err.message : String(err);
 			push?.(`chat:refreshFromBackend failed ${this.lastBackendRefreshError}`);
@@ -1823,6 +1853,8 @@ export class ChatView {
 			__PI_DESKTOP_PUSH_TRACE__?: (message: string) => void;
 		}).__PI_DESKTOP_PUSH_TRACE__;
 		const requestInstanceId = rpcBridge.getInstanceId();
+		const requestRuntimeIdentity = rpcBridge.getRuntimeIdentity();
+		const isCurrentScope = this.captureSessionScope();
 		if (!rpcBridge.isConnected) {
 			this.loadingModels = false;
 			this.render();
@@ -1841,16 +1873,18 @@ export class ChatView {
 				}),
 			]);
 			if (requestSeq !== this.modelLoadRequestSeq) return;
-			if (requestInstanceId !== rpcBridge.getInstanceId()) {
+			if (!isCurrentScope()) {
 				push?.(`chat:loadModels stale instance=${requestInstanceId} active=${rpcBridge.getInstanceId()}`);
 				return;
 			}
 			const mapped = mapAvailableModelsFromRpc(models);
 			this.availableModels = mapped;
+			this.availableModelsRuntimeIdentity = requestRuntimeIdentity;
 			this.recomputeProviderAuthConfigured();
 			this.lastModelLoadError = null;
 			push?.(`chat:loadModels ok count=${mapped.length}`);
 		} catch (err) {
+			if (requestSeq !== this.modelLoadRequestSeq || !isCurrentScope()) return;
 			console.error("Failed to load available models:", err);
 			this.lastModelLoadError = err instanceof Error ? err.message : String(err);
 			push?.(`chat:loadModels failed ${this.lastModelLoadError}`);
@@ -1868,10 +1902,14 @@ export class ChatView {
 		if (this.settingModel) return false;
 		this.modelPickerOpen = false;
 		this.settingModel = true;
+		const isCurrent = this.captureSessionScope();
 		this.render();
 		try {
 			await rpcBridge.setModel(provider, modelId);
-			this.state = await rpcBridge.getState();
+			if (!isCurrent()) return false;
+			const state = await rpcBridge.getState();
+			if (!isCurrent()) return false;
+			this.state = state;
 			this.syncComposerQueueFromState(this.state);
 			this.recomputeProviderAuthConfigured();
 			if (this.state) this.onStateChange?.(this.state);
@@ -1879,6 +1917,7 @@ export class ChatView {
 			this.pushNotice(`Switched to ${provider}/${modelId}`, "success");
 			return true;
 		} catch (err) {
+			if (!isCurrent()) return false;
 			console.error("Failed to set model:", err);
 			this.pushNotice("Failed to switch model", "error");
 			return false;
@@ -1926,10 +1965,14 @@ export class ChatView {
 			this.state = { ...this.state, thinkingLevel: requestedLevel };
 		}
 		this.settingThinking = true;
+		const isCurrent = this.captureSessionScope();
 		this.render();
 		try {
 			await rpcBridge.setThinkingLevel(requestedLevel);
-			this.state = await rpcBridge.getState();
+			if (!isCurrent()) return null;
+			const state = await rpcBridge.getState();
+			if (!isCurrent()) return null;
+			this.state = state;
 			this.syncComposerQueueFromState(this.state);
 			if (this.state) this.onStateChange?.(this.state);
 			if (this.state?.thinkingLevel === requestedLevel) {
@@ -1943,6 +1986,7 @@ export class ChatView {
 			void this.refreshSessionStats(true);
 			return this.state?.thinkingLevel ?? null;
 		} catch (err) {
+			if (!isCurrent()) return null;
 			console.error("Failed to set thinking level:", err);
 			this.pushNotice("Failed to set thinking level", "error");
 			return this.state?.thinkingLevel ?? null;
@@ -1954,10 +1998,12 @@ export class ChatView {
 
 	private async cycleThinkingLevel(direction: 1 | -1 = 1): Promise<void> {
 		if (this.settingThinking) return;
+		const isCurrent = this.captureSessionScope();
 		const order = THINKING_LEVEL_CYCLE_ORDER;
 		let cursor = Math.max(0, order.indexOf((this.state?.thinkingLevel ?? "off") as ThinkingLevel));
 
 		for (let attempt = 0; attempt < order.length; attempt += 1) {
+			if (!isCurrent()) return;
 			const blocked = this.unsupportedThinkingLevelsForCurrentModel();
 			let candidate: ThinkingLevel | null = null;
 			for (let step = 1; step <= order.length; step += 1) {
@@ -2043,10 +2089,13 @@ export class ChatView {
 		if (this.refreshingSessionStats) return;
 		if (!force && Date.now() - this.sessionStats.updatedAt < 1800) return;
 		this.refreshingSessionStats = true;
+		const requestSequence = ++this.sessionStatsRequestSequence;
+		const isCurrent = this.captureSessionScope();
 		const stateMessageCount = this.state?.messageCount ?? 0;
 		const statePendingCount = this.state?.pendingMessageCount ?? 0;
 		try {
 			const raw = (await rpcBridge.getSessionStats()) as Record<string, unknown>;
+			if (!isCurrent()) return;
 			this.sessionStats = computeSessionStatsFromRaw({
 				raw,
 				stateMessageCount,
@@ -2056,6 +2105,7 @@ export class ChatView {
 				normalizeUsageRatio: (value) => this.normalizeUsageRatio(value),
 			});
 		} catch {
+			if (!isCurrent()) return;
 			this.sessionStats = computeSessionStatsFallback({
 				stateMessageCount,
 				statePendingCount,
@@ -2063,8 +2113,10 @@ export class ChatView {
 				resolveContextWindow: (inputRaw) => this.resolveContextWindow(inputRaw),
 			});
 		} finally {
-			this.refreshingSessionStats = false;
-			this.render();
+			if (requestSequence === this.sessionStatsRequestSequence) {
+				this.refreshingSessionStats = false;
+				if (isCurrent()) this.render();
+			}
 		}
 	}
 
@@ -2703,9 +2755,11 @@ export class ChatView {
 				refreshFromBackend: this.refreshFromBackend.bind(this),
 				loadAvailableModels: this.loadAvailableModels.bind(this),
 				refreshStateAfterAgentEnd: () => {
+					const isCurrent = this.captureSessionScope();
 					rpcBridge
 						.getState()
 						.then((state) => {
+							if (!isCurrent()) return;
 							this.state = state;
 							this.syncComposerQueueFromState(state);
 							this.pendingDeliveryMode = state.isStreaming ? "steer" : "prompt";
@@ -3617,8 +3671,10 @@ export class ChatView {
 	}
 
 	private async reconcileStreamingUiState(): Promise<void> {
+		const isCurrent = this.captureSessionScope();
 		try {
 			const state = await rpcBridge.getState();
+			if (!isCurrent()) return;
 			this.state = state;
 			this.syncComposerQueueFromState(state);
 			this.pendingDeliveryMode = state.isStreaming ? "steer" : "prompt";
@@ -3630,9 +3686,9 @@ export class ChatView {
 				this.scheduleStreamingUiReconcile(2200);
 			}
 		} catch {
-			this.clearStreamingUiState();
+			if (isCurrent()) this.clearStreamingUiState();
 		} finally {
-			this.render();
+			if (isCurrent()) this.render();
 		}
 	}
 

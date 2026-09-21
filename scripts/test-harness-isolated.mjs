@@ -22,6 +22,10 @@ await mkdir(output, { recursive: true });
 const additions = [
 	".gitattributes", "tsconfig.harness.json", "fixtures/harness-novel", "tests/harness", "tests/support",
 	"src/harness", "src/novel/context-attachment.ts", "scripts/run-public-tests.mjs",
+	"src/extensions/checkpoint-runtime.ts", "docs/HARNESS_PHASE3_ACCEPTANCE.md", "docs/HARNESS_PHASE3_RESULTS.md",
+	"src/extensions/session-title-core.ts", "src/extensions/session-title-extension.ts",
+	"src/components/chat-view/session-refresh-scope.ts", "tests/session-title-core.ts", "tests/session-title-extension.ts",
+	"scripts/test-chat-layout.mjs", "docs/SESSION_UX_FIXES.md",
 	"src/novel/tool-path-policy.ts", "src/novel/read-range.ts", "docs/HARNESS_PHASE2_ACCEPTANCE.md", "docs/HARNESS_PHASE2_RESULTS.md",
 	"src/rpc/session-restore.ts", "src-tauri/src/session_file.rs",
 	"scripts/run-harness-baseline.mjs", "scripts/test-harness-isolated.mjs",

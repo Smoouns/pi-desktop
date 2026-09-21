@@ -22,7 +22,7 @@ import { TerminalPanel } from "./components/terminal-panel.js";
 import type { WorkspaceTabs } from "./components/workspace-tabs.js";
 import { fetchDesktopUpdateStatus, type DesktopUpdateStatus } from "./desktop-updates.js";
 import { type CliUpdateStatus, RpcBridge, type RpcSessionState, rpcBridge, setActiveRpcBridge } from "./rpc/bridge.js";
-import { restoreSessionTab } from "./rpc/session-restore.js";
+import { restoreSessionTab, startSessionTab } from "./rpc/session-restore.js";
 import {
 	applyDesktopAppearanceProfileToRoot,
 	DESKTOP_APPEARANCE_PROFILE_CHANGED_EVENT,
@@ -37,6 +37,7 @@ import { isExtensionConfigIntent, normalizeExtensionCommandName } from "./extens
 import { ensureDesktopSdkCompatExtensionInstalled } from "./extensions/sdk-compat-extension.js";
 import { ensureSmartVoiceNotifyDesktopHostMode } from "./extensions/smart-voice-notify-config.js";
 import { ensureNovelToolsExtensionInstalled } from "./extensions/novel-tools-extension.js";
+import { ensureSessionTitleExtensionInstalled } from "./extensions/session-title-extension.js";
 import { acceptChapterCard, acceptChapterManuscript, applyWorldChange, buildNovelAgentPrompt, buildNovelContext, canPromoteChapter, canRollbackPromotion, findAdjacentCanonicalChapters, findMentionedDocuments, inspectChapterWorkflow, listWorldChangeProposals, loadNovelProject, NOVEL_AGENT_LABELS, planChapterRecordUpdates, prepareRevisionRequestForWork, promoteChapter, requestChapterRevision, requestWorldChange, rollbackPromotion, scanNovelDocuments, serializeNovelContextManifest, type NovelAgentRole, type NovelAgentTask, type NovelChapterRecord, type NovelDocument } from "./novel/index.js";
 import "./styles/app.css";
 
@@ -167,6 +168,7 @@ let preferredPiBinaryPath: string | null = null;
 let cliUpdatePollingTimer: ReturnType<typeof setInterval> | null = null;
 let desktopUpdatePollingTimer: ReturnType<typeof setInterval> | null = null;
 let cliUpdateChecking = false;
+let cliUpdateCheckedAt = 0;
 let desktopUpdateChecking = false;
 
 let projectSwitchTask: Promise<void> = Promise.resolve();
@@ -592,6 +594,10 @@ function getOrCreateRuntimeForTab(workspaceId: string, tabId: string, projectPat
 		eventUnlisten: null,
 	};
 	runtime.eventUnlisten = runtime.bridge.onEvent((event) => {
+		if (isSessionTitleUpdate(event)) {
+			void refreshRuntimeSessionTitle(runtime, event);
+			return;
+		}
 		const type = typeof event.type === "string" ? event.type : "unknown";
 		if (type === "rpc_disconnected") {
 			runtime.phase = "failed";
@@ -615,6 +621,40 @@ function setActiveRuntime(runtime: SessionRuntime | null): void {
 function getActiveRuntime(): SessionRuntime | null {
 	if (!activeSessionRuntimeKey) return null;
 	return sessionRuntimes.get(activeSessionRuntimeKey) ?? null;
+}
+
+function isSessionTitleUpdate(event: Record<string, unknown>): boolean {
+	return event.type === "extension_ui_request" && event.method === "setStatus"
+		&& event.statusKey === "pi-desktop-session-title";
+}
+
+async function refreshRuntimeSessionTitle(runtime: SessionRuntime, event: Record<string, unknown>): Promise<void> {
+	const identity = runtime.bridge.getRuntimeIdentity();
+	try {
+		if (typeof event.statusText !== "string" || event.statusText.length > 4096) return;
+		const notice = JSON.parse(event.statusText) as { sessionId?: unknown; sessionFile?: unknown };
+		if (!notice || typeof notice.sessionId !== "string" || typeof notice.sessionFile !== "string") return;
+		// The extension notification only invalidates the displayed title. Read
+		// back authoritative state, including any intervening manual rename.
+		const state = await runtime.bridge.getState();
+		if (identity !== runtime.bridge.getRuntimeIdentity() || sessionRuntimes.get(runtime.key) !== runtime) return;
+		if (state.sessionId !== notice.sessionId || normalizeSessionPath(state.sessionFile) !== normalizeSessionPath(notice.sessionFile)) return;
+		const name = state.sessionName?.trim();
+		if (!name) return;
+		const workspace = workspaces.find((entry) => entry.id === runtime.workspaceId);
+		const tab = workspace?.sessionTabs.find((entry) => entry.id === runtime.tabId);
+		if (!workspace || !tab || normalizeSessionPath(tab.sessionPath) !== normalizeSessionPath(state.sessionFile)) return;
+		tab.title = name;
+		if (workspace.activeSessionTabId === tab.id) workspace.sessionTitle = name;
+		persistWorkspaces();
+		if (getActiveWorkspace()?.id === workspace.id) {
+			if (tab.projectId && state.sessionFile) sidebar?.upsertSession(tab.projectId, {
+				id: state.sessionId, name, path: state.sessionFile, optimistic: true,
+			});
+			syncContentTabsBar(workspace);
+			if (activeSessionRuntimeKey === runtime.key) chatView?.refreshSessionTitle(state);
+		}
+	} catch { /* Background naming is optional; normal session discovery also reads the saved name. */ }
 }
 
 function resolveRuntimeNotifyTarget(runtime: SessionRuntime): {
@@ -2942,11 +2982,22 @@ async function ensureRuntimeForSessionTabImpl(
 		if (!bridge.isConnected) {
 			runtime.phase = "starting";
 			recordDebugTrace(`ensureRuntime:start-bridge instance=${runtime.instanceId}`);
-			const novelRoleEnv = sessionTab.novelRole ? { PI_DESKTOP_NOVEL_ROLE: sessionTab.novelRole } : undefined;
-			await bridge.start({ cliPath: findCliPath(), piPath: findPiBinaryPath(), cwd: projectPath, env: novelRoleEnv });
-			// A restarted Pi process has a new draft, even if this runtime object
-			// remembers the old path. Always revalidate/resume the saved target.
-			runtime.lastKnownSessionPath = null;
+			const novelRoleEnv = {
+				PI_DESKTOP_SESSION_TITLE: "1",
+				...(sessionTab.novelRole ? { PI_DESKTOP_NOVEL_ROLE: sessionTab.novelRole } : {}),
+			};
+			const started = await startSessionTab(bridge, {
+				cliPath: findCliPath(), piPath: findPiBinaryPath(), cwd: projectPath, env: novelRoleEnv,
+			}, sessionTab, () => {
+				if (typeof taskVersion === "number") assertProjectTaskCurrent(taskVersion);
+			});
+			if (started.replacedMissingDraft) {
+				sessionTab.sessionPath = null;
+				persistWorkspaces();
+			}
+			// --session restores the target during startup, including ID validation.
+			// Do not reload all extensions a second time through switch_session.
+			runtime.lastKnownSessionPath = sessionTab.sessionPath;
 			recordDebugTrace(`ensureRuntime:bridge-started instance=${runtime.instanceId} discovery=${bridge.discoveryInfo ?? "-"}`);
 			if (typeof taskVersion === "number") {
 				assertProjectTaskCurrent(taskVersion);
@@ -3003,10 +3054,18 @@ async function ensureRuntimeForSessionTabImpl(
 			normalizeProjectPath(getSessionTabProjectPath(sessionTab) ?? getWorkspaceActiveProjectPath(workspace)) === normalizeProjectPath(projectPath)
 		) {
 			setActiveRuntime(runtime);
-			await refreshCliUpdateStatus();
+			// Version discovery may spawn a CLI / access the network; it must not
+			// hold up showing history or serialize subsequent session switches.
+			void refreshCliUpdateStatus();
 		}
 		return runtime;
 	} catch (err) {
+		if (err instanceof StaleProjectTaskError) {
+			// Navigation was superseded, not a child-process failure. Leave this
+			// runtime available for a later validated activation of the same tab.
+			runtime.phase = "idle";
+			throw err;
+		}
 		runtime.phase = "failed";
 		runtime.lastError = err instanceof Error ? err.message : String(err);
 		recordDebugTrace(`ensureRuntime:failed instance=${runtime.instanceId}: ${runtime.lastError}`);
@@ -3065,8 +3124,6 @@ function ensureActiveChatRuntimeAvailable(workspace: WorkspaceState): void {
 			assertProjectTaskCurrent(version);
 			await chatView?.refreshFromBackend({ throwOnError: true });
 			assertProjectTaskCurrent(version);
-			await chatView?.refreshModels();
-			assertProjectTaskCurrent(version);
 			await applyWorkspacePane(currentWorkspace);
 		},
 		(err) => {
@@ -3120,7 +3177,6 @@ async function activateWorkspace(workspaceId: string, taskVersion?: number): Pro
 		if (typeof taskVersion === "number") {
 			assertProjectTaskCurrent(taskVersion);
 		}
-		await chatView?.refreshModels();
 	} else {
 		setActiveRuntime(null);
 		chatView?.setProjectPath(null);
@@ -3274,7 +3330,9 @@ function applyCliStatusToTitlebar(): void {
 
 async function refreshCliUpdateStatus(): Promise<void> {
 	if (cliUpdateChecking) return;
+	if (Date.now() - cliUpdateCheckedAt < 30 * 60 * 1000) return;
 	cliUpdateChecking = true;
+	cliUpdateCheckedAt = Date.now();
 	try {
 		cliUpdateStatus = await rpcBridge.getCliUpdateStatus();
 		if (cliUpdateStatus?.update_available && shouldNotifyCliUpdate()) {
@@ -3371,6 +3429,10 @@ async function initialize(): Promise<void> {
 	const novelToolsInstall = await ensureNovelToolsExtensionInstalled();
 	if (novelToolsInstall.error && !novelToolsInstall.skipped) {
 		console.warn("Failed to install Novel Tools extension:", novelToolsInstall.error);
+	}
+	const sessionTitleInstall = await ensureSessionTitleExtensionInstalled();
+	if (sessionTitleInstall.error && !sessionTitleInstall.skipped) {
+		console.warn("Failed to install session title extension:", sessionTitleInstall.error);
 	}
 	const smartVoiceNotifyHostMode = await ensureSmartVoiceNotifyDesktopHostMode();
 	if (smartVoiceNotifyHostMode.error && !smartVoiceNotifyHostMode.skipped) {
@@ -3760,6 +3822,8 @@ function initializeComponents(): void {
 	});
 
 	rpcBridge.onEvent((event) => {
+		// Handled once by the owning runtime, including when it is in background.
+		if (isSessionTitleUpdate(event)) return;
 		const type = typeof event.type === "string" ? event.type : "unknown";
 		if (type === "agent_start" || type === "agent_end" || type === "error" || type === "extension_ui_request") {
 			recordDebugTrace(`rpc:event type=${type}`);
@@ -4382,7 +4446,6 @@ function renderApp(): void {
 						assertProjectTaskCurrent(version);
 						await chatView?.refreshFromBackend({ throwOnError: true });
 						assertProjectTaskCurrent(version);
-						await chatView?.refreshModels();
 					}
 					assertProjectTaskCurrent(version);
 					await applyWorkspacePane(workspace);
@@ -4863,8 +4926,6 @@ function renderApp(): void {
 					assertProjectTaskCurrent(version);
 					await chatView?.refreshFromBackend({ throwOnError: true });
 					assertProjectTaskCurrent(version);
-					await chatView?.refreshModels();
-					assertProjectTaskCurrent(version);
 					await applyWorkspacePane(workspace);
 				},
 				(err) => {
@@ -4890,8 +4951,6 @@ function renderApp(): void {
 				await ensureRpcForProject(project.path, version);
 				assertProjectTaskCurrent(version);
 				await chatView?.refreshFromBackend({ throwOnError: true });
-				assertProjectTaskCurrent(version);
-				await chatView?.refreshModels();
 				assertProjectTaskCurrent(version);
 				await applyWorkspacePane(workspace);
 			},
@@ -4920,8 +4979,6 @@ function renderApp(): void {
 				await ensureRpcForProject(project.path, version);
 				assertProjectTaskCurrent(version);
 				await chatView?.refreshFromBackend({ throwOnError: true });
-				assertProjectTaskCurrent(version);
-				await chatView?.refreshModels();
 				assertProjectTaskCurrent(version);
 				await applyWorkspacePane(workspace);
 			},
@@ -5164,8 +5221,6 @@ function renderApp(): void {
 				assertProjectTaskCurrent(version);
 				await chatView?.refreshFromBackend({ throwOnError: true });
 				assertProjectTaskCurrent(version);
-				await chatView?.refreshModels();
-				assertProjectTaskCurrent(version);
 				await applyWorkspacePane(workspace);
 				if (options?.onActivated) {
 					await options.onActivated();
@@ -5179,6 +5234,18 @@ function renderApp(): void {
 			{ label: options?.label ?? "sidebar-session-select" },
 		);
 	};
+
+	sessionBrowser?.setOnOpenSession((session) => {
+		const workspace = getActiveWorkspace();
+		const existing = workspace?.sessionTabs.find((tab) => normalizeSessionPath(tab.sessionPath) === normalizeSessionPath(session.path));
+		const project = sidebar?.getProjectByPath(session.cwd ?? existing?.projectPath);
+		if (!project) {
+			chatView?.notify("请先将此会话所属的项目添加到当前工作区，再打开会话。", "info");
+			return false;
+		}
+		activateSidebarSession(project.id, session.path, session.name, { label: "browser-session-select" });
+		return true;
+	});
 
 	const stageNovelAgentTask = (task: NovelAgentTask): void => {
 		const command = buildNovelAgentPrompt(task);
@@ -5214,8 +5281,6 @@ function renderApp(): void {
 				await ensureRuntimeForSessionTab(workspace, sessionTab!, project.path, true, version);
 				assertProjectTaskCurrent(version);
 				await chatView?.refreshFromBackend({ throwOnError: true });
-				assertProjectTaskCurrent(version);
-				await chatView?.refreshModels();
 				assertProjectTaskCurrent(version);
 				await applyWorkspacePane(workspace);
 				stageNovelAgentTask(task);

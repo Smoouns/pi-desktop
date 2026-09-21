@@ -16,6 +16,8 @@ export interface RpcStartOptions {
 	provider?: string;
 	model?: string;
 	env?: Record<string, string>;
+	/** Restore this exact, already-persisted session as part of process startup. */
+	sessionPath?: string;
 }
 
 export interface RpcImageInput {
@@ -322,6 +324,11 @@ export class RpcBridge {
 		return this.instanceId;
 	}
 
+	/** Changes whenever this bridge is restarted, even when the instance id is reused. */
+	getRuntimeIdentity(): string {
+		return `${this.instanceId}:${this.startTicket}:${this.currentGeneration ?? "-"}`;
+	}
+
 	get isConnected(): boolean {
 		return this._isConnected;
 	}
@@ -343,8 +350,10 @@ export class RpcBridge {
 		return trimmed.length > 0 ? trimmed : null;
 	}
 
-	async start(options: RpcStartOptions): Promise<string> {
-		await this.ensureListeners();
+	async start(options: RpcStartOptions, expectedStartTicket?: number): Promise<string> {
+		if (expectedStartTicket !== undefined && expectedStartTicket !== this.startTicket) {
+			throw new RpcRequestError("cancelled", "rpc_start", "RPC start scope was superseded");
+		}
 		const ticket = ++this.startTicket;
 		this._isConnected = false;
 		this.rejectAllPending("RPC runtime restarted", "cancelled");
@@ -359,6 +368,21 @@ export class RpcBridge {
 		};
 
 		try {
+			await this.ensureListeners();
+			let expectedSessionId: string | null = null;
+			if (startOptions.sessionPath) {
+				const status = await invoke<{ status: "missing" } | { status: "valid"; session_id: string }>(
+					"get_session_file_status", { sessionPath: startOptions.sessionPath },
+				);
+				if (ticket !== this.startTicket) {
+					throw new RpcRequestError("cancelled", "rpc_start", "RPC start was superseded during session inspection");
+				}
+				if (status.status === "missing") throw new SessionFileMissingError(startOptions.sessionPath, ticket, null);
+				if (status.status !== "valid" || !status.session_id?.trim()) {
+					throw new RpcRequestError("fatal", "rpc_start", "会话文件头无效，已停止恢复");
+				}
+				expectedSessionId = status.session_id;
+			}
 			traceBridge(`start instance=${this.instanceId} cwd=${startOptions.cwd}`);
 			const result = await invoke<RpcStartResult>("rpc_start", {
 				options: {
@@ -368,6 +392,7 @@ export class RpcBridge {
 					provider: startOptions.provider || null,
 					model: startOptions.model || null,
 					env: startOptions.env || null,
+					session_path: startOptions.sessionPath || null,
 				},
 				instanceId: this.instanceId,
 			});
@@ -382,10 +407,27 @@ export class RpcBridge {
 			this.pendingGeneration = null;
 			this.lastStartOptions = { ...startOptions };
 			this.lastDiscoveryInfo = result.discovery;
+			if (expectedSessionId !== null) {
+				const generation = this.currentGeneration;
+				if (generation === null) throw new RpcRequestError("fatal", "rpc_start", "RPC runtime has no generation");
+				const resumed = await this.getState();
+				if (ticket !== this.startTicket || generation !== this.currentGeneration || !this._isConnected) {
+					throw new RpcRequestError("cancelled", "rpc_start", "RPC runtime changed during startup session reconciliation");
+				}
+				if (resumed.sessionId !== expectedSessionId) {
+					await this.stopGeneration(generation, ticket);
+					throw new RpcRequestError("fatal", "rpc_start", "会话 ID 在启动恢复期间发生变化，已停止连接以保护历史记录");
+				}
+			}
 			traceBridge(`started instance=${this.instanceId} generation=${this.currentGeneration ?? -1} discovery=${result.discovery}`);
 			this.emitToListeners({ type: "rpc_connected", discovery: result.discovery });
 			return result.discovery;
 		} catch (err) {
+			// A startup-session reconciliation failure must not leave its child
+			// looking connected. Scope the stop so a newer start is never touched.
+			if (startOptions.sessionPath && ticket === this.startTicket && this._isConnected && this.currentGeneration !== null) {
+				await this.stopGeneration(this.currentGeneration, ticket).catch(() => false);
+			}
 			if (ticket === this.startTicket) this.pendingGeneration = null;
 			traceBridge(`start-failed instance=${this.instanceId}: ${err instanceof Error ? err.message : String(err)}`);
 			throw err;
@@ -1121,6 +1163,10 @@ class ActiveRpcBridgeProxy {
 		return this.activeBridge.getInstanceId();
 	}
 
+	getRuntimeIdentity(): string {
+		return this.activeBridge.getRuntimeIdentity();
+	}
+
 	onEvent(callback: RpcEventCallback): () => void {
 		const existing = this.listenerUnsubscribers.get(callback);
 		existing?.();
@@ -1132,8 +1178,8 @@ class ActiveRpcBridgeProxy {
 		};
 	}
 
-	async start(options: RpcStartOptions): Promise<string> {
-		return this.activeBridge.start(options);
+	async start(options: RpcStartOptions, expectedStartTicket?: number): Promise<string> {
+		return this.activeBridge.start(options, expectedStartTicket);
 	}
 
 	async stop(): Promise<void> {

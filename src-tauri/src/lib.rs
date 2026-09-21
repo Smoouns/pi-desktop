@@ -132,6 +132,8 @@ struct RpcStartOptions {
     provider: Option<String>,
     model: Option<String>,
     env: Option<std::collections::HashMap<String, String>>,
+	/// Exact persisted session to restore at process startup.
+	session_path: Option<String>,
 }
 
 /// How the pi process was resolved
@@ -795,6 +797,9 @@ fn build_command(pi: &PiProcess, options: &RpcStartOptions) -> Command {
                 if let Some(ref model) = options.model {
                     fallback.arg("--model").arg(model);
                 }
+				if let Some(ref session_path) = options.session_path {
+					fallback.arg("--session").arg(session_path);
+				}
                 fallback
                     .current_dir(&options.cwd)
                     .stdin(Stdio::piped())
@@ -814,6 +819,9 @@ fn build_command(pi: &PiProcess, options: &RpcStartOptions) -> Command {
             if let Some(ref model) = options.model {
                 cmd.arg("--model").arg(model);
             }
+			if let Some(ref session_path) = options.session_path {
+				cmd.arg("--session").arg(session_path);
+			}
             cmd.current_dir(&options.cwd)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -845,6 +853,9 @@ fn build_command(pi: &PiProcess, options: &RpcStartOptions) -> Command {
     if let Some(ref model) = options.model {
         cmd.arg("--model").arg(model);
     }
+	if let Some(ref session_path) = options.session_path {
+		cmd.arg("--session").arg(session_path);
+	}
 
     cmd.current_dir(&options.cwd)
         .stdin(Stdio::piped())
@@ -1889,6 +1900,7 @@ async fn get_pi_oauth_providers(app: AppHandle) -> Result<Vec<PiOAuthProviderInf
         provider: None,
         model: None,
         env: None,
+		session_path: None,
     };
 
     let Ok(pi) = discover_pi(&app, &discovery_opts) else {
@@ -2419,6 +2431,7 @@ async fn run_pi_cli_command(
         provider: None,
         model: None,
         env: options.env.clone(),
+		session_path: None,
     };
 
     let pi = discover_pi(&app, &discovery_opts)?;
@@ -2456,6 +2469,7 @@ async fn get_cli_update_status(
         provider: None,
         model: None,
         env: opts.env.clone(),
+		session_path: None,
     };
 
     let pi = discover_pi(&app, &discovery_opts)?;
@@ -2517,6 +2531,7 @@ async fn get_pi_changelog(
         provider: None,
         model: None,
         env: opts.env.clone(),
+		session_path: None,
     };
 
     let pi = discover_pi(&app, &discovery_opts)?;

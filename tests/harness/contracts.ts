@@ -34,7 +34,7 @@ const document = (relativePath: string, estimatedTokens: number, authority: Nove
 	classification: { authority, contentType, reason: "test" }, estimatedTokens, text: relativePath,
 });
 
-export async function withLoadedExtension<T>(project: string, minified: boolean, body: (extension: Loaded) => Promise<T>): Promise<T> {
+export async function withLoadedExtension<T>(project: string, minified: boolean, body: (extension: Loaded, runtime: Awaited<ReturnType<typeof loadExtensions>>["runtime"]) => Promise<T>): Promise<T> {
 	const temp = await mkdtemp(path.join(tmpdir(), "pi-harness-extension-"));
 	try {
 		const extensionPath = path.join(temp, "novel-tools.ts");
@@ -49,7 +49,10 @@ export async function withLoadedExtension<T>(project: string, minified: boolean,
 		const loaded = await loadExtensions([extensionPath], project);
 		assert.deepEqual(loaded.errors, []);
 		assert.equal(loaded.extensions.length, 1);
-		return await body(loaded.extensions[0]);
+		// Legacy isolated hook cases do not have a session manager. Tests covering
+		// actual checkpoint persistence explicitly bind a runner/session instead.
+		loaded.runtime.appendEntry = () => undefined;
+		return await body(loaded.extensions[0], loaded.runtime);
 	} finally { await rm(temp, { recursive: true, force: true }); }
 }
 
@@ -164,9 +167,14 @@ export async function runContractCases(runCase: RunCase): Promise<void> {
 		const previousRole = process.env.PI_DESKTOP_NOVEL_ROLE;
 		delete process.env.PI_DESKTOP_NOVEL_ROLE;
 		let sideEffects = 0;
+		let permissionProbe = 0;
 		const invoke = async (role: string | null, toolName: string, target?: string) => {
 			const branch = role ? [{ type: "custom", customType: "pi-desktop-novel-role", data: { role } }] : [];
-			const decision = hookResult(await hook({ type: "tool_call", toolName, toolCallId: "security-" + role + toolName + target, input: target ? { path: target, content: "x" } : { command: "echo x" } }, { cwd: root, sessionManager: { getBranch: () => branch } } as never));
+			const permissionSession = `permission-probe-${++permissionProbe}`;
+			// Permission probes never execute a native write/result; keep them in
+			// independent sessions so a deliberately unresolved prior probe cannot
+			// block another via the durable operation gate.
+			const decision = hookResult(await hook({ type: "tool_call", toolName, toolCallId: "security-" + role + toolName + target, input: target ? { path: target, content: "x" } : { command: "echo x" } }, { cwd: root, sessionManager: { getSessionId: () => permissionSession, getBranch: () => branch } } as never));
 			if (!decision?.block) sideEffects++;
 			return decision;
 		};

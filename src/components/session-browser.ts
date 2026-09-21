@@ -42,6 +42,7 @@ export class SessionBrowser {
 	private query = "";
 	private onClose: (() => void) | null = null;
 	private onSessionSelected: ((sessionPath: string) => void) | null = null;
+	private onOpenSession: ((session: SessionInfo) => boolean) | null = null;
 	private onForkText: ((text: string) => void) | null = null;
 
 	private forkMode = false;
@@ -83,6 +84,10 @@ export class SessionBrowser {
 
 	setOnSessionSelected(callback: (sessionPath: string) => void): void {
 		this.onSessionSelected = callback;
+	}
+
+	setOnOpenSession(callback: (session: SessionInfo) => boolean): void {
+		this.onOpenSession = callback;
 	}
 
 	setOnForkText(callback: (text: string) => void): void {
@@ -140,15 +145,10 @@ export class SessionBrowser {
 		});
 	}
 
-	private async selectSession(session: SessionInfo): Promise<void> {
-		try {
-			const result = await rpcBridge.switchSession(session.path);
-			if (result.cancelled) return;
-			this.close();
-			this.onSessionSelected?.(session.path);
-		} catch (err) {
-			console.error("Failed to switch session:", err);
-		}
+	private selectSession(session: SessionInfo): void {
+		// Opening history is workspace navigation. Mutating the active bridge here
+		// leaves its tab/cwd pointing at a different session and reloads it twice.
+		if (this.onOpenSession?.(session)) this.close();
 	}
 
 	private async newSession(): Promise<void> {

@@ -9,6 +9,9 @@ import { NOVEL_TOOLS_EXTENSION_CONTENT } from "../src/extensions/novel-tools-ext
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixtureRoot = path.join(workspaceRoot, "fixtures", "harness-novel");
 const expectedTools = [
+	"get_task_checkpoint",
+	"capture_task_checkpoint",
+	"refresh_task_checkpoint",
 	"get_context_budget",
 	"get_current_document",
 	"list_story_files",
@@ -62,12 +65,15 @@ const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "pi-desktop-novel-t
 const extensionPath = path.join(temporaryDirectory, "pi-desktop-novel-tools.ts");
 
 try {
-	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v9/);
+	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v10/);
 	assert.doesNotMatch(NOVEL_TOOLS_EXTENSION_CONTENT, /\b(?:writeFile|writeTextFile|appendFile|rename|unlink|rm)\s*\(/);
 	await writeFile(extensionPath, NOVEL_TOOLS_EXTENSION_CONTENT, "utf8");
 
 	process.chdir(fixtureRoot);
 	const loaded = await loadExtensions([extensionPath], fixtureRoot);
+	// This domain smoke directly invokes hooks. Real durable append/reopen is
+	// exercised by the Phase 3 runner/session integration suites.
+	loaded.runtime.appendEntry = () => undefined;
 	assert.deepEqual(loaded.errors, []);
 	assert.equal(loaded.extensions.length, 1);
 	const tools = loaded.extensions[0].tools;
@@ -196,7 +202,7 @@ try {
 	assert.equal(handlerBlock(protectedWrite), true);
 	const planWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "plan", input: { path: "planning/chapter-cards/003.md", content: "x" } }, roleContext("plan") as never);
 	assert.equal(planWrite, undefined);
-	const architectureWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "architecture", input: { path: "planning/chapter-architecture.md", content: "x" } }, roleContext("plan") as never);
+	const architectureWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "architecture", input: { path: "planning/chapter-architecture.md", content: "x" } }, { ...roleContext("plan"), sessionManager: { ...roleContext("plan").sessionManager, getSessionId: () => "architecture-permission-probe" } } as never);
 	assert.equal(architectureWrite, undefined);
 	const writerArchitectureWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "writer-architecture", input: { path: "planning/chapter-architecture.md", content: "x" } }, writerContext as never);
 	assert.equal(handlerBlock(writerArchitectureWrite), true);

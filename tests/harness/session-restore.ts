@@ -4,7 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { RpcBridge, RpcRequestError, SessionFileMissingError } from "../../src/rpc/bridge.js";
-import { restoreSessionTab } from "../../src/rpc/session-restore.js";
+import { restoreSessionTab, startSessionTab } from "../../src/rpc/session-restore.js";
 import { rpcSetInvokeHandler } from "../support/rpc-tauri-core.js";
 import { rpcEmit, rpcResetEventMock } from "../support/rpc-tauri-event.js";
 import { withProject, type RunCase } from "./testkit.js";
@@ -298,6 +298,197 @@ export async function runSessionRestoreCases(runCase: RunCase): Promise<void> {
 			await assert.rejects(pending, (error) => error instanceof RpcRequestError && error.kind === "fatal");
 			assert.equal(bridge.isConnected, true);
 			record("session.stop_stale", { expectedGeneration: 1, newerGenerationConnected: true });
+		} finally { await bridge.teardownListeners(); }
+	});
+
+	await runCase("SESSION-RESTORE-10 cold start restores one exact validated session", async (record) => {
+		rpcResetEventMock();
+		const calls: string[] = [];
+		let startSessionPath: unknown = null;
+		rpcSetInvokeHandler((command, args) => {
+			calls.push(command);
+			if (command === "get_session_file_status") return { status: "valid", session_id: "cold-id" };
+			if (command === "rpc_start") {
+				startSessionPath = (args?.options as Record<string, unknown>)?.session_path;
+				return { discovery: "synthetic", generation: 7 };
+			}
+			if (command !== "rpc_send") throw new Error(`Unexpected invoke: ${command}`);
+			const request = JSON.parse(String(args?.command));
+			assert.equal(request.type, "get_state");
+			rpcEmit("rpc-event", { instance_id: "cold-start", generation: 7, line: JSON.stringify({
+				type: "response", id: request.id, success: true,
+				data: { sessionId: "cold-id", sessionFile: "history.jsonl" },
+			}) });
+		});
+		const bridge = new RpcBridge("cold-start");
+		try {
+			await bridge.start({ cwd: "synthetic", cliPath: null, sessionPath: "history.jsonl" });
+			assert.equal(startSessionPath, "history.jsonl");
+			assert.equal(bridge.isConnected, true);
+			assert.match(bridge.getRuntimeIdentity(), /^cold-start:1:7$/);
+			assert.deepEqual(calls, ["get_session_file_status", "rpc_start", "rpc_send"]);
+			record("session.cold_start", { inspectedBeforeSpawn: true, startupSessionArg: true, identityChecked: true });
+		} finally { await bridge.teardownListeners(); }
+	});
+
+	await runCase("SESSION-RESTORE-11 cold start missing or corrupt history never spawns", async (record) => {
+		for (const result of [{ status: "missing" }, new Error("invalid session header")]) {
+			rpcResetEventMock();
+			let spawned = 0;
+			rpcSetInvokeHandler((command) => {
+				if (command === "get_session_file_status") {
+					if (result instanceof Error) throw result;
+					return result;
+				}
+				if (command === "rpc_start") { spawned++; return { discovery: "synthetic", generation: 1 }; }
+				throw new Error(`Unexpected invoke: ${command}`);
+			});
+			const bridge = new RpcBridge("cold-reject");
+			try {
+				await assert.rejects(bridge.start({ cwd: "synthetic", cliPath: null, sessionPath: "bad.jsonl" }));
+				assert.equal(spawned, 0);
+				assert.equal(bridge.isConnected, false);
+			} finally { await bridge.teardownListeners(); }
+		}
+		record("session.cold_reject", { checkedMissing: true, checkedCorrupt: true, spawned: 0 });
+	});
+
+	await runCase("SESSION-RESTORE-12 cold start identity mismatch stops only its generation", async (record) => {
+		rpcResetEventMock();
+		let stoppedGeneration: number | null = null;
+		rpcSetInvokeHandler((command, args) => {
+			if (command === "get_session_file_status") return { status: "valid", session_id: "expected" };
+			if (command === "rpc_start") return { discovery: "synthetic", generation: 9 };
+			if (command === "rpc_stop") { stoppedGeneration = Number(args?.expectedGeneration); return true; }
+			if (command !== "rpc_send") throw new Error(`Unexpected invoke: ${command}`);
+			const request = JSON.parse(String(args?.command));
+			rpcEmit("rpc-event", { instance_id: "cold-mismatch", generation: 9, line: JSON.stringify({
+				type: "response", id: request.id, success: true, data: { sessionId: "other" },
+			}) });
+		});
+		const bridge = new RpcBridge("cold-mismatch");
+		try {
+			await assert.rejects(bridge.start({ cwd: "synthetic", cliPath: null, sessionPath: "history.jsonl" }),
+				(error) => error instanceof RpcRequestError && error.kind === "fatal");
+			assert.equal(stoppedGeneration, 9);
+			assert.equal(bridge.isConnected, false);
+			record("session.cold_mismatch", { stoppedGeneration: 9 });
+		} finally { await bridge.teardownListeners(); }
+	});
+
+	await runCase("SESSION-RESTORE-13 superseded cold inspection cannot spawn", async (record) => {
+		rpcResetEventMock();
+		let resolveInspection!: (value: { status: "valid"; session_id: string }) => void;
+		let firstInspection = true;
+		let spawned = 0;
+		rpcSetInvokeHandler((command) => {
+			if (command === "get_session_file_status" && firstInspection) {
+				firstInspection = false;
+				return new Promise((resolve) => { resolveInspection = resolve; });
+			}
+			if (command === "rpc_start") { spawned++; return { discovery: "synthetic", generation: spawned }; }
+			throw new Error(`Unexpected invoke: ${command}`);
+		});
+		const bridge = new RpcBridge("cold-stale");
+		try {
+			const stale = bridge.start({ cwd: "synthetic-a", cliPath: null, sessionPath: "old.jsonl" });
+			await bridge.start({ cwd: "synthetic-b", cliPath: null });
+			resolveInspection({ status: "valid", session_id: "old" });
+			await assert.rejects(stale, (error) => error instanceof RpcRequestError && error.kind === "cancelled");
+			assert.equal(spawned, 1);
+			assert.equal(bridge.isConnected, true);
+			record("session.cold_stale", { staleSpawned: false, newerConnected: true });
+		} finally { await bridge.teardownListeners(); }
+	});
+
+	await runCase("SESSION-RESTORE-14 cold helper replaces only a known empty draft", async (record) => {
+		rpcResetEventMock();
+		let spawned = 0;
+		rpcSetInvokeHandler((command, args) => {
+			if (command === "get_session_file_status") return { status: "missing" };
+			if (command === "rpc_start") {
+				spawned++;
+				assert.equal((args?.options as Record<string, unknown>)?.session_path, null);
+				return { discovery: "fresh-draft", generation: 4 };
+			}
+			throw new Error(`Unexpected invoke: ${command}`);
+		});
+		const bridge = new RpcBridge("cold-helper-empty");
+		try {
+			const result = await startSessionTab(bridge, { cwd: "synthetic", cliPath: null }, {
+				sessionPath: "missing.jsonl", ephemeral: true, messageCount: 0,
+			});
+			assert.deepEqual(result, { discovery: "fresh-draft", replacedMissingDraft: true });
+			assert.equal(spawned, 1);
+			record("session.cold_helper_empty", { inspectedExactPath: true, replacementStarts: 1, newSessionRpc: 0 });
+		} finally { await bridge.teardownListeners(); }
+	});
+
+	await runCase("SESSION-RESTORE-15 cold helper fails closed for non-empty or uncertain history", async (record) => {
+		for (const metadata of [
+			{ ephemeral: false, messageCount: 0 }, { ephemeral: true, messageCount: 1 },
+			{ ephemeral: true, messageCount: null },
+		]) {
+			rpcResetEventMock();
+			let spawned = 0;
+			rpcSetInvokeHandler((command) => {
+				if (command === "get_session_file_status") return { status: "missing" };
+				if (command === "rpc_start") { spawned++; return { discovery: "unsafe", generation: 1 }; }
+				throw new Error(`Unexpected invoke: ${command}`);
+			});
+			const bridge = new RpcBridge("cold-helper-closed");
+			try {
+				await assert.rejects(startSessionTab(bridge, { cwd: "synthetic", cliPath: null }, {
+					sessionPath: "missing.jsonl", ...metadata,
+				}), SessionFileMissingError);
+				assert.equal(spawned, 0);
+			} finally { await bridge.teardownListeners(); }
+		}
+		record("session.cold_helper_closed", { variants: 3, replacementStarts: 0 });
+	});
+
+	await runCase("SESSION-RESTORE-16 stale task cannot start missing-draft replacement", async (record) => {
+		rpcResetEventMock();
+		let spawned = 0;
+		rpcSetInvokeHandler((command) => {
+			if (command === "get_session_file_status") return { status: "missing" };
+			if (command === "rpc_start") { spawned++; return { discovery: "unsafe", generation: 1 }; }
+			throw new Error(`Unexpected invoke: ${command}`);
+		});
+		const bridge = new RpcBridge("cold-helper-stale");
+		try {
+			await assert.rejects(startSessionTab(
+				bridge,
+				{ cwd: "synthetic", cliPath: null },
+				{ sessionPath: "missing.jsonl", ephemeral: true, messageCount: 0 },
+				() => { throw new Error("stale task"); },
+			), /stale task/);
+			assert.equal(spawned, 0);
+			record("session.cold_helper_stale", { replacementStarts: 0 });
+		} finally { await bridge.teardownListeners(); }
+	});
+
+	await runCase("SESSION-RESTORE-17 newer start between missing error and catch wins", async (record) => {
+		rpcResetEventMock();
+		let spawned = 0;
+		rpcSetInvokeHandler((command) => {
+			if (command === "get_session_file_status") return { status: "missing" };
+			if (command === "rpc_start") { spawned++; return { discovery: "newer", generation: spawned }; }
+			throw new Error(`Unexpected invoke: ${command}`);
+		});
+		const bridge = new RpcBridge("cold-helper-race");
+		let newerStart: Promise<string> | null = null;
+		try {
+			await assert.rejects(startSessionTab(
+				bridge,
+				{ cwd: "synthetic-old", cliPath: null },
+				{ sessionPath: "missing.jsonl", ephemeral: true, messageCount: 0 },
+				() => { newerStart ??= bridge.start({ cwd: "synthetic-new", cliPath: null }); },
+			), (error) => error instanceof RpcRequestError && error.kind === "cancelled");
+			await newerStart;
+			assert.equal(spawned, 1);
+			assert.equal(bridge.isConnected, true);
+			record("session.cold_helper_race", { staleReplacementStarts: 0, newerStarts: 1 });
 		} finally { await bridge.teardownListeners(); }
 	});
 }

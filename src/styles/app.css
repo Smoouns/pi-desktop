@@ -4915,6 +4915,10 @@ body.file-split-resizing #file-split-resize-handle::after {
 
 .sidebar-topbar {
 	display: grid;
+	/* Backdrop blur creates a stacking context. Lift the whole header above
+	 * positioned explorer icons and menus, not just its workspace dropdown. */
+	position: relative;
+	z-index: 30;
 	gap: 8px;
 	padding: 6px 8px 10px;
 	background: color-mix(
@@ -6445,6 +6449,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 
 .chat-row {
 	width: min(760px, calc(100% - 112px));
+	min-width: 0;
 	margin: 0 auto 16px;
 	padding: 0;
 }
@@ -6458,6 +6463,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 	display: inline-flex;
 	flex-direction: column;
 	gap: 8px;
+	min-width: 0;
 	max-width: 100%;
 }
 
@@ -6465,6 +6471,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 	align-items: flex-end;
 	margin-left: auto;
 	width: fit-content;
+	min-width: 0;
 	max-width: min(100%, 72ch);
 }
 
@@ -6537,6 +6544,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 }
 
 .bubble {
+	min-width: 0;
 	max-width: 100%;
 	width: fit-content;
 	padding: 0;
@@ -6549,6 +6557,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 	padding: 9px 14px;
 	display: grid;
 	gap: 6px;
+	min-width: 0;
 	max-width: 100%;
 }
 
@@ -6577,11 +6586,13 @@ body.file-split-resizing #file-split-resize-handle::after {
 }
 
 .bubble-text {
+	min-width: 0;
+	max-width: 100%;
 	font-size: 13px;
 	line-height: 1.5;
 	white-space: pre-wrap;
-	overflow-wrap: break-word;
-	word-break: normal;
+	overflow-wrap: anywhere;
+	word-break: break-word;
 }
 
 .attachment-grid {
@@ -6608,9 +6619,12 @@ body.file-split-resizing #file-split-resize-handle::after {
 
 .assistant-block {
 	width: min(820px, 100%);
+	min-width: 0;
 }
 
 .assistant-content {
+	min-width: 0;
+	max-width: 100%;
 	font-size: 14px;
 	line-height: 1.62;
 	color: color-mix(in srgb, var(--text) 92%, var(--muted));
@@ -10280,6 +10294,9 @@ body.file-split-resizing #file-split-resize-handle::after {
 /* -------------------------------------------------------------------------- */
 
 markdown-block {
+	display: block;
+	min-width: 0;
+	max-width: 100%;
 	line-height: 1.62;
 	color: inherit;
 	overflow-wrap: anywhere;
@@ -10287,8 +10304,27 @@ markdown-block {
 }
 
 markdown-block :not(pre):not(code):not(code *) {
+	min-width: 0;
+	max-width: 100%;
 	overflow-wrap: anywhere;
 	word-break: break-word;
+}
+
+/* Inline code often contains paths, hashes and tool-call IDs with no natural
+ * break point. Keep those tokens inside narrow chat columns; fenced code and
+ * tables retain their own horizontal scrolling below. */
+.assistant-content markdown-block.markdown-content code:not(.hljs):not(pre code),
+markdown-block code:not(.hljs):not(pre code) {
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+.assistant-content markdown-block table,
+markdown-block table {
+	display: block;
+	max-width: 100%;
+	overflow-x: auto;
+	overflow-y: hidden;
 }
 
 markdown-block p {

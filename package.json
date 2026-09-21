@@ -25,6 +25,7 @@
 		"test:harness": "node scripts/run-public-tests.mjs harness",
 		"test:harness:baseline": "node scripts/run-harness-baseline.mjs",
 		"test:harness:isolated": "node scripts/test-harness-isolated.mjs",
+		"test:chat-layout": "node scripts/test-chat-layout.mjs",
 		"test:novel-domain": "node scripts/run-public-tests.mjs regression",
 		"test:novel-memory": "node --experimental-strip-types scripts/novel-memory-smoke.ts"
 	},
