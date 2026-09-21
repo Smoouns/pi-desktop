@@ -7,6 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Emitter, Manager};
+mod session_file;
 
 #[derive(Default)]
 struct RpcProcessHandle {
@@ -18,14 +19,67 @@ struct RpcProcessHandle {
 /// State for managing multiple RPC child processes (one per instance)
 pub struct RpcState {
     instances: Arc<Mutex<HashMap<String, RpcProcessHandle>>>,
+    generations: Arc<Mutex<RpcGenerationState>>,
+}
+
+#[derive(Default)]
+struct RpcGenerationState {
+    latest: HashMap<String, u64>,
+    invalidated: HashSet<(String, u64)>,
 }
 
 impl Default for RpcState {
     fn default() -> Self {
         Self {
             instances: Arc::new(Mutex::new(HashMap::new())),
+            generations: Arc::new(Mutex::new(RpcGenerationState::default())),
         }
     }
+}
+
+fn next_rpc_generation(generations: &mut RpcGenerationState, instance_id: &str) -> u64 {
+    let previous = generations.latest.get(instance_id).copied().unwrap_or(0);
+    let next = previous.saturating_add(1).max(1);
+    generations
+        .invalidated
+        .retain(|(invalidated_instance, _)| invalidated_instance != instance_id);
+    generations.latest.insert(instance_id.to_string(), next);
+    next
+}
+
+fn is_current_rpc_generation(
+    generations: &RpcGenerationState,
+    instance_id: &str,
+    generation: u64,
+) -> bool {
+    generations.latest.get(instance_id).copied() == Some(generation)
+        && !generations
+            .invalidated
+            .contains(&(instance_id.to_string(), generation))
+}
+
+fn invalidate_current_rpc_generation(generations: &mut RpcGenerationState, instance_id: &str) {
+    if let Some(generation) = generations.latest.get(instance_id).copied() {
+        generations
+            .invalidated
+            .insert((instance_id.to_string(), generation));
+    }
+}
+
+fn can_stop_rpc_generation(
+    generations: &RpcGenerationState,
+    instances: &HashMap<String, RpcProcessHandle>,
+    instance_id: &str,
+    expected_generation: Option<u64>,
+) -> bool {
+    let Some(expected) = expected_generation else {
+        return true;
+    };
+    generations.latest.get(instance_id).copied() == Some(expected)
+        && instances
+            .get(instance_id)
+            .map(|handle| handle.generation == expected)
+            .unwrap_or(false)
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -594,6 +648,88 @@ fn is_windows_batch_script(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
+#[cfg(test)]
+mod rpc_generation_tests {
+    use super::{
+        can_stop_rpc_generation, invalidate_current_rpc_generation, is_current_rpc_generation,
+        next_rpc_generation, RpcGenerationState, RpcProcessHandle,
+    };
+    use std::collections::HashMap;
+
+    #[test]
+    fn generation_survives_process_removal_and_is_scoped_per_instance() {
+        let mut generations = RpcGenerationState::default();
+        assert_eq!(next_rpc_generation(&mut generations, "writer"), 1);
+        assert_eq!(next_rpc_generation(&mut generations, "planner"), 1);
+        // Process handles may have been removed in between; the independent
+        // counter still fences late events from writer generation 1.
+        assert_eq!(next_rpc_generation(&mut generations, "writer"), 2);
+        assert!(!is_current_rpc_generation(&generations, "writer", 1));
+        assert!(is_current_rpc_generation(&generations, "writer", 2));
+    }
+
+    #[test]
+    fn stop_before_insert_invalidates_pending_start_without_consuming_next_number() {
+        let mut generations = RpcGenerationState::default();
+        let pending = next_rpc_generation(&mut generations, "writer");
+        invalidate_current_rpc_generation(&mut generations, "writer");
+        assert!(!is_current_rpc_generation(
+            &generations,
+            "writer",
+            pending
+        ));
+        let next = next_rpc_generation(&mut generations, "writer");
+        assert_eq!(next, pending + 1);
+        assert!(is_current_rpc_generation(&generations, "writer", next));
+    }
+
+    #[test]
+    fn scoped_stop_never_matches_a_newer_generation() {
+        let mut generations = RpcGenerationState::default();
+        let first = next_rpc_generation(&mut generations, "writer");
+        let mut instances = HashMap::new();
+        instances.insert(
+            "writer".to_string(),
+            RpcProcessHandle {
+                generation: first,
+                ..Default::default()
+            },
+        );
+        assert!(can_stop_rpc_generation(
+            &generations,
+            &instances,
+            "writer",
+            Some(first)
+        ));
+        let second = next_rpc_generation(&mut generations, "writer");
+        instances.insert(
+            "writer".to_string(),
+            RpcProcessHandle {
+                generation: second,
+                ..Default::default()
+            },
+        );
+        assert!(!can_stop_rpc_generation(
+            &generations,
+            &instances,
+            "writer",
+            Some(first)
+        ));
+        assert!(can_stop_rpc_generation(
+            &generations,
+            &instances,
+            "writer",
+            Some(second)
+        ));
+        assert!(can_stop_rpc_generation(
+            &generations,
+            &instances,
+            "writer",
+            None
+        ));
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn resolve_npm_batch_node_script(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
@@ -764,17 +900,22 @@ async fn rpc_start(
 ) -> Result<RpcStartResult, String> {
     let instance_id = normalize_instance_id(instance_id);
 
-    let generation = if let Ok(mut instances) = state.instances.lock() {
+    // Generation is intentionally stored outside the live-process map. Stopping
+    // removes a process handle, but must never make a future process reuse an
+    // old transport identity: late stdout from that old process may still arrive.
+    let mut generations = state
+        .generations
+        .lock()
+        .map_err(|_| "Failed to acquire RPC generations lock".to_string())?;
+    let generation = next_rpc_generation(&mut generations, &instance_id);
+    if let Ok(mut instances) = state.instances.lock() {
         if let Some(handle) = instances.get_mut(&instance_id) {
-            let next_generation = handle.generation.saturating_add(1).max(1);
             stop_rpc_instance(handle);
-            next_generation
-        } else {
-            1
         }
     } else {
         return Err("Failed to acquire RPC instances lock".to_string());
-    };
+    }
+    drop(generations);
 
     let cwd_path = Path::new(&options.cwd);
     if !cwd_path.is_dir() {
@@ -803,19 +944,39 @@ async fn rpc_start(
     let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to get stderr")?;
 
-    // Store process + stdin handle for this instance
+    // Check and insert while holding the generation lock. A concurrent newer
+    // start either advances the counter first (and this child is killed), or
+    // waits and then stops this inserted handle before spawning its own child.
+    let generations = state
+        .generations
+        .lock()
+        .map_err(|_| "Failed to acquire RPC generations lock".to_string())?;
+    if !is_current_rpc_generation(&generations, &instance_id, generation) {
+        drop(stdin);
+        drop(stdout);
+        drop(stderr);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "RPC start generation {} for instance '{}' was superseded",
+            generation, instance_id
+        ));
+    }
     if let Ok(mut instances) = state.instances.lock() {
-        instances.insert(
+        if let Some(mut replaced) = instances.insert(
             instance_id.clone(),
             RpcProcessHandle {
                 generation,
                 process: Some(child),
                 stdin_writer: Some(stdin),
             },
-        );
+        ) {
+            stop_rpc_instance(&mut replaced);
+        }
     } else {
         return Err("Failed to acquire RPC instances lock".to_string());
     }
+    drop(generations);
 
     // Spawn thread to read stdout and emit events to frontend
     let app_handle = app.clone();
@@ -925,25 +1086,50 @@ async fn rpc_send(
 
 /// Stop an RPC process instance
 #[tauri::command]
-async fn rpc_stop(state: tauri::State<'_, RpcState>, instance_id: Option<String>) -> Result<(), String> {
+async fn rpc_stop(
+    state: tauri::State<'_, RpcState>,
+    instance_id: Option<String>,
+    expected_generation: Option<u64>,
+) -> Result<bool, String> {
     let instance_id = normalize_instance_id(instance_id);
-    if let Ok(mut instances) = state.instances.lock() {
-        if let Some(mut handle) = instances.remove(&instance_id) {
-            stop_rpc_instance(&mut handle);
-        }
-        Ok(())
-    } else {
-        Err("Failed to acquire RPC instances lock".to_string())
+    let mut generations = state
+        .generations
+        .lock()
+        .map_err(|_| "Failed to acquire RPC generations lock".to_string())?;
+    let mut instances = state
+        .instances
+        .lock()
+        .map_err(|_| "Failed to acquire RPC instances lock".to_string())?;
+
+    if !can_stop_rpc_generation(&generations, &instances, &instance_id, expected_generation) {
+        return Ok(false);
     }
+
+    invalidate_current_rpc_generation(&mut generations, &instance_id);
+    if let Some(mut handle) = instances.remove(&instance_id) {
+        stop_rpc_instance(&mut handle);
+    }
+    Ok(true)
 }
 
 /// Stop all RPC process instances
 #[tauri::command]
 async fn rpc_stop_all(state: tauri::State<'_, RpcState>) -> Result<(), String> {
+    let mut generations = state
+        .generations
+        .lock()
+        .map_err(|_| "Failed to acquire RPC generations lock".to_string())?;
+    let active_generations: Vec<(String, u64)> = generations
+        .latest
+        .iter()
+        .map(|(instance_id, generation)| (instance_id.clone(), *generation))
+        .collect();
+    generations.invalidated.extend(active_generations);
     if let Ok(mut instances) = state.instances.lock() {
         for (_, mut handle) in instances.drain() {
             stop_rpc_instance(&mut handle);
         }
+        drop(generations);
         Ok(())
     } else {
         Err("Failed to acquire RPC instances lock".to_string())
@@ -1234,6 +1420,11 @@ async fn list_sessions(app: AppHandle) -> Result<Vec<SessionInfo>, String> {
 #[tauri::command]
 async fn get_session_content(session_path: String) -> Result<String, String> {
     fs::read_to_string(&session_path).map_err(|e| format!("Failed to read session: {}", e))
+}
+
+#[tauri::command]
+async fn get_session_file_status(session_path: String) -> Result<session_file::SessionFileStatus, String> {
+    session_file::inspect_session_file(Path::new(&session_path))
 }
 
 #[derive(Debug, Serialize)]
@@ -2655,6 +2846,7 @@ pub fn run() {
             rpc_ui_response,
             list_sessions,
             get_session_content,
+            get_session_file_status,
             get_pi_auth_status,
             get_pi_oauth_providers,
             clear_pi_provider_auth,

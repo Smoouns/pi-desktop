@@ -17,11 +17,13 @@ const temporary = await mkdtemp(path.join(tmpdir(), "pi-harness-isolated-"));
 const checkout = path.join(temporary, "checkout");
 await mkdir(output, { recursive: true });
 
-// Existing tracked files plus an explicit allowlist of this uncommitted Phase-0
+// Existing tracked files plus an explicit allowlist of uncommitted Harness
 // deliverable. Do not copy arbitrary untracked files or ignored private fixtures.
 const additions = [
 	".gitattributes", "tsconfig.harness.json", "fixtures/harness-novel", "tests/harness", "tests/support",
 	"src/harness", "src/novel/context-attachment.ts", "scripts/run-public-tests.mjs",
+	"src/novel/tool-path-policy.ts",
+	"src/rpc/session-restore.ts", "src-tauri/src/session_file.rs",
 	"scripts/run-harness-baseline.mjs", "scripts/test-harness-isolated.mjs",
 ];
 try {

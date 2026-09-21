@@ -22,6 +22,7 @@ import { TerminalPanel } from "./components/terminal-panel.js";
 import type { WorkspaceTabs } from "./components/workspace-tabs.js";
 import { fetchDesktopUpdateStatus, type DesktopUpdateStatus } from "./desktop-updates.js";
 import { type CliUpdateStatus, RpcBridge, type RpcSessionState, rpcBridge, setActiveRpcBridge } from "./rpc/bridge.js";
+import { restoreSessionTab } from "./rpc/session-restore.js";
 import {
 	applyDesktopAppearanceProfileToRoot,
 	DESKTOP_APPEARANCE_PROFILE_CHANGED_EVENT,
@@ -2943,6 +2944,9 @@ async function ensureRuntimeForSessionTabImpl(
 			recordDebugTrace(`ensureRuntime:start-bridge instance=${runtime.instanceId}`);
 			const novelRoleEnv = sessionTab.novelRole ? { PI_DESKTOP_NOVEL_ROLE: sessionTab.novelRole } : undefined;
 			await bridge.start({ cliPath: findCliPath(), piPath: findPiBinaryPath(), cwd: projectPath, env: novelRoleEnv });
+			// A restarted Pi process has a new draft, even if this runtime object
+			// remembers the old path. Always revalidate/resume the saved target.
+			runtime.lastKnownSessionPath = null;
 			recordDebugTrace(`ensureRuntime:bridge-started instance=${runtime.instanceId} discovery=${bridge.discoveryInfo ?? "-"}`);
 			if (typeof taskVersion === "number") {
 				assertProjectTaskCurrent(taskVersion);
@@ -2954,15 +2958,22 @@ async function ensureRuntimeForSessionTabImpl(
 			const targetSessionPath = sessionTab.sessionPath;
 			if (normalizeSessionPath(targetSessionPath) !== normalizeSessionPath(runtime.lastKnownSessionPath)) {
 				runtime.phase = "switching_session";
-				const switched = await withRpcRetry(
-					`switch_session ${runtime.instanceId}`,
-					() => bridge.switchSession(targetSessionPath),
-				);
+				const switched = await restoreSessionTab(bridge, {
+					sessionPath: targetSessionPath,
+					ephemeral: sessionTab.ephemeral,
+					messageCount: sessionTab.messageCount,
+				});
 				if (typeof taskVersion === "number") {
 					assertProjectTaskCurrent(taskVersion);
 				}
 				if (!switched.cancelled) {
-					runtime.lastKnownSessionPath = targetSessionPath;
+					if (switched.replacedMissingDraft) {
+						sessionTab.sessionPath = null;
+						runtime.lastKnownSessionPath = null;
+						persistWorkspaces();
+					} else {
+						runtime.lastKnownSessionPath = targetSessionPath;
+					}
 					runtime.draftInitialized = true;
 				}
 			}

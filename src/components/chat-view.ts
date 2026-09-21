@@ -117,6 +117,7 @@ import {
 } from "./chat-view/slash-builtin-command.js";
 import {
 	collectAssistantWorkflow,
+	getWorkflowThinkingPresentation,
 	isStandaloneCodeBlockMarkdown,
 	normalizeThinkingText,
 	resolveWorkflowExpansionState,
@@ -4118,8 +4119,9 @@ export class ChatView {
 	private renderThinking(msg: UiMessage): TemplateResult | typeof nothing {
 		if (!msg.thinking) return nothing;
 		const expanded = msg.thinkingExpanded ?? false;
-		const label = "Thinking…";
-		const toggleClass = `thinking-toggle ${msg.isStreaming ? "animating" : "done"}`;
+		const thinkingPresentation = getWorkflowThinkingPresentation(Boolean(msg.isStreaming), Boolean(msg.isThinkingStreaming));
+		const label = thinkingPresentation.label;
+		const toggleClass = `thinking-toggle ${thinkingPresentation.animating ? "animating" : "done"}`;
 		const thinkingText = this.normalizeThinkingText(msg.thinking.replace(/^\s+/, ""));
 		if (!thinkingText) return nothing;
 		return html`

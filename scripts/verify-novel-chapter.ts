@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 type Scalar = string | number | boolean | null;
@@ -177,10 +177,39 @@ function requiredInt(mapping: { [key: string]: YamlValue }, key: string, label: 
 }
 
 function resolveMember(root: string, relative: string, label: string): string {
+	if (relative.split(/[\\/]+/).some((segment) => !segment || segment === "." || segment === ".." || /[<>:"|?*\u0000-\u001f]/.test(segment))) {
+		throw new ContractError(label + " contains an unsafe path segment: " + relative);
+	}
 	const candidate = path.resolve(root, relative);
 	const rel = path.relative(root, candidate);
 	if (!rel || rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) throw new ContractError(label + " escapes project root: " + relative);
 	return candidate;
+}
+
+async function assertNoLinkedSegments(root: string, member: string, label: string, allowMissingLeaf = false): Promise<void> {
+	const relative = path.relative(root, member);
+	if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) {
+		throw new ContractError(label + " escapes project root.");
+	}
+	let current = root;
+	const segments = relative.split(path.sep);
+	for (const [index, segment] of segments.entries()) {
+		current = path.join(current, segment);
+		try {
+			const info = await lstat(current);
+			if (info.isSymbolicLink()) throw new ContractError(label + " uses linked path segment: " + normalized(path.relative(root, current)));
+		} catch (error) {
+			if (error instanceof ContractError) throw error;
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT" && allowMissingLeaf && index === segments.length - 1) return;
+			throw error;
+		}
+	}
+}
+
+async function safeRead(root: string, member: string, label: string): Promise<string> {
+	await assertNoLinkedSegments(root, member, label);
+	return (await readFile(member, "utf8")).replace(/^\uFEFF/, "");
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -201,7 +230,8 @@ async function existingMember(root: string, relative: string, label: string): Pr
 }
 
 async function readProjectConfig(root: string): Promise<{ [key: string]: YamlValue }> {
-	const parsed: unknown = JSON.parse((await readFile(path.join(root, ".novel", "project.json"), "utf8")).replace(/^\uFEFF/, ""));
+	const metadataPath = resolveMember(root, ".novel/project.json", "Novel Project metadata");
+	const parsed: unknown = JSON.parse(await safeRead(root, metadataPath, "Novel Project metadata"));
 	if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new ContractError("Novel Project metadata must be an object.");
 	return parsed as { [key: string]: YamlValue };
 }
@@ -220,8 +250,10 @@ async function resolveChapterFile(root: string, config: { [key: string]: YamlVal
 	const matches: string[] = [];
 	const visit = async (directory: string): Promise<void> => {
 		if (!(await exists(directory))) return;
+		await assertNoLinkedSegments(root, directory, "proposed chapter root");
 		for (const entry of await readdir(directory, { withFileTypes: true })) {
 			const child = path.join(directory, entry.name);
+			if (entry.isSymbolicLink()) throw new ContractError("proposed chapter root uses linked path segment: " + normalized(path.relative(root, child)));
 			if (entry.isDirectory()) await visit(child);
 			else if (entry.isFile() && entry.name.replace(/\.(md|mdx|txt)$/i, "") === wantedName) matches.push(child);
 		}
@@ -245,12 +277,12 @@ async function loadContract(root: string, chapter: string): Promise<{ config: { 
 		if (await exists(candidate)) { architecturePath = candidate; break; }
 	}
 	if (!architecturePath) throw new ContractError("Missing chapter architecture.");
-	const architecture = yamlDocument((await readFile(architecturePath, "utf8")).replace(/^\uFEFF/, ""), architecturePath);
+	const architecture = yamlDocument(await safeRead(root, architecturePath, "chapter architecture"), architecturePath);
 	const entries = asList(architecture.chapters, "chapter-architecture.chapters");
 	const entry = entries.map((value) => asMapping(value, "chapter-architecture item")).find((value) => chapterId(value.chapter) === chapter);
 	if (!entry) throw new ContractError("Chapter " + chapter + " is not registered in chapter architecture.");
 	const cardPath = await existingMember(root, requiredText(entry, "card", "chapter architecture"), "chapter card");
-	const card = yamlDocument((await readFile(cardPath, "utf8")).replace(/^\uFEFF/, ""), cardPath);
+	const card = yamlDocument(await safeRead(root, cardPath, "chapter card"), cardPath);
 	if (chapterId(entry.chapter) !== chapter || chapterId(card.chapter) !== chapter) throw new ContractError("Architecture and card chapter ids must both equal " + chapter + ".");
 	for (const key of ["file", "min_chars", "target_chars", "max_chars"]) if (entry[key] !== card[key]) throw new ContractError("Architecture/card mismatch for " + key + ".");
 	const entryBudget = asMapping(entry.scene_budget, "chapter-architecture.scene_budget");
@@ -351,7 +383,7 @@ async function main(): Promise<void> {
 			if (resolvedPath !== configuredPath) throw new ContractError("Chapter file path mismatch: architecture/card declare " + configuredPath + ", but the existing candidate is " + resolvedPath + ". Update planning to use authority.proposedPaths and keep the architecture/card file fields identical.");
 		}
 		if (!(await exists(chapterPath))) throw new ContractError("Chapter file does not exist: " + (chapterFile ?? contract.file));
-		source = normalized(path.relative(root, chapterPath)); manuscript = (await readFile(chapterPath, "utf8")).replace(/^\uFEFF/, "");
+		source = normalized(path.relative(root, chapterPath)); manuscript = await safeRead(root, chapterPath, "chapter file");
 	} catch (error) { failures.push({ code: "CONTRACT", message: error instanceof Error ? error.message : String(error) }); }
 	const scenes = parseScenes(manuscript); const counts = Object.fromEntries(Object.entries(scenes.scenes).map(([id, text]) => [id, countChars(text)])); const total = manuscript ? countChars(manuscript) : null;
 	if (contract && manuscript) {
@@ -390,7 +422,15 @@ async function main(): Promise<void> {
 		}
 	}
 	const report = makeReport(chapter, sceneArgument ? "scene:" + sceneArgument : "full", source || "unavailable", total, contract?.targetChars ?? null, counts, contract, failures, warnings);
-	if (!noWrite) { const reportPath = path.join(root, "planning", "verifications", chapter + "-verification.md"); await mkdir(path.dirname(reportPath), { recursive: true }); await writeFile(reportPath, report, "utf8"); console.log("已写入 " + normalized(path.relative(root, reportPath))); }
+	if (!noWrite) {
+		const reportPath = resolveMember(root, "planning/verifications/" + chapter + "-verification.md", "verification report");
+		await assertNoLinkedSegments(root, path.dirname(reportPath), "verification report directory", true);
+		await mkdir(path.dirname(reportPath), { recursive: true });
+		await assertNoLinkedSegments(root, path.dirname(reportPath), "verification report directory");
+		await assertNoLinkedSegments(root, reportPath, "verification report", true);
+		await writeFile(reportPath, report, "utf8");
+		console.log("已写入 " + normalized(path.relative(root, reportPath)));
+	}
 	console.log(report); if (failures.length) process.exitCode = 1;
 }
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { sha256, treeManifest, withProject, type RunCase } from "./testkit.js";
@@ -34,6 +35,48 @@ function changedPaths(before: Record<string, string>, after: Record<string, stri
 }
 
 export async function runVerifierCases(runCase: RunCase): Promise<void> {
+	await runCase("VFY-PATH-01 linked report directory cannot write outside project", async (recordEvent) => {
+		const outside = await mkdtemp(path.join(os.tmpdir(), "pi-verifier-report-"));
+		try {
+			await withProject(async (root) => {
+				const reportDirectory = path.join(root, "planning", "verifications");
+				await rm(reportDirectory, { recursive: true, force: true });
+				await symlink(outside, reportDirectory, process.platform === "win32" ? "junction" : "dir");
+				const result = await verify(root, false);
+				assert.notEqual(result.code, 0);
+				assert.match(result.stderr + result.stdout, /linked path segment/i);
+				await assert.rejects(access(path.join(outside, "002-verification.md")));
+				recordEvent("verifier.path_blocked", { target: "report", outsideUntouched: true });
+			});
+		} finally {
+			await rm(outside, { recursive: true, force: true });
+		}
+	});
+
+	for (const linkedSource of [
+		{ name: "card", directory: "planning/chapter-cards", file: "002.md" },
+		{ name: "candidate", directory: "drafts/candidates/chapters", file: "002.md" },
+	]) {
+		await runCase(`VFY-PATH-02 linked ${linkedSource.name} source is rejected`, async (recordEvent) => {
+			const outside = await mkdtemp(path.join(os.tmpdir(), `pi-verifier-${linkedSource.name}-`));
+			try {
+				await withProject(async (root) => {
+					const sourceDirectory = path.join(root, linkedSource.directory);
+					await mkdir(outside, { recursive: true });
+					await copyFile(path.join(sourceDirectory, linkedSource.file), path.join(outside, linkedSource.file));
+					await rm(sourceDirectory, { recursive: true, force: true });
+					await symlink(outside, sourceDirectory, process.platform === "win32" ? "junction" : "dir");
+					const result = await verify(root, true);
+					assert.notEqual(result.code, 0);
+					assert.match(result.stdout, /\[CONTRACT\].*linked path segment/i);
+					recordEvent("verifier.path_blocked", { target: linkedSource.name });
+				});
+			} finally {
+				await rm(outside, { recursive: true, force: true });
+			}
+		});
+	}
+
 	await runCase("VFY-01", (recordEvent) => withProject(async (root) => {
 		const initial = await treeManifest(root);
 		const acceptanceBefore = initial[acceptance];

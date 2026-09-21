@@ -50,6 +50,15 @@ export interface AssistantWorkflowCandidate {
 	nextIndex: number;
 }
 
+export function getWorkflowThinkingPresentation(
+	workflowIsStreaming: boolean,
+	entryIsThinkingStreaming: boolean,
+	animationAllowed = true,
+): { animating: boolean; label: "正在思考…" | "思考过程" } {
+	const animating = animationAllowed && workflowIsStreaming && entryIsThinkingStreaming;
+	return { animating, label: animating ? "正在思考…" : "思考过程" };
+}
+
 interface ResolveWorkflowExpansionStateParams {
 	workflowId: string;
 	toolCalls: WorkflowToolCall[];

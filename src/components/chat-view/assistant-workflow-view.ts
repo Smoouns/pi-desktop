@@ -1,5 +1,10 @@
 import { html, nothing, type TemplateResult } from "lit";
-import type { AssistantWorkflow, WorkflowToolCall, WorkflowToolCallGroup } from "./workflow-utils.js";
+import {
+	getWorkflowThinkingPresentation,
+	type AssistantWorkflow,
+	type WorkflowToolCall,
+	type WorkflowToolCallGroup,
+} from "./workflow-utils.js";
 
 type WorkflowExpansionState = {
 	total: number;
@@ -165,12 +170,13 @@ export function renderAssistantWorkflowView({
 								${detailEntries.map((entry) => {
 									if (entry.kind === "thinking") {
 										const thinkingExpanded = isWorkflowThinkingExpanded(entry.id, workflow.isStreaming);
-										const thinkingAnimating = running === 0 && entry.animating;
+										const thinkingPresentation = getWorkflowThinkingPresentation(workflow.isStreaming, entry.animating, running === 0);
+										const thinkingAnimating = thinkingPresentation.animating;
 										return html`
 											<div class="tool-workflow-thinking">
 												<button class="tool-workflow-thinking-toggle ${thinkingAnimating ? "animating" : "done"}" @click=${() => toggleWorkflowThinkingExpanded(entry.id, workflow.isStreaming)}>
 													${thinkingAnimating ? html`<span class="tool-workflow-inline-pi" aria-hidden="true">${piGlyphIcon()}</span>` : nothing}
-													<span class="tool-workflow-thinking-text">Thinking…</span>
+													<span class="tool-workflow-thinking-text">${thinkingPresentation.label}</span>
 												</button>
 												${thinkingExpanded ? html`<div class="tool-workflow-thinking-content">${entry.text}</div>` : nothing}
 											</div>

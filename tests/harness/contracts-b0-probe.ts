@@ -14,6 +14,15 @@ const sourceMode = process.argv.includes("--current") ? "current" : "baseline";
 const git = promisify(execFile);
 const root = await mkdtemp(path.join(tmpdir(), "pi-desktop-contract-raw-"));
 
+async function observeToolResult<T>(pending: Promise<T>): Promise<T> {
+	try { return await pending; }
+	catch (error) {
+		const result = (error as { toolResult?: T } | null)?.toolResult;
+		if (result !== undefined) return result;
+		throw error;
+	}
+}
+
 try {
 	const checkout = path.join(root, sourceMode);
 	let extensionSource = path.resolve("src/extensions/novel-tools-extension.ts");
@@ -63,7 +72,7 @@ try {
 	const currentText = current.content.find((part) => part.type === "text")?.text ?? "";
 	let linkText = "unsupported";
 	if (symlinkSupported) {
-		const linked = await extension.tools.get("read_story_document")!.definition.execute("raw-link", { path: "canon/linked.md" }, undefined, undefined, { cwd: project } as never);
+		const linked = await observeToolResult(extension.tools.get("read_story_document")!.definition.execute("raw-link", { path: "canon/linked.md" }, undefined, undefined, { cwd: project } as never));
 		linkText = linked.content.find((part) => part.type === "text")?.text ?? "";
 	}
 	await writeFile(path.join(project, ".novel", "project.json"), "{ malformed");

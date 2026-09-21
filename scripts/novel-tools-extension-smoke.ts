@@ -44,6 +44,15 @@ function toolIsError(value: unknown): boolean | undefined {
 	return isError;
 }
 
+async function observeToolResult<T>(pending: Promise<T>): Promise<T> {
+	try { return await pending; }
+	catch (error) {
+		const result = (error as { toolResult?: T } | null)?.toolResult;
+		if (result !== undefined) return result;
+		throw error;
+	}
+}
+
 const toolContext = { cwd: fixtureRoot };
 
 const previousCwd = process.cwd();
@@ -51,7 +60,7 @@ const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "pi-desktop-novel-t
 const extensionPath = path.join(temporaryDirectory, "pi-desktop-novel-tools.ts");
 
 try {
-	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v7/);
+	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v8/);
 	assert.doesNotMatch(NOVEL_TOOLS_EXTENSION_CONTENT, /\b(?:writeFile|writeTextFile|appendFile|rename|unlink|rm)\s*\(/);
 	await writeFile(extensionPath, NOVEL_TOOLS_EXTENSION_CONTENT, "utf8");
 
@@ -104,7 +113,7 @@ try {
 	assert.ok(memoryData.hits.some((hit: { path: string }) => hit.path.endsWith("canon/world.md")));
 	const memoryRead = await tools.get("read_story_memory")!.definition.execute("memory-read", { id: memoryData.hits[0].id }, undefined, undefined, toolContext as never);
 	assert.equal(JSON.parse(resultText(memoryRead)).sourceFingerprint, memoryData.hits[0].sourceFingerprint);
-	const invalidMemory = await tools.get("read_story_memory")!.definition.execute("bad-memory", { id: "mem-foreign-project" }, undefined, undefined, toolContext as never);
+	const invalidMemory = await observeToolResult(tools.get("read_story_memory")!.definition.execute("bad-memory", { id: "mem-foreign-project" }, undefined, undefined, toolContext as never));
 	assert.equal(toolIsError(invalidMemory), true);
 
 	const documentResult = await tools.get("read_story_document")!.definition.execute("document", { path: "planning/chapter-architecture.md" }, undefined, undefined, toolContext as never);
@@ -122,8 +131,8 @@ try {
 	const searchResult = await tools.get("search_story")!.definition.execute("search", { query: "林岚", limit: 3 }, undefined, undefined, toolContext as never);
 	assert.doesNotMatch(resultText(searchResult), /^Error:/m);
 
-	const outsideResult = await tools.get("read_story_document")!.definition.execute("outside", { path: "../README.md" }, undefined, undefined, toolContext as never);
-	assert.match(resultText(outsideResult), /Error: Path must (?:remain inside the active Novel Project|use canonical project-relative segments)\./);
+	const outsideResult = await observeToolResult(tools.get("read_story_document")!.definition.execute("outside", { path: "../README.md" }, undefined, undefined, toolContext as never));
+	assert.match(resultText(outsideResult), /Error: Path must (?:remain inside the active Novel Project|use canonical project-relative segments|use safe project-relative segments)\./);
 
 	const currentContext = {
 		cwd: fixtureRoot,
@@ -163,7 +172,7 @@ try {
 	else process.env.PI_DESKTOP_NOVEL_ROLE = previousInjectedRole;
 	const writerContext = roleContext("write");
 	const candidateWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "candidate", input: { path: "drafts/candidates/chapters/002.md", content: "x" } }, writerContext as never);
-	assert.equal(candidateWrite, undefined);
+	assert.equal(handlerBlock(candidateWrite), true); // prior same-intent write has no result; do not dispatch again
 	const protectedWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "edit", toolCallId: "canon", input: { path: "canon/world.md", oldText: "x", newText: "y" } }, writerContext as never);
 	assert.equal(handlerBlock(protectedWrite), true);
 	const planWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "write", toolCallId: "plan", input: { path: "planning/chapter-cards/003.md", content: "x" } }, roleContext("plan") as never);
@@ -174,7 +183,7 @@ try {
 	assert.equal(handlerBlock(writerArchitectureWrite), true);
 	const bashWrite = await toolCallHandlers[0]({ type: "tool_call", toolName: "bash", toolCallId: "bash", input: { command: "Get-ChildItem" } }, writerContext as never);
 	assert.equal(handlerBlock(bashWrite), true);
-	const deniedVerification = await tools.get("verify_chapter")!.definition.execute("verify-denied", { chapter: "002" }, undefined, undefined, roleContext("plan") as never);
+	const deniedVerification = await observeToolResult(tools.get("verify_chapter")!.definition.execute("verify-denied", { chapter: "002" }, undefined, undefined, roleContext("plan") as never));
 	assert.match(resultText(deniedVerification), /available only to the \/novel-write role/);
 
 	const verificationProjectRoot = path.join(temporaryDirectory, "verification-project");
@@ -193,18 +202,18 @@ try {
 	const chapterCardPath = path.join(verificationProjectRoot, "planning", "chapter-cards", "002.md");
 	const originalChapterCard = await readFile(chapterCardPath, "utf8");
 	await writeFile(chapterCardPath, `${originalChapterCard.trimEnd()}\n\n\`\`\`yaml\nextra: invalid-second-document\n\`\`\`\n`, "utf8");
-	const malformedCardResult = await tools.get("verify_chapter")!.definition.execute("verify-malformed-card", { chapter: "002" }, undefined, undefined, writerVerificationContext as never);
+	const malformedCardResult = await observeToolResult(tools.get("verify_chapter")!.definition.execute("verify-malformed-card", { chapter: "002" }, undefined, undefined, writerVerificationContext as never));
 	assert.match(resultText(malformedCardResult), /规划 Agent/);
 	assert.match(resultText(malformedCardResult), /exactly one fenced YAML document/);
 	await writeFile(chapterCardPath, originalChapterCard, "utf8");
 	const architecturePath = path.join(verificationProjectRoot, "planning", "chapter-architecture.md");
 	const architecture = await readFile(architecturePath, "utf8");
 	await writeFile(architecturePath, architecture.replace(/\n  - chapter: "002"[\s\S]*?(?=\n  - chapter:|\n```)/, ""), "utf8");
-	const missingArchitectureResult = await tools.get("verify_chapter")!.definition.execute("verify-missing-architecture", { chapter: "002" }, undefined, undefined, writerVerificationContext as never);
+	const missingArchitectureResult = await observeToolResult(tools.get("verify_chapter")!.definition.execute("verify-missing-architecture", { chapter: "002" }, undefined, undefined, writerVerificationContext as never));
 	assert.match(resultText(missingArchitectureResult), /写作前置合同未完成/);
 
 	process.chdir(temporaryDirectory);
-	const unavailableResult = await tools.get("list_story_files")!.definition.execute("missing-project", {}, undefined, undefined, { cwd: temporaryDirectory } as never);
+	const unavailableResult = await observeToolResult(tools.get("list_story_files")!.definition.execute("missing-project", {}, undefined, undefined, { cwd: temporaryDirectory } as never));
 	assert.match(resultText(unavailableResult), /Error: This tool is available only when the active project contains \.novel\/project\.json\./);
 
 	console.log("Novel tools extension smoke passed");

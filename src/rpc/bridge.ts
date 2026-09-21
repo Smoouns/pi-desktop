@@ -27,6 +27,41 @@ export interface RpcImageInput {
 export interface RpcPromptOptions {
 	images?: RpcImageInput[];
 	streamingBehavior?: StreamingBehavior;
+	signal?: AbortSignal;
+	deadlineMs?: number;
+}
+
+export interface RpcRequestOptions {
+	signal?: AbortSignal;
+	/** Relative deadline in milliseconds. */
+	deadlineMs?: number;
+}
+
+export type RpcRequestErrorKind = "transient" | "cancelled" | "unknown_outcome" | "fatal";
+
+export class SessionFileMissingError extends Error {
+	constructor(
+		readonly sessionPath: string,
+		readonly runtimeTicket: number | null = null,
+		readonly runtimeGeneration: number | null = null,
+	) {
+		super(`会话文件不存在，无法恢复历史记录：${sessionPath}`);
+		this.name = "SessionFileMissingError";
+	}
+}
+
+export class RpcRequestError extends Error {
+	readonly kind: RpcRequestErrorKind;
+	readonly command: string;
+	readonly requestId?: string;
+
+	constructor(kind: RpcRequestErrorKind, command: string, message: string, requestId?: string) {
+		super(message);
+		this.name = "RpcRequestError";
+		this.kind = kind;
+		this.command = command;
+		this.requestId = requestId;
+	}
 }
 
 export interface RpcSessionState {
@@ -154,7 +189,17 @@ interface RpcStartResult {
 interface PendingRequestEntry {
 	resolve: (data: Record<string, unknown>) => void;
 	reject: (err: Error) => void;
+	command: string;
+	mutating: boolean;
+	dispatched: boolean;
 }
+
+const MUTATING_RPC_COMMANDS = new Set([
+	"prompt", "steer", "follow_up", "abort", "new_session", "set_model", "cycle_model",
+	"set_thinking_level", "cycle_thinking_level", "set_steering_mode", "set_follow_up_mode",
+	"compact", "set_auto_compaction", "set_auto_retry", "abort_retry", "bash", "abort_bash",
+	"switch_session", "set_session_name", "fork",
+]);
 
 function normalizeInstanceId(value: string | null | undefined): string {
 	const raw = (value ?? "").trim();
@@ -266,6 +311,7 @@ export class RpcBridge {
 	private lastDiscoveryInfo: string | null = null;
 	private preferredPiPath: string | null = null;
 	private parseFailureCount = 0;
+	private startTicket = 0;
 
 	constructor(instanceId = "default", onDiagnostic: RpcBridgeDiagnosticCallback | null = null) {
 		this.instanceId = normalizeInstanceId(instanceId);
@@ -299,7 +345,10 @@ export class RpcBridge {
 
 	async start(options: RpcStartOptions): Promise<string> {
 		await this.ensureListeners();
-		this.pendingGeneration = (this.currentGeneration ?? 0) + 1;
+		const ticket = ++this.startTicket;
+		this._isConnected = false;
+		this.rejectAllPending("RPC runtime restarted", "cancelled");
+		this.pendingGeneration = (this.pendingGeneration ?? this.currentGeneration ?? 0) + 1;
 
 		const effectiveCliPath = this.normalizePathOverride(options.cliPath);
 		const effectivePiPath = this.normalizePathOverride(options.piPath) ?? this.preferredPiPath;
@@ -322,6 +371,9 @@ export class RpcBridge {
 				},
 				instanceId: this.instanceId,
 			});
+			if (ticket !== this.startTicket) {
+				throw new RpcRequestError("cancelled", "rpc_start", "RPC start was superseded by a newer start");
+			}
 
 			this._isConnected = true;
 			this.currentGeneration = typeof result.generation === "number" && Number.isFinite(result.generation)
@@ -334,7 +386,7 @@ export class RpcBridge {
 			this.emitToListeners({ type: "rpc_connected", discovery: result.discovery });
 			return result.discovery;
 		} catch (err) {
-			this.pendingGeneration = null;
+			if (ticket === this.startTicket) this.pendingGeneration = null;
 			traceBridge(`start-failed instance=${this.instanceId}: ${err instanceof Error ? err.message : String(err)}`);
 			throw err;
 		}
@@ -342,13 +394,34 @@ export class RpcBridge {
 
 	async stop(): Promise<void> {
 		await this.ensureListeners();
+		this.startTicket += 1;
+		this.pendingGeneration = null;
 		traceBridge(`stop instance=${this.instanceId}`);
 		this._isConnected = false;
 		this.rejectAllPending("RPC stopped");
 		await invoke("rpc_stop", { instanceId: this.instanceId });
 	}
 
+	private async stopGeneration(expectedGeneration: number, expectedTicket: number): Promise<boolean> {
+		const stopped = await invoke<boolean>("rpc_stop", {
+			instanceId: this.instanceId,
+			expectedGeneration,
+		});
+		// A newer start may have completed while the scoped stop was in flight.
+		// Never let an old continuation overwrite that generation's frontend state.
+		if (!stopped || this.startTicket !== expectedTicket || this.currentGeneration !== expectedGeneration) {
+			return false;
+		}
+		this.startTicket += 1;
+		this.pendingGeneration = null;
+		this._isConnected = false;
+		this.rejectAllPending("RPC generation stopped", "cancelled");
+		return true;
+	}
+
 	async stopAll(): Promise<void> {
+		this.startTicket += 1;
+		this.pendingGeneration = null;
 		this._isConnected = false;
 		this.rejectAllPending("RPC stopped");
 		await invoke("rpc_stop_all");
@@ -376,7 +449,10 @@ export class RpcBridge {
 	// -------------------------------------------------------------------------
 
 	async prompt(message: string, options: RpcPromptOptions = {}): Promise<void> {
-		await this.send({ type: "prompt", message, images: options.images, streamingBehavior: options.streamingBehavior });
+		await this.send(
+			{ type: "prompt", message, images: options.images, streamingBehavior: options.streamingBehavior },
+			options,
+		);
 	}
 
 	async steer(message: string, images?: RpcImageInput[]): Promise<void> {
@@ -391,13 +467,29 @@ export class RpcBridge {
 		await this.send({ type: "abort" });
 	}
 
-	async newSession(parentSession?: string): Promise<{ cancelled: boolean }> {
-		const response = await this.send({ type: "new_session", parentSession });
-		return this.getData(response);
+	async newSession(
+		parentSession?: string,
+		options: RpcRequestOptions = {},
+		expectedRuntime?: { ticket: number; generation: number | null },
+	): Promise<{ cancelled: boolean }> {
+		const response = await this.send({ type: "new_session", parentSession }, options, expectedRuntime);
+		const data = this.getData<{ cancelled: boolean }>(response);
+		if (expectedRuntime && (
+			this.startTicket !== expectedRuntime.ticket ||
+			this.currentGeneration !== expectedRuntime.generation ||
+			!this._isConnected
+		)) {
+			throw new RpcRequestError("cancelled", "new_session", "RPC runtime changed after new_session");
+		}
+		// This clears request/response waiters. Ordinary streamed Pi events do not
+		// carry a run id, so run-level late-event isolation belongs to the harness;
+		// the bridge can only enforce instance + transport generation here.
+		if (!data.cancelled) this.rejectAllPending("RPC session changed", "cancelled");
+		return data;
 	}
 
-	async getState(): Promise<RpcSessionState> {
-		const response = await this.send({ type: "get_state" });
+	async getState(options: RpcRequestOptions = {}): Promise<RpcSessionState> {
+		const response = await this.send({ type: "get_state" }, options);
 		return this.getData(response);
 	}
 
@@ -477,9 +569,44 @@ export class RpcBridge {
 		return data.commands;
 	}
 
-	async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
-		const response = await this.send({ type: "switch_session", sessionPath });
-		return this.getData(response);
+	async switchSession(sessionPath: string, options: RpcRequestOptions = {}): Promise<{ cancelled: boolean }> {
+		const ticket = this.startTicket;
+		const generation = this.currentGeneration;
+		if (generation === null || !this._isConnected) {
+			throw new RpcRequestError("cancelled", "switch_session", "RPC runtime is not connected");
+		}
+		const status = await invoke<{ status: "missing" } | { status: "valid"; session_id: string }>(
+			"get_session_file_status", { sessionPath },
+		);
+		if (ticket !== this.startTicket || generation !== this.currentGeneration || !this._isConnected) {
+			throw new RpcRequestError("cancelled", "switch_session", "RPC runtime changed during session inspection");
+		}
+		if (options.signal?.aborted) throw new RpcRequestError("cancelled", "switch_session", "Session restore cancelled");
+		if (status.status === "missing") throw new SessionFileMissingError(sessionPath, ticket, generation);
+		if (status.status !== "valid" || !status.session_id?.trim()) throw new Error("会话文件头无效，已停止恢复");
+		const response = await this.send(
+			{ type: "switch_session", sessionPath },
+			options,
+			{ ticket, generation },
+		);
+		const data = this.getData<{ cancelled: boolean }>(response);
+		if (!data.cancelled) {
+			if (ticket !== this.startTicket || generation !== this.currentGeneration || !this._isConnected) {
+				throw new RpcRequestError("cancelled", "switch_session", "RPC runtime changed after session switch");
+			}
+			this.rejectAllPending("RPC session changed", "cancelled");
+			const resumed = await this.getState(options);
+			if (ticket !== this.startTicket || generation !== this.currentGeneration || !this._isConnected) {
+				throw new RpcRequestError("cancelled", "switch_session", "RPC runtime changed during session reconciliation");
+			}
+			if (resumed.sessionId !== status.session_id) {
+				// The file may have disappeared or changed after inspection. Do not
+				// continue on an identity Pi silently created under the old path.
+				await this.stopGeneration(generation, ticket);
+				throw new RpcRequestError("fatal", "switch_session", "会话 ID 在恢复期间发生变化，已停止连接以保护历史记录");
+			}
+		}
+		return data;
 	}
 
 	async setSessionName(name: string): Promise<void> {
@@ -636,10 +763,11 @@ export class RpcBridge {
 
 	private matchesPayloadGeneration(payload: RpcLineEventPayload | RpcClosedEventPayload): boolean {
 		const generation = payloadGeneration(payload);
-		if (generation === null) return true;
+		if (generation === null) return this.pendingGeneration === null && this.currentGeneration === null;
 		if (this.pendingGeneration !== null) {
 			return generation === this.pendingGeneration;
 		}
+		if (!this._isConnected) return false;
 		if (this.currentGeneration === null) return true;
 		return generation === this.currentGeneration;
 	}
@@ -675,6 +803,10 @@ export class RpcBridge {
 	): boolean {
 		if (payloadInstanceId(payload) !== this.instanceId) {
 			this.diagnose("discarded_event", channel, "instance_mismatch", payload);
+			return false;
+		}
+		if (payloadGeneration(payload) === null && (this.pendingGeneration !== null || this.currentGeneration !== null)) {
+			this.diagnose("discarded_event", channel, "missing_generation", payload);
 			return false;
 		}
 		if (!this.matchesPayloadGeneration(payload)) {
@@ -789,7 +921,11 @@ export class RpcBridge {
 			const pending = this.pendingRequests.get(data.id)!;
 			this.pendingRequests.delete(data.id);
 			traceBridge(`response instance=${this.instanceId} id=${data.id} command=${String(data.command ?? "-")} success=${data.success === false ? "no" : "yes"}`);
-			pending.resolve(data);
+			if (data.success === false) {
+				pending.reject(new RpcRequestError("fatal", pending.command, (data.error as string) || "Unknown RPC error", data.id));
+			} else {
+				pending.resolve(data);
+			}
 			return;
 		}
 		if (data.type === "response" && typeof data.id === "string") {
@@ -801,6 +937,7 @@ export class RpcBridge {
 				generation: this.currentGeneration,
 				requestId: data.id,
 			});
+			return;
 		}
 
 		this.emitToListeners(data);
@@ -816,31 +953,78 @@ export class RpcBridge {
 		}
 	}
 
-	private async send(command: Record<string, unknown>): Promise<Record<string, unknown>> {
+	private async send(
+		command: Record<string, unknown>,
+		options: RpcRequestOptions = {},
+		expectedRuntime?: { ticket: number; generation: number | null },
+	): Promise<Record<string, unknown>> {
 		await this.ensureListeners();
+		const commandType = typeof command.type === "string" ? command.type : "unknown";
+		if (expectedRuntime && (
+			this.startTicket !== expectedRuntime.ticket ||
+			this.currentGeneration !== expectedRuntime.generation ||
+			!this._isConnected
+		)) {
+			throw new RpcRequestError("cancelled", commandType, `RPC runtime changed before ${commandType}`);
+		}
+		const mutating = MUTATING_RPC_COMMANDS.has(commandType);
+		if (options.signal?.aborted) {
+			throw new RpcRequestError("cancelled", commandType, `RPC request to ${commandType} was cancelled`);
+		}
+		if (typeof options.deadlineMs === "number" && Number.isFinite(options.deadlineMs) && options.deadlineMs <= 0) {
+			throw new RpcRequestError("cancelled", commandType, `RPC deadline for ${commandType} has expired`);
+		}
 		const id = `req_${++this.requestId}`;
 		const fullCommand = { ...command, id };
 
 		return new Promise((resolve, reject) => {
-			const timeoutMs = this.timeoutMsForCommand(command);
+			const defaultTimeoutMs = this.timeoutMsForCommand(command);
+			const timeoutMs = typeof options.deadlineMs === "number" && Number.isFinite(options.deadlineMs)
+				? Math.max(0, options.deadlineMs)
+				: defaultTimeoutMs;
+			let settled = false;
+			const finishReject = (error: Error): void => {
+				if (settled) return;
+				settled = true;
+				options.signal?.removeEventListener("abort", onAbort);
+				reject(error);
+			};
+			const onAbort = (): void => {
+				const pending = this.pendingRequests.get(id);
+				this.pendingRequests.delete(id);
+				clearTimeout(timeout);
+				const kind: RpcRequestErrorKind = pending?.mutating && pending.dispatched ? "unknown_outcome" : "cancelled";
+				finishReject(new RpcRequestError(kind, commandType, `RPC request to ${commandType} was cancelled`, id));
+			};
 			traceBridge(`send instance=${this.instanceId} id=${id} command=${String(command.type)} timeoutMs=${timeoutMs}`);
 			const timeout = setTimeout(() => {
 				this.pendingRequests.delete(id);
 				traceBridge(`timeout instance=${this.instanceId} id=${id} command=${String(command.type)} timeoutMs=${timeoutMs}`);
-				reject(new Error(`Timeout waiting for response to ${String(command.type)}`));
+				const kind: RpcRequestErrorKind = MUTATING_RPC_COMMANDS.has(commandType)
+					? "unknown_outcome"
+					: "transient";
+				finishReject(new RpcRequestError(kind, commandType, `Timeout waiting for response to ${commandType}`, id));
 			}, timeoutMs);
+			options.signal?.addEventListener("abort", onAbort, { once: true });
 
 			this.pendingRequests.set(id, {
+				command: commandType,
+				mutating,
+				dispatched: false,
 				resolve: (response) => {
+					if (settled) return;
+					settled = true;
 					clearTimeout(timeout);
+					options.signal?.removeEventListener("abort", onAbort);
 					resolve(response);
 				},
 				reject: (error) => {
 					clearTimeout(timeout);
-					reject(error);
+					finishReject(error);
 				},
 			});
 
+			this.pendingRequests.get(id)!.dispatched = true;
 			invoke("rpc_send", {
 				command: JSON.stringify(fullCommand),
 				instanceId: this.instanceId,
@@ -848,26 +1032,32 @@ export class RpcBridge {
 				clearTimeout(timeout);
 				this.pendingRequests.delete(id);
 				traceBridge(`send-failed instance=${this.instanceId} id=${id} command=${String(command.type)}: ${String(err)}`);
-				reject(new Error(`Failed to send RPC command: ${err}`));
+				const kind: RpcRequestErrorKind = mutating ? "unknown_outcome" : "transient";
+				finishReject(new RpcRequestError(kind, commandType, `Failed to send RPC command: ${err}`, id));
 			});
 		});
 	}
 
 	private getData<T = Record<string, unknown>>(response: Record<string, unknown>): T {
 		if (response.success === false) {
-			throw new Error((response.error as string) || "Unknown RPC error");
+			throw new RpcRequestError("fatal", "response", (response.error as string) || "Unknown RPC error");
 		}
 		return (response.data ?? response) as T;
 	}
 
-	private rejectAllPending(reason: string): void {
+	private rejectAllPending(reason: string, kind: RpcRequestErrorKind = "cancelled"): void {
 		for (const [, pending] of this.pendingRequests) {
-			pending.reject(new Error(reason));
+			const effectiveKind: RpcRequestErrorKind = pending.mutating && pending.dispatched ? "unknown_outcome" : kind;
+			pending.reject(new RpcRequestError(effectiveKind, pending.command, reason));
 		}
 		this.pendingRequests.clear();
 	}
 
 	async teardownListeners(): Promise<void> {
+		this.startTicket += 1;
+		this.pendingGeneration = null;
+		this._isConnected = false;
+		this.rejectAllPending("RPC listeners torn down", "cancelled");
 		if (this.listenersReadyPromise) {
 			await this.listenersReadyPromise.catch(() => {
 				// ignore listener initialization races during teardown
@@ -974,12 +1164,12 @@ class ActiveRpcBridgeProxy {
 		return this.activeBridge.abort();
 	}
 
-	async newSession(parentSession?: string): Promise<{ cancelled: boolean }> {
-		return this.activeBridge.newSession(parentSession);
+	async newSession(parentSession?: string, options: RpcRequestOptions = {}): Promise<{ cancelled: boolean }> {
+		return this.activeBridge.newSession(parentSession, options);
 	}
 
-	async getState(): Promise<RpcSessionState> {
-		return this.activeBridge.getState();
+	async getState(options: RpcRequestOptions = {}): Promise<RpcSessionState> {
+		return this.activeBridge.getState(options);
 	}
 
 	async setModel(provider: string, modelId: string): Promise<Record<string, unknown>> {
@@ -1046,8 +1236,8 @@ class ActiveRpcBridgeProxy {
 		return this.activeBridge.getCommands();
 	}
 
-	async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
-		return this.activeBridge.switchSession(sessionPath);
+	async switchSession(sessionPath: string, options: RpcRequestOptions = {}): Promise<{ cancelled: boolean }> {
+		return this.activeBridge.switchSession(sessionPath, options);
 	}
 
 	async setSessionName(name: string): Promise<void> {

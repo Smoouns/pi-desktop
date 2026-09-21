@@ -17,6 +17,14 @@ type HookResult = { block?: boolean; systemPrompt?: string; messages?: Array<Rec
 const hookResult = (value: unknown): HookResult => value as HookResult;
 const errorFlag = (value: unknown): boolean | undefined => (value as { isError?: boolean } | null)?.isError;
 const resultText = (result: { content?: Array<{ type?: string; text?: string }> }): string => result.content?.find((part) => part.type === "text")?.text ?? "";
+async function observeToolResult<T>(pending: Promise<T>): Promise<T> {
+	try { return await pending; }
+	catch (error) {
+		const result = (error as { toolResult?: T } | null)?.toolResult;
+		if (result !== undefined) return result;
+		throw error;
+	}
+}
 const item = (relativePath: string, reason: string, overrides: Partial<ContextItem> = {}): ContextItem => ({
 	path: `C:/synthetic/${relativePath}`, relativePath, contentType: "canon", authority: "canonical", reason,
 	readRequirement: reason === "active document" ? "required" : "on-demand", estimatedTokens: 8, priority: 1, pinned: false, ...overrides,
@@ -26,7 +34,7 @@ const document = (relativePath: string, estimatedTokens: number, authority: Nove
 	classification: { authority, contentType, reason: "test" }, estimatedTokens, text: relativePath,
 });
 
-async function withLoadedExtension<T>(project: string, minified: boolean, body: (extension: Loaded) => Promise<T>): Promise<T> {
+export async function withLoadedExtension<T>(project: string, minified: boolean, body: (extension: Loaded) => Promise<T>): Promise<T> {
 	const temp = await mkdtemp(path.join(tmpdir(), "pi-harness-extension-"));
 	try {
 		const extensionPath = path.join(temp, "novel-tools.ts");
@@ -77,7 +85,7 @@ export async function runContractCases(runCase: RunCase): Promise<void> {
 
 	await runCase("CTX-02", (record) => withProject(async (root) => withLoadedExtension(root, false, async (extension) => {
 		const tool = extension.tools.get("get_current_document")!.definition;
-		const run = async (messages: unknown[]) => resultText(await tool.execute("current", {}, undefined, undefined, { cwd: root, sessionManager: { getBranch: () => messages.map((message) => ({ type: "message", message })) } } as never));
+		const run = async (messages: unknown[]) => resultText(await observeToolResult(tool.execute("current", {}, undefined, undefined, { cwd: root, sessionManager: { getBranch: () => messages.map((message) => ({ type: "message", message })) } } as never)));
 		const manifest = serializeNovelContextManifest([
 			item("canon/characters.md", "mentioned entity"),
 			item("canon/world.md", "active document"),
@@ -133,22 +141,22 @@ export async function runContractCases(runCase: RunCase): Promise<void> {
 		const ctx = { cwd: root } as never;
 		const normal = await extension.tools.get("read_story_document")!.definition.execute("normal", { path: "canon/world.md" }, undefined, undefined, ctx);
 		assert.match(resultText(normal), /^# canon\/world\.md/m);
-		const missing = await extension.tools.get("read_story_document")!.definition.execute("missing", { path: "canon/missing.md" }, undefined, undefined, ctx);
+		const missing = await observeToolResult(extension.tools.get("read_story_document")!.definition.execute("missing", { path: "canon/missing.md" }, undefined, undefined, ctx));
 		assert.match(resultText(missing), /^Error:/);
-		assert.equal(errorFlag(missing), undefined);
+		assert.equal(errorFlag(missing), true);
 		const search = await extension.tools.get("search_story_memory")!.definition.execute("stale-search", { query: "白潮栓", limit: 3 }, undefined, undefined, ctx);
 		const searched = JSON.parse(resultText(search)) as { hits: Array<{ id: string; path: string }> };
 		assert.ok(searched.hits.length);
 		const staleSource = searched.hits[0];
 		await writeFile(path.join(root, staleSource.path), `${await readFile(path.join(root, staleSource.path), "utf8")}\n来源已更新。\n`, "utf8");
-		const stale = await extension.tools.get("read_story_memory")!.definition.execute("stale-read", { id: staleSource.id }, undefined, undefined, ctx);
+		const stale = await observeToolResult(extension.tools.get("read_story_memory")!.definition.execute("stale-read", { id: staleSource.id }, undefined, undefined, ctx));
 		assert.equal(errorFlag(stale), true);
 		assert.match(resultText(stale), /失效|不存在|当前项目/);
-		const invalid = await extension.tools.get("read_story_memory")!.definition.execute("invalid", { id: "foreign-id" }, undefined, undefined, ctx);
+		const invalid = await observeToolResult(extension.tools.get("read_story_memory")!.definition.execute("invalid", { id: "foreign-id" }, undefined, undefined, ctx));
 		assert.equal(errorFlag(invalid), true);
-		const badChapter = await extension.tools.get("read_chapter")!.definition.execute("bad", { identifier: "../../1" }, undefined, undefined, ctx);
+		const badChapter = await observeToolResult(extension.tools.get("read_chapter")!.definition.execute("bad", { identifier: "../../1" }, undefined, undefined, ctx));
 		assert.match(resultText(badChapter), /^Error:/);
-		record("error_shapes", { missingPathTypedError: false, staleMemoryTypedError: true, foreignMemoryTypedError: true, invalidArgumentFinished: true });
+		record("error_shapes", { missingPathTypedError: true, staleMemoryTypedError: true, foreignMemoryTypedError: true, invalidArgumentFinished: true });
 	})));
 
 	await runCase("SEC-01", (record) => withProject(async (root) => withLoadedExtension(root, false, async (extension) => {
@@ -158,7 +166,7 @@ export async function runContractCases(runCase: RunCase): Promise<void> {
 		let sideEffects = 0;
 		const invoke = async (role: string | null, toolName: string, target?: string) => {
 			const branch = role ? [{ type: "custom", customType: "pi-desktop-novel-role", data: { role } }] : [];
-			const decision = hookResult(await hook({ type: "tool_call", toolName, toolCallId: "security", input: target ? { path: target, content: "x" } : { command: "echo x" } }, { cwd: root, sessionManager: { getBranch: () => branch } } as never));
+			const decision = hookResult(await hook({ type: "tool_call", toolName, toolCallId: "security-" + role + toolName + target, input: target ? { path: target, content: "x" } : { command: "echo x" } }, { cwd: root, sessionManager: { getBranch: () => branch } } as never));
 			if (!decision?.block) sideEffects++;
 			return decision;
 		};
@@ -169,7 +177,7 @@ export async function runContractCases(runCase: RunCase): Promise<void> {
 			assert.equal((await invoke("review", "write", "planning/reviews/003.md"))?.block, undefined);
 			const internalAbsolute = path.join(root, "drafts", "candidates", "chapters", "absolute.md");
 			assert.equal((await invoke("write", "write", internalAbsolute))?.block, undefined);
-			assert.equal((await invoke("write", "edit", internalAbsolute))?.block, undefined);
+			assert.equal((await invoke("write", "edit", path.join(root, "drafts", "candidates", "chapters", "absolute-edit.md")))?.block, undefined);
 			const allowed = sideEffects;
 			const denied: Array<readonly [string | null, string, string | undefined]> = [[null, "write", "drafts/candidates/chapters/x.md"]];
 			for (const role of ["world", "plan", "write", "review"]) {
@@ -180,10 +188,10 @@ export async function runContractCases(runCase: RunCase): Promise<void> {
 				["plan", "write", "drafts/candidates/chapters/x.md"],
 				["world", "write", "planning/chapter-cards/x.md"],
 			);
-			for (const [role, tool, target] of denied) assert.equal((await invoke(role, tool, target))?.block, true);
+			for (const [role, tool, target] of denied) assert.equal((await invoke(role, tool, target))?.block, true, `Must deny role=${role} tool=${tool} path=${target}`);
 			assert.equal(sideEffects, allowed);
 			await writeFile(path.join(root, ".novel/project.json"), "{ malformed", "utf8");
-			assert.equal((await invoke(null, "write", "drafts/candidates/chapters/x.md"))?.block, true);
+			assert.equal((await invoke(null, "write", "drafts/candidates/chapters/x.md"))?.block, true, "Malformed metadata must deny write");
 			assert.equal(sideEffects, allowed);
 			record("role_policy", { allowedCalls: allowed, deniedCalls: denied.length + 1, deniedSideEffects: sideEffects - allowed, sideEffects });
 		} finally {
@@ -200,7 +208,7 @@ export async function runContractCases(runCase: RunCase): Promise<void> {
 			const hook = (extension.handlers.get("tool_call") ?? [])[0];
 			const variants = ["../outside.md", sentinel.replace(/\\/g, "/"), "canon\\..\\outside.md", "C:/outside.md", "//server/share/file.md", "canon/world.md:secret", "../project-prefix/outside.md"];
 			for (const candidate of variants) {
-				const result = await tool.execute("unsafe", { path: candidate }, undefined, undefined, { cwd: root } as never);
+				const result = await observeToolResult(tool.execute("unsafe", { path: candidate }, undefined, undefined, { cwd: root } as never));
 				assert.match(resultText(result), /^Error:/);
 				assert.doesNotMatch(resultText(result), /OUTSIDE_SENTINEL/);
 				for (const toolName of ["write", "edit"]) {
@@ -222,7 +230,7 @@ export async function runContractCases(runCase: RunCase): Promise<void> {
 			try { await symlink(path.join(outside, "sentinel.md"), path.join(root, "canon/linked.md"), "file"); } catch (error) { fileLinkSupported = false; fileLinkUnsupportedReason = (error as NodeJS.ErrnoException).code ?? "unknown"; }
 			try { await symlink(outside, path.join(root, "drafts/candidates/linked"), process.platform === "win32" ? "junction" : "dir"); } catch (error) { directoryLinkSupported = false; directoryLinkUnsupportedReason = (error as NodeJS.ErrnoException).code ?? "unknown"; }
 			if (fileLinkSupported) {
-				const read = await extension.tools.get("read_story_document")!.definition.execute("linked", { path: "canon/linked.md" }, undefined, undefined, { cwd: root } as never);
+				const read = await observeToolResult(extension.tools.get("read_story_document")!.definition.execute("linked", { path: "canon/linked.md" }, undefined, undefined, { cwd: root } as never));
 				assert.match(resultText(read), /^Error:/);
 				assert.doesNotMatch(resultText(read), /LINK_SENTINEL/);
 				const search = await extension.tools.get("search_story_memory")!.definition.execute("linked-memory", { query: "LINK_SENTINEL" }, undefined, undefined, { cwd: root } as never);
@@ -230,7 +238,7 @@ export async function runContractCases(runCase: RunCase): Promise<void> {
 				assert.ok(!memoryResult.hits.some((hit: { path?: string; text?: string }) => hit.path === "canon/linked.md" || hit.text?.includes("LINK_SENTINEL")));
 			}
 			if (directoryLinkSupported) {
-				const linkedRead = await extension.tools.get("read_story_document")!.definition.execute("linked-directory", { path: "drafts/candidates/linked/sentinel.md" }, undefined, undefined, { cwd: root } as never);
+				const linkedRead = await observeToolResult(extension.tools.get("read_story_document")!.definition.execute("linked-directory", { path: "drafts/candidates/linked/sentinel.md" }, undefined, undefined, { cwd: root } as never));
 				assert.match(resultText(linkedRead), /^Error:/);
 				assert.doesNotMatch(resultText(linkedRead), /LINK_SENTINEL/);
 				const hook = (extension.handlers.get("tool_call") ?? [])[0];

@@ -10,6 +10,13 @@ import { runMemoryCases } from "./memory.js";
 import { runRpcCases } from "./rpc.js";
 import { runTraceCases } from "./trace.js";
 import { runVerifierCases } from "./verifier.js";
+import { runExtensionRuntimeCases } from "./extension-runtime.js";
+import { runToolPolicyCases } from "./tool-policy.js";
+import { runOperationCases } from "./operations.js";
+import { runToolPathPolicyCases } from "./tool-path-policy.js";
+import { runBuiltinWriteCases } from "./builtin-writes.js";
+import { runWorkflowUiCases } from "./workflow-ui.js";
+import { runSessionRestoreCases } from "./session-restore.js";
 import { fixtureRoot, sha256, treeManifest, type RunCase } from "./testkit.js";
 
 type CaseResult = { id: string; status: "pass" | "fail" | "partial"; trace: TraceEvent[]; unsupported: Array<{ subcase: string; reason: string }>; error?: string };
@@ -57,6 +64,13 @@ for (let repetition = 1; repetition <= 3; repetition++) {
 	await runMemoryCases(runCase);
 	await runRpcCases(runCase);
 	await runVerifierCases(runCase);
+	await runToolPolicyCases(runCase);
+	await runOperationCases(runCase);
+	await runToolPathPolicyCases(runCase);
+	await runExtensionRuntimeCases(runCase);
+	await runBuiltinWriteCases(runCase);
+	await runWorkflowUiCases(runCase);
+	await runSessionRestoreCases(runCase);
 	repetitions.push(results);
 	await writeFile(path.join(output, `run-${repetition}.json`), JSON.stringify(results, null, 2) + "\n");
 }
@@ -71,6 +85,9 @@ const implementationFiles: Record<string, string> = {};
 for (const name of [
 	"src/extensions/novel-tools-extension.ts", "src/novel/context.ts", "src/novel/context-attachment.ts",
 	"src/components/chat-view.ts", "src/novel/memory-engine.ts", "src/rpc/bridge.ts",
+	"src/novel/tool-path-policy.ts", "src-tauri/src/lib.rs", "src-tauri/src/session_file.rs",
+	"src/rpc/session-restore.ts", "src/main.ts", "src/components/chat-view/assistant-workflow-view.ts",
+	"src/components/chat-view/workflow-utils.ts", "src/i18n/ui-chinese.ts",
 	"scripts/verify-novel-chapter.ts", "scripts/run-public-tests.mjs", "scripts/run-harness-baseline.mjs",
 	"scripts/novel-domain-smoke.ts", "scripts/novel-tools-extension-smoke.ts", "scripts/novel-verifier-smoke.ts",
 	"scripts/novel-memory-smoke.ts", "scripts/world-change-smoke.ts", "package.json", "tsconfig.harness.json",
@@ -79,7 +96,7 @@ for (const directory of ["src/harness", "tests/harness", "tests/support"]) {
 	for (const [name, hash] of Object.entries(await treeManifest(directory))) implementationFiles[`${directory}/${name}`] = hash;
 }
 const summary = {
-	schemaVersion: 1, baselineCommit: "3b5f8b06131d46ee0b4b97dd646ba3d6f6bcd887",
+	schemaVersion: 1, phase: "phase1", phaseStartCommit: "314120c2b3c9eb9d373b4c1b9a5942f4dbf45edf", baselineCommit: "3b5f8b06131d46ee0b4b97dd646ba3d6f6bcd887",
 	implementationHead: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
 	dirty: Boolean(execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim()),
 	node: process.version, npm: process.env.npm_config_user_agent?.split(" ")[0] ?? "unavailable",

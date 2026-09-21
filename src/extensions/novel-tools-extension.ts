@@ -1,13 +1,16 @@
 import { createNovelMemoryEngine } from "../novel/memory-engine.ts";
+import { createToolRuntime } from "../harness/tool-policy.ts";
+import { createOperationLedger } from "../harness/operation-ledger.ts";
+import { createNovelPathPolicy } from "../novel/tool-path-policy.ts";
 
 const NOVEL_TOOLS_EXTENSION_FILE = "pi-desktop-novel-tools.ts";
-const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v7";
+const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v8";
 const NOVEL_TOOLS_EXTENSION_MARKER_PREFIX = "pi-desktop-novel-tools-extension/";
 
 export const NOVEL_TOOLS_EXTENSION_CONTENT = `/**
  * ${NOVEL_TOOLS_EXTENSION_MARKER}
  *
- * Read-only story research tools for Pi Desktop novel projects.
+ * Story research tools and guarded write/edit policy for Pi Desktop projects.
  * The runtime starts in the active project directory. Every path is resolved
  * beneath that directory and every tool first requires .novel/project.json.
  */
@@ -15,25 +18,100 @@ import { Type } from "@mariozechner/pi-ai";
 import { readFile, readdir, stat, lstat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import path from "node:path";
-import { promisify } from "node:util";
+import { createHash, randomUUID } from "node:crypto";
 
 const MAX_FILES = 400;
 const MAX_RESULTS = 30;
 const MAX_TEXT_CHARS = 48_000;
 const MAX_VERIFIER_OUTPUT_CHARS = 48_000;
 const SKIPPED_DIRECTORIES = new Set([".git", ".novel", "node_modules", "dist"]);
-const runCommand = promisify(execFile);
+function runCommand(command, args, options) {
+	// execFile's abort callback can precede process exit. Resolve only at close so
+	// cancelled verification cannot leave a live child holding the project open.
+	return new Promise((resolve, reject) => {
+		let result = { stdout: "", stderr: "" };
+		let failure = null;
+		const child = execFile(command, args, { ...options, killSignal: "SIGKILL" }, (error, stdout, stderr) => {
+			result = { stdout, stderr };
+			failure = error;
+		});
+		child.on("error", (error) => { failure = error; });
+		child.on("close", () => { if (failure) reject(Object.assign(failure, result)); else resolve(result); });
+	});
+}
 const novelMemory = (${createNovelMemoryEngine.toString()})();
+const toolRuntime = (${createToolRuntime.toString()})();
+const operations = (${createOperationLedger.toString()})();
+const pathPolicy = (${createNovelPathPolicy.toString()})();
+const sha = (text) => createHash("sha256").update(text).digest("hex");
+const processSession = randomUUID();
+let epoch = 0;
+let activeRun = null;
+
+function toolError(kind, code, message) {
+	return Object.assign(new Error(message), { kind, code });
+}
+function classifyError(error) {
+	const code = typeof error?.code === "string" ? error.code : "UNCLASSIFIED";
+	const kind = error?.kind || ({ EBUSY: "transient", EAGAIN: "transient", EMFILE: "transient", ENFILE: "transient", ETIMEDOUT: "transient", EACCES: "permission", EPERM: "permission", ENOENT: "precondition", ENOTDIR: "precondition", NOVEL_PROJECT_MISSING: "precondition", NOVEL_PROJECT_INVALID: "precondition", ABORT_ERR: "cancelled" }[code]) || "fatal";
+	return { kind, code, message: error instanceof Error ? error.message : String(error) };
+}
+function endRun() {
+	activeRun?.controller.abort();
+	activeRun = null;
+	epoch++;
+}
+function currentRun(ctx) {
+	const root = path.resolve(projectRoot(ctx));
+	const projectId = sha(process.platform === "win32" ? root.toLowerCase() : root);
+	const sessionId = ctx?.sessionManager?.getSessionId?.() || processSession;
+	const role = currentNovelRole(ctx);
+	if (!activeRun || activeRun.scope.projectId !== projectId || activeRun.scope.sessionId !== sessionId || activeRun.scope.role !== role) {
+		endRun();
+		activeRun = { scope: { projectId, sessionId, runId: randomUUID(), generation: epoch, role }, controller: new AbortController() };
+	}
+	return activeRun;
+}
+const failureResult = (error, extra = {}) => {
+	const recovery = { transient: "retry budget exhausted; report failure", invalid_input: "repair arguments; do not repeat identical input", stale_source: "search again for a current source id", permission: "stop; permission required", precondition: "stop; prerequisite required", validation: "repair content within task constraints", cancelled: "stop", unknown_outcome: "read/reconcile target; never blindly replay", fatal: "stop" }[error.kind];
+	return { ...textResult("Error: " + error.message + "\\n\\n[kind=" + error.kind + "; recovery=" + recovery + "]"), isError: true, details: { harness: { ok: false, error, ...extra } } };
+};
+
+function registerReliableTool(pi, definition) {
+	pi.registerTool({ ...definition, async execute(id, params, signal, onUpdate, ctx) {
+		const run = currentRun(ctx);
+		const combined = signal ? AbortSignal.any([signal, run.controller.signal]) : run.controller.signal;
+		let pendingOperation;
+		const execution = await toolRuntime.execute({
+			params, signal: combined, sideEffect: definition.name === "verify_chapter", deadlineMs: definition.name === "verify_chapter" ? 120_000 : 30_000,
+			operation: (input, attempt) => {
+				pendingOperation = (async () => {
+				try {
+					const value = await definition.execute(id, input, attempt.signal, onUpdate, ctx);
+					if (activeRun !== run || combined.aborted) throw toolError("cancelled", "STALE_RUN", "The tool belongs to an ended run.");
+					return { ok: true, value };
+				} catch (error) { return { ok: false, error: classifyError(error) }; }
+				})();
+				return pendingOperation;
+			},
+		});
+		if (definition.name === "verify_chapter" && pendingOperation) await pendingOperation;
+		const metadata = { scope: { ...run.scope }, attempts: execution.attempts, actions: execution.actions };
+		if (!execution.result.ok) {
+			const result = failureResult(execution.result.error, metadata);
+			// Pi 0.63 treats execute() return values as core success regardless of
+			// isError. Throw for real tool-error semantics; keep the typed envelope
+			// in the text transported by Pi and on the local error for host adapters.
+			throw Object.assign(new Error(result.content[0].text + "\\n<tool-error>" + JSON.stringify(result.details.harness) + "</tool-error>"), { toolResult: result });
+		}
+		const value = execution.result.value;
+		return { ...value, details: { ...value.details, harness: { ok: true, ...metadata } } };
+	} });
+}
 
 function memoryIO(root) {
 	const resolve = async (relative) => {
-		if (!novelMemory.safePath(relative)) throw new Error("记忆路径必须位于当前小说项目内。");
-		let target = root;
-		for (const segment of relative.split("/")) {
-			target = path.join(target, segment);
-			if ((await lstat(target)).isSymbolicLink()) throw new Error("记忆索引不跟随符号链接。");
-		}
-		return target;
+		return secureStoryPath(root, relative);
 	};
 	return {
 		async read(relative) {
@@ -115,6 +193,7 @@ async function loadProject(ctx) {
 }
 
 function resolveStoryPath(root, relativePath) {
+	if (!pathPolicy.safeRelative(relativePath)) throw toolError("permission", "UNSAFE_PATH", "Path must use safe project-relative segments.");
 	if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("A non-empty project-relative path is required.");
 	if (relativePath.includes("\\\\") || path.isAbsolute(relativePath) || /^[A-Za-z]:/.test(relativePath) || relativePath.includes(":")) throw new Error("Absolute, mixed-separator, and stream paths are not allowed.");
 	if (relativePath.split("/").some((part) => !part || part === "." || part === ".." || /[. ]$/.test(part))) throw new Error("Path must use canonical project-relative segments.");
@@ -133,7 +212,7 @@ async function assertNoLinkedSegments(root, target, allowMissing) {
 	for (const segment of relative.split(path.sep)) {
 		current = path.join(current, segment);
 		try {
-			if ((await lstat(current)).isSymbolicLink()) throw new Error("Novel tools do not follow symbolic links or junctions.");
+			if ((await lstat(current)).isSymbolicLink()) throw toolError("permission", "LINKED_PATH", "Novel tools do not follow symbolic links or junctions.");
 		} catch (error) {
 			if (allowMissing && error && typeof error === "object" && error.code === "ENOENT") return;
 			throw error;
@@ -182,7 +261,7 @@ function categoryFor(relativePath, config) {
 async function readStoryFile(root, relativePath) {
 	const target = await secureStoryPath(root, relativePath);
 	const info = await stat(target);
-	if (!info.isFile()) throw new Error("The requested story path is not a file.");
+	if (!info.isFile()) throw toolError("precondition", "NOT_A_FILE", "The requested story path is not a file.");
 	return { relativePath: relativeTo(root, target), text: truncate(await readFile(target, "utf8")) };
 }
 
@@ -257,6 +336,7 @@ async function projectRelativeWritePath(root, candidate) {
 			target = path.resolve(candidate);
 			const relative = path.relative(root, target);
 			if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) return null;
+			if (!pathPolicy.safeRelative(normalized(relative))) return null;
 			await assertNoLinkedSegments(root, target, true);
 		} else {
 			target = await secureStoryPath(root, candidate, true);
@@ -266,11 +346,29 @@ async function projectRelativeWritePath(root, candidate) {
 }
 
 function isRoleWriteAllowed(role, relativePath) {
-	return NOVEL_ROLE_WRITE_PATHS[role]?.some((prefix) => relativePath.startsWith(prefix)) ?? false;
+	return pathPolicy.roleAllows(role, relativePath);
+}
+
+async function fileVersion(root, relativePath) {
+	const target = await secureStoryPath(root, relativePath, true);
+	try { const bytes = await readFile(target); return { hash: sha(bytes), text: bytes.toString("utf8") }; }
+	catch (error) { if (error?.code === "ENOENT") return { hash: null, text: null }; throw error; }
+}
+
+function expectedEdit(text, input) {
+	// Pi can perform fuzzy/EOL-aware edits. Only exact single LF edits are predicted;
+	// all other successful edits are acknowledged by tool_result, never guessed.
+	if (text === null || text.includes("\\r") || text.startsWith("\\uFEFF") || input.edits !== undefined || typeof input.oldText !== "string" || typeof input.newText !== "string" || !input.oldText || input.oldText.includes("\\r") || input.newText.includes("\\r")) return null;
+	const index = text.indexOf(input.oldText);
+	if (index < 0 || text.indexOf(input.oldText, index + 1) >= 0) return null;
+	return sha(text.slice(0, index) + input.newText + text.slice(index + input.oldText.length));
 }
 
 export default function (pi) {
+	for (const event of ["session_switch", "session_shutdown", "agent_end"]) pi.on(event, async () => endRun());
+	pi.on("agent_start", async (_event, ctx) => { endRun(); currentRun(ctx); });
 	pi.on("session_start", async (_event, ctx) => {
+		endRun();
 		const role = process.env.PI_DESKTOP_NOVEL_ROLE;
 		if (!role || !Object.prototype.hasOwnProperty.call(NOVEL_ROLE_WRITE_PATHS, role)) return;
 		const entries = ctx.sessionManager?.getEntries?.() ?? [];
@@ -326,11 +424,18 @@ export default function (pi) {
 		let project;
 		try { project = await loadProject(ctx); } catch (error) {
 			if (error && typeof error === "object" && error.code === "NOVEL_PROJECT_MISSING") return;
-			if (["bash", "write", "edit"].includes(event.toolName)) return { block: true, reason: "Novel Project metadata is invalid or unsafe; write-capable tools are blocked." };
+			if (["bash", "write", "edit", "read", "grep", "find", "ls"].includes(event.toolName)) return { block: true, reason: "[precondition] Novel Project metadata is invalid or unsafe; filesystem tools are blocked." };
 			return;
 		}
 		if (event.toolName === "bash") {
 			return { block: true, reason: "Novel Agent 禁止使用 bash；请使用受角色权限限制的文件工具。" };
+		}
+		if (["read", "grep", "find", "ls"].includes(event.toolName)) {
+			const candidate = event.input?.path;
+			if (event.toolName !== "read" && (candidate === undefined || candidate === "." || candidate === project.root)) return;
+			const relativePath = await projectRelativeWritePath(project.root, candidate);
+			if (!relativePath) return { block: true, reason: "[permission] Novel Agent 读取路径必须位于当前项目内，且不能经过符号链接。" };
+			return;
 		}
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
 		const role = currentNovelRole(ctx);
@@ -344,9 +449,47 @@ export default function (pi) {
 		if (!isRoleWriteAllowed(role, relativePath)) {
 			return { block: true, reason: "Novel " + role + " Agent 无权写入 " + relativePath + "。Canon、manuscript、.novel 及其他非提案目录只能由受控工作流修改。" };
 		}
+		const run = currentRun(ctx);
+		try {
+			const before = await fileVersion(project.root, relativePath);
+			if (run !== activeRun || run.controller.signal.aborted) return { block: true, reason: "[cancelled] Run ended before write dispatch." };
+			const expectedPostHash = event.toolName === "write" && typeof event.input.content === "string" ? sha(event.input.content) : expectedEdit(before.text, event.input);
+			const args = event.toolName === "write" ? [event.input.content] : [event.input.oldText, event.input.newText, event.input.edits];
+			const ledgerTarget = process.platform === "win32" ? relativePath.toLowerCase() : relativePath;
+			const decision = operations.prepare({ scope: run.scope, toolCallId: event.toolCallId, toolName: event.toolName, target: ledgerTarget, preHash: before.hash, expectedPostHash, argsDigest: sha(JSON.stringify(args)) }, before.hash);
+			if (decision.action !== "dispatch") return { block: true, reason: decision.action === "satisfied" ? "[reconciled] 目标内容已满足 (satisfied)，未重复执行写入。请继续下一步。" : decision.reason === "repair-required" ? "[invalid_input] 上次调用已明确失败；请修正参数后重试，不要重复相同输入。" : "[unknown_outcome] 写入结果尚未解决，禁止重放：" + decision.reason };
+			operations.markDispatched(decision.operationId);
+		} catch (error) { return { block: true, reason: "[precondition] Cannot establish write intent: " + classifyError(error).message }; }
 	});
 
-	pi.registerTool({
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.details?.harness) return;
+		if (event.toolName !== "write" && event.toolName !== "edit") return;
+		const entry = operations.snapshot().find((item) => item.operationId === event.toolCallId);
+		if (!entry) return;
+		const run = activeRun;
+		const resultRoot = path.resolve(projectRoot(ctx));
+		const resultProject = sha(process.platform === "win32" ? resultRoot.toLowerCase() : resultRoot);
+		if (!run || JSON.stringify(run.scope) !== JSON.stringify(entry.scope) || resultProject !== entry.scope.projectId || currentNovelRole(ctx) !== entry.scope.role || (ctx.sessionManager?.getSessionId?.() && ctx.sessionManager.getSessionId() !== entry.scope.sessionId)) {
+			operations.cancel(entry.operationId);
+			return failureResult({ kind: "cancelled", code: "STALE_RUN", message: "Discarded write result from an ended run; reconcile its target before continuing." });
+		}
+		try {
+			const version = await fileVersion(projectRoot(ctx), entry.target);
+			if (activeRun !== run || run.controller.signal.aborted) throw toolError("cancelled", "STALE_RUN", "Run ended during reconciliation.");
+			if (event.isError) {
+				// Pi preserves original built-in errors, ignoring result patches here.
+				// Record only the actual outcome; never pretend the patch reached Pi.
+				operations.completeFailed(entry.operationId, version.hash);
+				return;
+			}
+			const decision = entry.expectedPostHash === null && version.hash !== null ? operations.completeAcknowledged(entry.operationId, version.hash) : operations.complete(entry.operationId, version.hash);
+			if (decision.action !== "satisfied") throw toolError("unknown_outcome", "WRITE_CONFLICT", "Write acknowledgement does not match the current target fingerprint.");
+			return { details: { ...event.details, harness: { ok: true, operationId: entry.operationId, scope: entry.scope } } };
+		} catch (error) { operations.cancel(entry.operationId); return failureResult(classifyError(error), { operationId: entry.operationId, scope: entry.scope }); }
+	});
+
+	registerReliableTool(pi, {
 		name: "list_story_files",
 		label: "List story files",
 		description: "List Markdown and text files in the active Novel Project. Read-only and limited to the project root.",
@@ -359,11 +502,11 @@ export default function (pi) {
 					.filter((item) => !requested || item.category.toLowerCase() === requested)
 					.slice(0, MAX_RESULTS);
 				return textResult(files.length ? files.map((item) => item.path + " [" + item.category + "]").join("\\n") : "No matching story files.", { count: files.length, category: requested || null });
-			} catch (error) { return textResult("Error: " + (error instanceof Error ? error.message : String(error))); }
+			} catch (error) { throw error; }
 		},
 	});
 
-	pi.registerTool({
+	registerReliableTool(pi, {
 		name: "read_story_document",
 		label: "Read story document",
 		description: "Read a project-relative Markdown or text document from the active Novel Project. Read-only.",
@@ -373,11 +516,11 @@ export default function (pi) {
 				const { root } = await loadProject(ctx);
 				const document = await readStoryFile(root, params.path);
 				return textResult("# " + document.relativePath + "\\n\\n" + document.text, { path: document.relativePath });
-			} catch (error) { return textResult("Error: " + (error instanceof Error ? error.message : String(error))); }
+			} catch (error) { throw error; }
 		},
 	});
 
-	pi.registerTool({
+	registerReliableTool(pi, {
 		name: "read_chapter",
 		label: "Read chapter",
 		description: "Read a chapter by its numeric identifier, such as 17 or 017. Prefers manuscript files and never writes.",
@@ -386,21 +529,21 @@ export default function (pi) {
 			try {
 				const { root } = await loadProject(ctx);
 				const id = params.identifier.trim().replace(/\\.md$/i, "");
-				if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Chapter identifier is invalid.");
+				if (!/^[A-Za-z0-9_-]+$/.test(id)) throw toolError("invalid_input", "INVALID_CHAPTER", "Chapter identifier is invalid.");
 				const files = await storyFiles(root);
 				const numeric = /^\\d+$/.test(id) ? Number(id) : null;
 				const matches = files.map((filePath) => relativeTo(root, filePath)).filter((relativePath) => {
 					const base = path.basename(relativePath).replace(/\\.(md|mdx|txt)$/i, "");
 					return base === id || (numeric !== null && /^\\d+$/.test(base) && Number(base) === numeric);
 				}).sort((left, right) => Number(!left.startsWith("manuscript/")) - Number(!right.startsWith("manuscript/")));
-				if (!matches[0]) throw new Error("No chapter matched " + params.identifier + ".");
+				if (!matches[0]) throw toolError("precondition", "NO_CHAPTER", "No chapter matched " + params.identifier + ".");
 				const document = await readStoryFile(root, matches[0]);
 				return textResult("# " + document.relativePath + "\\n\\n" + document.text, { path: document.relativePath });
-			} catch (error) { return textResult("Error: " + (error instanceof Error ? error.message : String(error))); }
+			} catch (error) { throw error; }
 		},
 	});
 
-	pi.registerTool({
+	registerReliableTool(pi, {
 		name: "read_character",
 		label: "Read character",
 		description: "Find and read character material by name from the active Novel Project. Read-only.",
@@ -409,19 +552,19 @@ export default function (pi) {
 			try {
 				const { root } = await loadProject(ctx);
 				const query = params.name.trim().toLowerCase();
-				if (!query) throw new Error("Character name is required.");
+				if (!query) throw toolError("invalid_input", "INVALID_NAME", "Character name is required.");
 				const matches = (await storyFiles(root)).map((filePath) => relativeTo(root, filePath)).filter((relativePath) => {
 					const lower = relativePath.toLowerCase();
 					return (/(^|\\/)characters?(\\/|$)/.test(lower) || /(^|\\/)canon\\//.test(lower)) && lower.includes(query);
 				}).slice(0, MAX_RESULTS);
-				if (!matches.length) throw new Error("No character document matched " + params.name + ".");
+				if (!matches.length) throw toolError("precondition", "NO_CHARACTER", "No character document matched " + params.name + ".");
 				const documents = await Promise.all(matches.map((relativePath) => readStoryFile(root, relativePath)));
 				return textResult(documents.map((document) => "# " + document.relativePath + "\\n\\n" + document.text).join("\\n\\n"), { paths: matches });
-			} catch (error) { return textResult("Error: " + (error instanceof Error ? error.message : String(error))); }
+			} catch (error) { throw error; }
 		},
 	});
 
-	pi.registerTool({
+	registerReliableTool(pi, {
 		name: "read_outline",
 		label: "Read outline",
 		description: "Read planning or outline material, optionally narrowed by a scope term. Read-only.",
@@ -434,14 +577,14 @@ export default function (pi) {
 					const lower = relativePath.toLowerCase();
 					return (lower.startsWith("outline/") || lower.startsWith("planning/")) && (!scope || lower.includes(scope));
 				}).slice(0, MAX_RESULTS);
-				if (!matches.length) throw new Error("No matching outline or planning documents.");
+				if (!matches.length) throw toolError("precondition", "NO_DOCUMENT", "No matching outline or planning documents.");
 				const documents = await Promise.all(matches.map((relativePath) => readStoryFile(root, relativePath)));
 				return textResult(documents.map((document) => "# " + document.relativePath + "\\n\\n" + document.text).join("\\n\\n"), { paths: matches });
-			} catch (error) { return textResult("Error: " + (error instanceof Error ? error.message : String(error))); }
+			} catch (error) { throw error; }
 		},
 	});
 
-	pi.registerTool({
+	registerReliableTool(pi, {
 		name: "search_story",
 		label: "Search story",
 		description: "Search filenames, headings, and text in the active Novel Project. Read-only; returns matching line excerpts.",
@@ -450,24 +593,24 @@ export default function (pi) {
 			try {
 				const { root } = await loadProject(ctx);
 				const query = params.query.trim().toLowerCase();
-				if (!query) throw new Error("Search query is required.");
+				if (!query) throw toolError("invalid_input", "INVALID_QUERY", "Search query is required.");
 				const limit = Math.max(1, Math.min(MAX_RESULTS, Number(params.limit) || 12));
 				const matches = [];
 				for (const filePath of await storyFiles(root)) {
 					if (matches.length >= limit) break;
 					const relativePath = relativeTo(root, filePath);
-					const text = await readFile(filePath, "utf8");
+					const text = (await readStoryFile(root, relativePath)).text;
 					const lines = text.split(/\\r?\\n/);
 					for (let index = 0; index < lines.length && matches.length < limit; index += 1) {
 						if (relativePath.toLowerCase().includes(query) || lines[index].toLowerCase().includes(query)) matches.push(relativePath + ":" + (index + 1) + " " + lines[index].trim().slice(0, 280));
 					}
 				}
 				return textResult(matches.length ? matches.join("\\n") : "No story matches.", { query, count: matches.length });
-			} catch (error) { return textResult("Error: " + (error instanceof Error ? error.message : String(error))); }
+			} catch (error) { throw error; }
 		},
 	});
 
-	pi.registerTool({
+	registerReliableTool(pi, {
 		name: "search_story_memory",
 		label: "检索小说记忆",
 		description: "Search version-checked source excerpts in this Novel Project: Canon, confirmed continuity records and human-accepted prose. Rebuilds a read-only local index on each call. No chat history, draft proposals or cross-project memory. Default excludes planned future sections; Canon world facts do not imply character knowledge.",
@@ -475,12 +618,14 @@ export default function (pi) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			try {
 				const { root } = await loadProject(ctx);
-				const result = novelMemory.search(await novelMemory.snapshot(root, memoryIO(root)), params);
+				const snapshot = await novelMemory.snapshot(root, memoryIO(root));
+				let result;
+				try { result = novelMemory.search(snapshot, params); } catch (error) { throw toolError("invalid_input", "INVALID_MEMORY_QUERY", error.message); }
 				return textResult(JSON.stringify(result, null, 2), { kind: "novel-memory-search", ...result });
-			} catch (error) { return { ...textResult("Error: " + (error instanceof Error ? error.message : String(error))), isError: true }; }
+			} catch (error) { throw error; }
 		},
 	});
-	pi.registerTool({
+	registerReliableTool(pi, {
 		name: "read_story_memory",
 		label: "读取小说记忆",
 		description: "Revalidate and read an exact memory id returned by search_story_memory or the Desktop context panel. A changed source, acceptance or project invalidates the id; search again. Read-only.",
@@ -488,13 +633,15 @@ export default function (pi) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			try {
 				const { root } = await loadProject(ctx);
-				const item = novelMemory.read(await novelMemory.snapshot(root, memoryIO(root)), params.id);
+				const snapshot = await novelMemory.snapshot(root, memoryIO(root));
+				let item;
+				try { item = novelMemory.read(snapshot, params.id); } catch (error) { throw toolError("stale_source", "STALE_MEMORY", error.message); }
 				return textResult(JSON.stringify(item, null, 2), { kind: "novel-memory-read", ...item });
-			} catch (error) { return { ...textResult("Error: " + (error instanceof Error ? error.message : String(error))), isError: true }; }
+			} catch (error) { throw error; }
 		},
 	});
 
-	pi.registerTool({
+	registerReliableTool(pi, {
 		name: "verify_chapter",
 		label: "Verify chapter",
 		description: "Run the installed deterministic chapter verifier after writing a candidate manuscript. Available only to the Novel writing role.",
@@ -505,18 +652,23 @@ export default function (pi) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			try {
 				const { root } = await loadProject(ctx);
-				if (currentNovelRole(ctx) !== "write") throw new Error("verify_chapter is available only to the /novel-write role.");
+				if (currentNovelRole(ctx) !== "write") throw toolError("permission", "ROLE_DENIED", "verify_chapter is available only to the /novel-write role.");
 				const chapter = params.chapter.trim();
-				if (!/^\\d{1,6}$/.test(chapter)) throw new Error("Chapter id must be numeric.");
+				if (!/^\\d{1,6}$/.test(chapter)) throw toolError("invalid_input", "INVALID_CHAPTER", "Chapter id must be numeric.");
 				const verifierPath = path.join(root, ".novel", "tools", "verify-novel-chapter.ts");
+				await assertNoLinkedSegments(root, verifierPath, true);
+				await secureStoryPath(root, "planning/verifications/" + chapter.padStart(3, "0") + "-verification.md", true);
 				const verifierInfo = await stat(verifierPath).catch(() => null);
-				if (!verifierInfo?.isFile()) throw new Error("This Novel Project has no installed verifier. Create the project with prepare-novel-agent-test.ps1 or install the verifier into .novel/tools.");
+				if (!verifierInfo?.isFile()) throw toolError("precondition", "VERIFIER_MISSING", "This Novel Project has no installed verifier. Create the project with prepare-novel-agent-test.ps1 or install the verifier into .novel/tools.");
 				const args = ["--experimental-strip-types", verifierPath, "--project", root, "--chapter", chapter];
 				if (typeof params.scene === "string" && params.scene.trim()) args.push("--scene", params.scene.trim());
 				try {
-					const result = await runCommand(process.execPath, args, { cwd: root, maxBuffer: MAX_VERIFIER_OUTPUT_CHARS * 4 });
+					_signal?.throwIfAborted();
+					const result = await runCommand(process.execPath, args, { cwd: root, signal: _signal, timeout: 120_000, maxBuffer: MAX_VERIFIER_OUTPUT_CHARS * 4 });
 					return textResult(truncate("机械验证完成。\\n\\n" + (result.stdout || result.stderr || "No verifier output."), MAX_VERIFIER_OUTPUT_CHARS));
 				} catch (error) {
+					if (_signal?.aborted || error?.code === "ABORT_ERR" || error?.killed) throw toolError("unknown_outcome", "VERIFIER_INTERRUPTED", "Verifier interrupted; report state may have changed. Recheck before running again.");
+					if (typeof error?.code !== "number") throw error;
 					const failed = error && typeof error === "object" ? error : {};
 					const stdout = typeof failed.stdout === "string" ? failed.stdout : "";
 					const stderr = typeof failed.stderr === "string" ? failed.stderr : "";
@@ -525,13 +677,13 @@ export default function (pi) {
 					const prefix = planningBlocked
 						? "写作前置合同未完成，已停止：请切换到规划 Agent 修复章节架构或章节卡。若报告为 fenced YAML 文档错误，章节卡必须只保留一个 yaml fenced block，并将 required_scenes 等机器字段合并进去；修复后将 approval_status 重置为 PROPOSED_PENDING_USER_ACCEPTANCE，等待用户重新确认。写作 Agent 无权修改 planning。"
 						: "机械验证未通过。请根据报告修复候选正文后重新调用 verify_chapter。";
-					return textResult(truncate(prefix + "\\n\\n" + report, MAX_VERIFIER_OUTPUT_CHARS));
+					throw toolError(planningBlocked ? "precondition" : "validation", planningBlocked ? "CONTRACT" : "VERIFICATION_FAILED", truncate(prefix + "\\n\\n" + report, MAX_VERIFIER_OUTPUT_CHARS));
 				}
-			} catch (error) { return textResult("Error: " + (error instanceof Error ? error.message : String(error))); }
+			} catch (error) { throw error; }
 		},
 	});
 
-	pi.registerTool({
+	registerReliableTool(pi, {
 		name: "get_current_document",
 		label: "Get current document",
 		description: "Read the current document supplied by Pi Desktop for this novel request. Read-only.",
@@ -540,10 +692,10 @@ export default function (pi) {
 			try {
 				const { root } = await loadProject(ctx);
 				const relativePath = currentDocumentFromSession(ctx);
-				if (!relativePath) throw new Error("Pi Desktop did not supply an active document in this session's current request context.");
+				if (!relativePath) throw toolError("precondition", "NO_ACTIVE_DOCUMENT", "Pi Desktop did not supply an active document in this session's current request context.");
 				const document = await readStoryFile(root, relativePath);
 				return textResult("# " + document.relativePath + "\\n\\n" + document.text, { path: document.relativePath });
-			} catch (error) { return textResult("Error: " + (error instanceof Error ? error.message : String(error))); }
+			} catch (error) { throw error; }
 		},
 	});
 }

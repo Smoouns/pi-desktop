@@ -88,3 +88,9 @@ jobs:
 
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: RPC generation regression
+        run: cargo test --manifest-path src-tauri/Cargo.toml rpc_generation_tests
+
+      - name: Session file safety regression
+        run: cargo test --manifest-path src-tauri/Cargo.toml session_file::tests
