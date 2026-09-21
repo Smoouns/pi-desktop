@@ -1047,7 +1047,7 @@ async function refreshNovelContext(workspace: WorkspaceState | null, prompt = ""
 			relevantDocuments,
 			styleDocuments,
 			manualDocuments,
-			tokenBudget: 16_000,
+			selectionTokenBudget: 16_000,
 		});
 		if (contextInspector.getSelectedMemories().length) {
 			const snapshot = await loadStoryMemorySnapshot(projectPath);

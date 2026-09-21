@@ -147,7 +147,7 @@ export class ContextInspector {
 	}
 
 	private renderMemory(hit: StoryMemoryHit, selected: boolean): unknown {
-		return html`<article class="context-memory-item"><header><strong>${hit.heading}</strong><em>${this.memoryLabel(hit)}</em></header><button class="context-memory-source" title=${hit.path} @click=${() => this.onOpenSource?.(hit.path)}>${hit.path} · L${hit.startLine}–${hit.endLine}</button><p>${hit.text.slice(0, 200)}${hit.text.length > 200 ? "…" : ""}</p><details><summary>查看原文片段</summary><pre>${hit.text}</pre></details><div class="context-memory-meta"><span>${hit.reason}</span><span>~${hit.estimatedTokens} tokens</span></div><footer><span>${hit.layer} · ${hit.chapter === null ? "章节未标注" : `第 ${hit.chapter} 章`}</span>${selected ? html`<button @click=${() => this.removeMemory(hit.id)}>移除引用</button>` : html`<button ?disabled=${this.memorySelections.has(hit.id)} @click=${() => this.addMemory(hit)}>${this.memorySelections.has(hit.id) ? "已加入" : "加入本次请求"}</button>`}</footer></article>`;
+		return html`<article class="context-memory-item"><header><strong>${hit.heading}</strong><em>${this.memoryLabel(hit)}</em></header><button class="context-memory-source" title=${hit.path} @click=${() => this.onOpenSource?.(hit.path)}>${hit.path} · L${hit.startLine}–${hit.endLine}</button><p>${hit.text.slice(0, 200)}${hit.text.length > 200 ? "…" : ""}</p><details><summary>查看原文片段</summary><pre>${hit.text}</pre></details><div class="context-memory-meta"><span>${hit.reason}</span><span>选材估算 ~${hit.estimatedTokens} tokens</span></div><footer><span>${hit.layer} · ${hit.chapter === null ? "章节未标注" : `第 ${hit.chapter} 章`}</span>${selected ? html`<button @click=${() => this.removeMemory(hit.id)}>移除引用</button>` : html`<button ?disabled=${this.memorySelections.has(hit.id)} @click=${() => this.addMemory(hit)}>${this.memorySelections.has(hit.id) ? "已加入" : "加入本次请求"}</button>`}</footer></article>`;
 	}
 
 	private setPinned(path: string, pinned: boolean): void {
@@ -190,7 +190,7 @@ export class ContextInspector {
 			<section class="context-summary ${hasProject ? "" : "empty"}">
 				<button class="context-summary-trigger" @click=${() => { this.workbenchOpen = true; this.render(); }} ?disabled=${!hasProject}>
 					<span class="context-summary-leading"><span class="context-summary-icon">⌘</span><span><strong>上下文</strong><small>${hasProject ? `${this.items.length} 项资料引用已加入本次请求` : "打开项目后管理上下文"}</small></span></span>
-					<span class="context-summary-total">~${this.estimatedTotal.toLocaleString()} tokens</span>
+					<span class="context-summary-total">选材估算 ~${this.estimatedTotal.toLocaleString()} tokens</span>
 					<span class="context-summary-caret">›</span>
 				</button>
 			</section>
@@ -198,8 +198,8 @@ export class ContextInspector {
 				<div class="context-workbench-backdrop" @click=${() => this.closeWorkbench()}>
 					<section class="context-workbench" role="dialog" aria-modal="true" aria-label="上下文工作台" @click=${(event: Event) => event.stopPropagation()}>
 						<header class="context-workbench-header">
-							<div><h2>上下文工作台</h2><p>本次请求可按需读取的小说资料</p></div>
-							<div class="context-workbench-header-actions"><span>~${this.estimatedTotal.toLocaleString()} tokens</span><button title="关闭上下文工作台" @click=${() => this.closeWorkbench()}>×</button></div>
+							<div><h2>上下文工作台</h2><p>仅发送文件索引；读取与模型请求预算由运行时检查。可用 get_context_budget 查看本轮账本。</p></div>
+							<div class="context-workbench-header-actions"><span>选材估算 ~${this.estimatedTotal.toLocaleString()} tokens</span><button title="关闭上下文工作台" @click=${() => this.closeWorkbench()}>×</button></div>
 						</header>
 						<div class="context-workbench-toolbar">
 							<nav class="context-memory-tabs" aria-label="资料类型"><button aria-pressed=${String(this.mode === "documents")} @click=${() => { this.mode = "documents"; this.render(); }}>文档</button><button aria-pressed=${String(this.mode === "memory")} @click=${() => { this.mode = "memory"; this.render(); }}>记忆检索</button></nav>
@@ -209,7 +209,7 @@ export class ContextInspector {
 						${this.mode === "memory" ? html`<div class="context-memory-options"><label>截至章节 <input aria-label="记忆截至章节" type="number" min="0" placeholder="不限" .value=${this.throughChapter} @input=${(event: Event) => { this.throughChapter = (event.target as HTMLInputElement).value; }}></label><label><input type="checkbox" .checked=${this.includePlanned} @change=${(event: Event) => { this.includePlanned = (event.target as HTMLInputElement).checked; }}> 包含未来规划</label><span>每次检索核对当前文件 · 设定不代表角色知情</span></div>` : nothing}
 						${this.memoryError ? html`<p class="context-memory-error" role="alert">${this.memoryError}</p>` : nothing}
 						<div class="context-workbench-columns">
-							<section class="context-workbench-column included"><div class="context-workbench-column-header"><strong>已加入</strong><span>来源、理由与 token</span></div>
+							<section class="context-workbench-column included"><div class="context-workbench-column-header"><strong>已加入</strong><span>来源、理由与选材估算</span></div>
 								<div class="context-workbench-list">
 									${this.items.length === 0 ? html`<div class="context-workbench-empty">本次请求尚未选择上下文。</div>` : this.items.map((item) => html`
 										${item.memory ? this.renderMemory(item.memory, true) : html`<article class="context-workbench-item"><div class="context-workbench-item-title"><span class="context-inspector-check">✓</span><span title=${item.path}>${item.relativePath}</span><em class=${item.authority}>${item.authority}</em></div><div class="context-workbench-item-meta"><span title=${item.reason}>${item.reason}</span><span>${item.readRequirement === "required" ? "必须读取" : "按需读取"}</span></div><div class="context-workbench-item-actions"><button @click=${() => this.setPinned(item.path, !item.pinned)}>${item.pinned ? "取消固定" : "固定"}</button><button class="danger" @click=${() => this.removeForRequest(item.path)}>移除</button></div></article>`}

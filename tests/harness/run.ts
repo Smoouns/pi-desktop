@@ -17,6 +17,12 @@ import { runToolPathPolicyCases } from "./tool-path-policy.js";
 import { runBuiltinWriteCases } from "./builtin-writes.js";
 import { runWorkflowUiCases } from "./workflow-ui.js";
 import { runSessionRestoreCases } from "./session-restore.js";
+import { runObservationStoreTests } from "./observation-store.js";
+import { runContextBudgetCases } from "./context-budget.js";
+import { runPhase2ExtensionCases } from "./phase2-extension.js";
+import { runProviderBudgetCases } from "./provider-budget.js";
+import { runStoryRangeCases } from "./read-range.js";
+import { runPhase2InvariantCases } from "./phase2-invariants.js";
 import { fixtureRoot, sha256, treeManifest, type RunCase } from "./testkit.js";
 
 type CaseResult = { id: string; status: "pass" | "fail" | "partial"; trace: TraceEvent[]; unsupported: Array<{ subcase: string; reason: string }>; error?: string };
@@ -71,6 +77,12 @@ for (let repetition = 1; repetition <= 3; repetition++) {
 	await runBuiltinWriteCases(runCase);
 	await runWorkflowUiCases(runCase);
 	await runSessionRestoreCases(runCase);
+	await runCase("P2-OBS immutable bounded observation store", () => { runObservationStoreTests(); });
+	await runContextBudgetCases(runCase);
+	await runStoryRangeCases(runCase);
+	await runPhase2ExtensionCases(runCase);
+	await runPhase2InvariantCases(runCase);
+	await runProviderBudgetCases(runCase);
 	repetitions.push(results);
 	await writeFile(path.join(output, `run-${repetition}.json`), JSON.stringify(results, null, 2) + "\n");
 }
@@ -85,7 +97,7 @@ const implementationFiles: Record<string, string> = {};
 for (const name of [
 	"src/extensions/novel-tools-extension.ts", "src/novel/context.ts", "src/novel/context-attachment.ts",
 	"src/components/chat-view.ts", "src/novel/memory-engine.ts", "src/rpc/bridge.ts",
-	"src/novel/tool-path-policy.ts", "src-tauri/src/lib.rs", "src-tauri/src/session_file.rs",
+	"src/novel/tool-path-policy.ts", "src/novel/read-range.ts", "src/components/context-inspector.ts", "src-tauri/src/lib.rs", "src-tauri/src/session_file.rs",
 	"src/rpc/session-restore.ts", "src/main.ts", "src/components/chat-view/assistant-workflow-view.ts",
 	"src/components/chat-view/workflow-utils.ts", "src/i18n/ui-chinese.ts",
 	"scripts/verify-novel-chapter.ts", "scripts/run-public-tests.mjs", "scripts/run-harness-baseline.mjs",
@@ -96,7 +108,7 @@ for (const directory of ["src/harness", "tests/harness", "tests/support"]) {
 	for (const [name, hash] of Object.entries(await treeManifest(directory))) implementationFiles[`${directory}/${name}`] = hash;
 }
 const summary = {
-	schemaVersion: 1, phase: "phase1", phaseStartCommit: "314120c2b3c9eb9d373b4c1b9a5942f4dbf45edf", baselineCommit: "3b5f8b06131d46ee0b4b97dd646ba3d6f6bcd887",
+	schemaVersion: 1, phase: "phase2", phaseStartCommit: "32131274be2964a61d0180088eeb51709ebdb86f", baselineCommit: "3b5f8b06131d46ee0b4b97dd646ba3d6f6bcd887",
 	implementationHead: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
 	dirty: Boolean(execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim()),
 	node: process.version, npm: process.env.npm_config_user_agent?.split(" ")[0] ?? "unavailable",

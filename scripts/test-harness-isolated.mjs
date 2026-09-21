@@ -22,7 +22,7 @@ await mkdir(output, { recursive: true });
 const additions = [
 	".gitattributes", "tsconfig.harness.json", "fixtures/harness-novel", "tests/harness", "tests/support",
 	"src/harness", "src/novel/context-attachment.ts", "scripts/run-public-tests.mjs",
-	"src/novel/tool-path-policy.ts",
+	"src/novel/tool-path-policy.ts", "src/novel/read-range.ts", "docs/HARNESS_PHASE2_ACCEPTANCE.md", "docs/HARNESS_PHASE2_RESULTS.md",
 	"src/rpc/session-restore.ts", "src-tauri/src/session_file.rs",
 	"scripts/run-harness-baseline.mjs", "scripts/test-harness-isolated.mjs",
 ];

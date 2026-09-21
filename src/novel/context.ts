@@ -31,6 +31,9 @@ export interface ContextBuildInput {
 	styleDocuments?: NovelDocument[];
 	manualDocuments?: NovelDocument[];
 	excludedPaths?: string[];
+	/** Soft UI selection estimate only; runtime read and model-input budgets are enforced separately. */
+	selectionTokenBudget?: number;
+	/** @deprecated Use selectionTokenBudget. Retained for compatibility as a soft selection estimate. */
 	tokenBudget?: number;
 }
 
@@ -84,12 +87,13 @@ export function buildNovelContext(input: ContextBuildInput): ContextItem[] {
 	const seen = new Set<string>();
 	const result: ContextItem[] = [];
 	let total = 0;
+	const selectionTokenBudget = input.selectionTokenBudget ?? input.tokenBudget;
 	for (const candidate of candidates.sort((a, b) => a.priority - b.priority)) {
 		const key = pathKey(candidate.document.path);
 		if (seen.has(key) || excluded.has(key)) continue;
 		if (candidate.document.classification.authority === "historical" || candidate.document.classification.authority === "external-reference") continue;
 		const estimatedTokens = candidate.document.estimatedTokens;
-		if (input.tokenBudget && total + estimatedTokens > input.tokenBudget && result.length > 0 && !candidate.pinned) continue;
+		if (selectionTokenBudget !== undefined && total + estimatedTokens > selectionTokenBudget && result.length > 0 && !candidate.pinned) continue;
 		seen.add(key);
 		total += estimatedTokens;
 		result.push({

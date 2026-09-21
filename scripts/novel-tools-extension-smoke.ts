@@ -9,11 +9,13 @@ import { NOVEL_TOOLS_EXTENSION_CONTENT } from "../src/extensions/novel-tools-ext
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixtureRoot = path.join(workspaceRoot, "fixtures", "harness-novel");
 const expectedTools = [
+	"get_context_budget",
 	"get_current_document",
 	"list_story_files",
 	"read_chapter",
 	"read_character",
 	"read_outline",
+	"read_observation",
 	"read_story_document",
 	"read_story_memory",
 	"search_story_memory",
@@ -60,7 +62,7 @@ const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "pi-desktop-novel-t
 const extensionPath = path.join(temporaryDirectory, "pi-desktop-novel-tools.ts");
 
 try {
-	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v8/);
+	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v9/);
 	assert.doesNotMatch(NOVEL_TOOLS_EXTENSION_CONTENT, /\b(?:writeFile|writeTextFile|appendFile|rename|unlink|rm)\s*\(/);
 	await writeFile(extensionPath, NOVEL_TOOLS_EXTENSION_CONTENT, "utf8");
 
@@ -109,10 +111,27 @@ try {
 	assert.match(resultText(listResult), /planning\/chapter-architecture\.md/);
 	const memoryResult = await tools.get("search_story_memory")!.definition.execute("memory-search", { query: "白潮栓 校准潮位刻度", limit: 5 }, undefined, undefined, toolContext as never);
 	assert.notEqual(toolIsError(memoryResult), true, resultText(memoryResult));
-	const memoryData = JSON.parse(resultText(memoryResult));
+	const fullResultText = async (result: typeof memoryResult): Promise<string> => {
+		const details = objectResult(result.details, "result details");
+		if (!details.offloaded) return resultText(result);
+		const observation = objectResult(details.observation, "observation");
+		let combined = "", start = 0;
+		for (let index = 0; index < 30; index++) {
+			const page = await tools.get("read_observation")!.definition.execute(`page-${index}`, { id: observation.id, start, limit: 4000 }, undefined, undefined, toolContext as never);
+			const pageDetails = objectResult(page.details, "page details");
+			const content = resultText(page);
+			const marker = pageDetails.hasMore ? content.lastIndexOf("\n[更多内容：") : content.lastIndexOf("\n[记录结束]");
+			assert.ok(marker >= 0);
+			combined += content.slice(0, marker);
+			start += marker;
+			if (!pageDetails.hasMore) return combined;
+		}
+		throw new Error("Unbounded observation pagination");
+	};
+	const memoryData = JSON.parse(await fullResultText(memoryResult));
 	assert.ok(memoryData.hits.some((hit: { path: string }) => hit.path.endsWith("canon/world.md")));
 	const memoryRead = await tools.get("read_story_memory")!.definition.execute("memory-read", { id: memoryData.hits[0].id }, undefined, undefined, toolContext as never);
-	assert.equal(JSON.parse(resultText(memoryRead)).sourceFingerprint, memoryData.hits[0].sourceFingerprint);
+	assert.equal(JSON.parse(await fullResultText(memoryRead)).sourceFingerprint, memoryData.hits[0].sourceFingerprint);
 	const invalidMemory = await observeToolResult(tools.get("read_story_memory")!.definition.execute("bad-memory", { id: "mem-foreign-project" }, undefined, undefined, toolContext as never));
 	assert.equal(toolIsError(invalidMemory), true);
 
