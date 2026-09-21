@@ -36,6 +36,7 @@ interface SidebarSession {
 	modifiedAt: number;
 	tokens: number;
 	cost: number;
+	novelRole: "world" | "plan" | "write" | null;
 	optimistic?: boolean;
 	transient?: boolean;
 }
@@ -331,10 +332,10 @@ export class Sidebar {
 	private onWorkspaceRename: ((workspaceId: string, nextTitle: string) => void) | null = null;
 	private onWorkspaceDelete: ((workspaceId: string) => void) | null = null;
 	private onProjectSelect: ((project: { id: string; name: string; path: string } | null) => void) | null = null;
-	private onSessionSelect: ((projectId: string, sessionPath: string, sessionName?: string) => void) | null = null;
+	private onSessionSelect: ((projectId: string, sessionPath: string, sessionName: string | undefined, novelRole: SidebarSession["novelRole"]) => void) | null = null;
 	private onSessionRename: ((projectId: string, sessionPath: string, currentName: string, nextName: string) => void) | null = null;
 	private onSessionDelete: ((projectId: string, sessionPath: string) => void) | null = null;
-	private onSessionFork: ((projectId: string, sessionPath: string, sessionName?: string) => void) | null = null;
+	private onSessionFork: ((projectId: string, sessionPath: string, sessionName: string | undefined, novelRole: SidebarSession["novelRole"]) => void) | null = null;
 	private onSessionMarkUnread: ((projectId: string, sessionPath: string, sessionName?: string) => void) | null = null;
 	private onNewSessionInProject: ((project: { id: string; name: string; path: string }) => void) | null = null;
 	private onNewFileInProject: ((project: { id: string; name: string; path: string; directoryPath?: string | null; anchorPath?: string | null }) => void) | null = null;
@@ -546,7 +547,7 @@ export class Sidebar {
 		this.onProjectSelect = cb;
 	}
 
-	setOnSessionSelect(cb: (projectId: string, sessionPath: string, sessionName?: string) => void): void {
+	setOnSessionSelect(cb: (projectId: string, sessionPath: string, sessionName: string | undefined, novelRole: SidebarSession["novelRole"]) => void): void {
 		this.onSessionSelect = cb;
 	}
 
@@ -558,7 +559,7 @@ export class Sidebar {
 		this.onSessionDelete = cb;
 	}
 
-	setOnSessionFork(cb: (projectId: string, sessionPath: string, sessionName?: string) => void): void {
+	setOnSessionFork(cb: (projectId: string, sessionPath: string, sessionName: string | undefined, novelRole: SidebarSession["novelRole"]) => void): void {
 		this.onSessionFork = cb;
 	}
 
@@ -1252,6 +1253,7 @@ export class Sidebar {
 			modifiedAt?: number | null;
 			tokens?: number | null;
 			cost?: number | null;
+			novelRole?: SidebarSession["novelRole"];
 			optimistic?: boolean;
 		},
 	): void {
@@ -1269,6 +1271,7 @@ export class Sidebar {
 			existing.modifiedAt = session.modifiedAt ?? existing.modifiedAt ?? now;
 			existing.tokens = session.tokens ?? existing.tokens ?? 0;
 			existing.cost = session.cost ?? existing.cost ?? 0;
+			if (session.novelRole !== undefined) existing.novelRole = session.novelRole;
 			existing.optimistic = session.optimistic ?? existing.optimistic ?? false;
 		} else {
 			project.sessions.unshift({
@@ -1279,6 +1282,7 @@ export class Sidebar {
 				modifiedAt: session.modifiedAt ?? session.createdAt ?? now,
 				tokens: session.tokens ?? 0,
 				cost: session.cost ?? 0,
+				novelRole: session.novelRole ?? null,
 				optimistic: session.optimistic ?? false,
 			});
 		}
@@ -1583,7 +1587,7 @@ export class Sidebar {
 			return;
 		}
 		if (action === "fork") {
-			this.onSessionFork?.(found.project.id, found.session.path, found.session.name);
+			this.onSessionFork?.(found.project.id, found.session.path, found.session.name, found.session.novelRole);
 			return;
 		}
 		if (action === "markUnread") {
@@ -2015,6 +2019,7 @@ export class Sidebar {
 					modified_at: number;
 					tokens: number;
 					cost: number;
+					novel_role: "world" | "plan" | "write" | null;
 				}>>("list_sessions");
 				if (isStale()) return;
 
@@ -2035,6 +2040,7 @@ export class Sidebar {
 					modifiedAt: s.modified_at,
 					tokens: s.tokens ?? 0,
 					cost: s.cost ?? 0,
+					novelRole: s.novel_role ?? null,
 					optimistic: false,
 				} satisfies SidebarSession));
 
@@ -2458,6 +2464,7 @@ export class Sidebar {
 					modifiedAt: this.transientSessionDraft.createdAt,
 					tokens: 0,
 					cost: 0,
+					novelRole: null,
 					optimistic: true,
 					transient: true,
 				} satisfies SidebarSession)
@@ -4004,7 +4011,7 @@ export class Sidebar {
 								this.activeSessionPath = normalizePath(session.path);
 								this.activeFilePath = null;
 								this.render();
-								this.onSessionSelect?.(project.id, session.path, session.name);
+								this.onSessionSelect?.(project.id, session.path, session.name, session.novelRole);
 							}}
 							@contextmenu=${(e: MouseEvent) => this.handleSessionContextMenu(e, project, session)}
 							title=${session.path}
@@ -4155,7 +4162,7 @@ export class Sidebar {
                                                                         this.activeSessionPath = normalizePath(session.path);
                                                                         this.activeFilePath = null;
                                                                         this.render();
-                                                                        this.onSessionSelect?.(project.id, session.path, session.name);
+                                                                        this.onSessionSelect?.(project.id, session.path, session.name, session.novelRole);
                                                                     }}
                                                                     @contextmenu=${(e: MouseEvent) => this.handleSessionContextMenu(e, project, session)}
                                                                     title=${session.path}

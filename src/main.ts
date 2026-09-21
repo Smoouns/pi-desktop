@@ -19,6 +19,7 @@ import { SettingsPanel, type SettingsSectionId } from "./components/settings-pan
 import { ShortcutsPanel } from "./components/shortcuts-panel.js";
 import { Sidebar, type SidebarMode, type SidebarWorkspaceItem } from "./components/sidebar.js";
 import { TerminalPanel } from "./components/terminal-panel.js";
+import { chatPanelWidthFromPointer, clampChatPanelWidth } from "./layout/chat-panel-resize.js";
 import type { WorkspaceTabs } from "./components/workspace-tabs.js";
 import { fetchDesktopUpdateStatus, type DesktopUpdateStatus } from "./desktop-updates.js";
 import { type CliUpdateStatus, RpcBridge, type RpcSessionState, rpcBridge, setActiveRpcBridge } from "./rpc/bridge.js";
@@ -93,6 +94,7 @@ interface SessionRuntime {
 	workspaceId: string;
 	tabId: string;
 	projectPath: string;
+	launchedNovelRole: NovelAgentRole | null | undefined;
 	lastKnownSessionPath: string | null;
 	running: boolean;
 	draftInitialized: boolean;
@@ -114,11 +116,11 @@ const TERMINAL_DOCK_HEIGHT_KEY = "pi-desktop.terminal-dock-height.v1";
 const TERMINAL_DOCK_MIN_HEIGHT = 180;
 const TERMINAL_DOCK_MAX_HEIGHT = 640;
 const TERMINAL_DOCK_DEFAULT_HEIGHT = 280;
-const FILE_SPLIT_WIDTH_KEY = "pi-desktop.file-split-width.v1";
-const FILE_SPLIT_MIN_WIDTH = 300;
-const FILE_SPLIT_MIN_CHAT_WIDTH = 420;
-const FILE_SPLIT_MIN_COMPOSER_GAP = 16;
-const FILE_SPLIT_DEFAULT_WIDTH = 520;
+const CHAT_PANEL_WIDTH_KEY = "pi-desktop.chat-panel-width.v1";
+const CHAT_PANEL_MIN_WIDTH = 300;
+const FILE_PANEL_MIN_WIDTH = 300;
+const FILE_SPLIT_HANDLE_WIDTH = 5;
+const CHAT_PANEL_DEFAULT_WIDTH = 420;
 const NEW_SESSION_TAB_TITLE = "New session";
 const NEW_FILE_TAB_TITLE = "New file";
 const NEW_GENERIC_TAB_TITLE = "New tab";
@@ -198,7 +200,7 @@ let removeSidebarResizeHandlers: (() => void) | null = null;
 let removeTerminalDockResizeHandlers: (() => void) | null = null;
 let removeFileSplitResizeHandlers: (() => void) | null = null;
 let terminalDockHeightPx = loadTerminalDockHeight();
-let fileSplitWidthPx = loadFileSplitWidth();
+let chatPanelWidthPx = loadChatPanelWidth();
 let sidebarSessionsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let sidebarSessionsWarmInterval: ReturnType<typeof setInterval> | null = null;
 let sidebarSessionsWarmStopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -269,75 +271,57 @@ function setTerminalDockHeight(nextHeight: number, persist = false): void {
 	syncTerminalDockVisibility(getActiveWorkspace());
 }
 
-function resolveFileSplitMaxWidth(): number {
+function resolveChatPanelAvailableWidth(): number {
 	const layout = document.getElementById("chat-file-layout");
-	const availableWidth = layout?.getBoundingClientRect().width ?? window.innerWidth;
-	const maxWidth = Math.round(availableWidth - FILE_SPLIT_MIN_CHAT_WIDTH);
-	return Math.max(FILE_SPLIT_MIN_WIDTH, maxWidth);
+	return layout?.getBoundingClientRect().width ?? window.innerWidth;
 }
 
-function clampFileSplitWidth(value: number): number {
-	return Math.min(resolveFileSplitMaxWidth(), Math.max(FILE_SPLIT_MIN_WIDTH, Math.round(value)));
+function clampCurrentChatPanelWidth(value: number): number {
+	return clampChatPanelWidth(value, resolveChatPanelAvailableWidth(), {
+		minChatWidth: CHAT_PANEL_MIN_WIDTH,
+		minFileWidth: FILE_PANEL_MIN_WIDTH,
+		dividerWidth: FILE_SPLIT_HANDLE_WIDTH,
+	});
 }
 
-function loadFileSplitWidth(): number {
+function loadChatPanelWidth(): number {
 	try {
-		const raw = localStorage.getItem(FILE_SPLIT_WIDTH_KEY);
-		const parsed = raw ? Number(raw) : FILE_SPLIT_DEFAULT_WIDTH;
-		if (!Number.isFinite(parsed)) return FILE_SPLIT_DEFAULT_WIDTH;
-		return Math.max(FILE_SPLIT_MIN_WIDTH, Math.round(parsed));
+		const raw = localStorage.getItem(CHAT_PANEL_WIDTH_KEY);
+		const parsed = raw ? Number(raw) : CHAT_PANEL_DEFAULT_WIDTH;
+		if (!Number.isFinite(parsed)) return CHAT_PANEL_DEFAULT_WIDTH;
+		return Math.max(CHAT_PANEL_MIN_WIDTH, Math.round(parsed));
 	} catch {
-		return FILE_SPLIT_DEFAULT_WIDTH;
+		return CHAT_PANEL_DEFAULT_WIDTH;
 	}
 }
 
-function persistFileSplitWidth(): void {
+function persistChatPanelWidth(): void {
 	try {
-		localStorage.setItem(FILE_SPLIT_WIDTH_KEY, String(fileSplitWidthPx));
+		localStorage.setItem(CHAT_PANEL_WIDTH_KEY, String(chatPanelWidthPx));
 	} catch {
 		// ignore
 	}
 }
 
-function resolveFileSplitComposerOverlap(layout: HTMLElement): number {
-	const handle = document.getElementById("file-split-resize-handle");
-	if (!handle || handle.classList.contains("hidden-pane")) return 0;
-	const composerPanel = layout.querySelector<HTMLElement>(".composer-panel");
-	if (!composerPanel || composerPanel.offsetParent === null) return 0;
-	const handleRect = handle.getBoundingClientRect();
-	const composerRect = composerPanel.getBoundingClientRect();
-	const dividerX = handleRect.left + handleRect.width / 2;
-	const minDividerX = composerRect.right + FILE_SPLIT_MIN_COMPOSER_GAP;
-	return Math.max(0, Math.ceil(minDividerX - dividerX));
-}
-
 function applyFileSplitWidth(): void {
 	const layout = document.getElementById("chat-file-layout");
-	if (!layout) return;
-	const clamped = clampFileSplitWidth(fileSplitWidthPx);
-	if (clamped !== fileSplitWidthPx) {
-		fileSplitWidthPx = clamped;
+	// Hidden package/settings layouts can report zero to ResizeObserver; keep
+	// the last usable width until the chat layout is visible again.
+	if (!layout || layout.getBoundingClientRect().width <= 0) return;
+	const clamped = clampCurrentChatPanelWidth(chatPanelWidthPx);
+	if (clamped !== chatPanelWidthPx) {
+		chatPanelWidthPx = clamped;
 	}
-
-	layout.style.setProperty("--file-split-width", `${fileSplitWidthPx}px`);
-
-	for (let attempt = 0; attempt < 5; attempt += 1) {
-		const overlap = resolveFileSplitComposerOverlap(layout);
-		if (overlap <= 0) break;
-		const nextWidth = clampFileSplitWidth(fileSplitWidthPx - overlap);
-		if (nextWidth === fileSplitWidthPx) break;
-		fileSplitWidthPx = nextWidth;
-		layout.style.setProperty("--file-split-width", `${fileSplitWidthPx}px`);
-	}
+	layout.style.setProperty("--chat-panel-width", `${chatPanelWidthPx}px`);
 }
 
 function setFileSplitWidth(nextWidth: number, persist = false): void {
-	const clamped = clampFileSplitWidth(nextWidth);
-	if (clamped !== fileSplitWidthPx) {
-		fileSplitWidthPx = clamped;
+	const clamped = clampCurrentChatPanelWidth(nextWidth);
+	if (clamped !== chatPanelWidthPx) {
+		chatPanelWidthPx = clamped;
 	}
 	applyFileSplitWidth();
-	if (persist) persistFileSplitWidth();
+	if (persist) persistChatPanelWidth();
 }
 
 function setupFileSplitResize(): void {
@@ -345,19 +329,19 @@ function setupFileSplitResize(): void {
 	removeFileSplitResizeHandlers = null;
 
 	const handle = document.getElementById("file-split-resize-handle");
-	if (!handle) return;
+	const layout = document.getElementById("chat-file-layout");
+	if (!handle || !layout) return;
 
 	const onPointerDown = (event: PointerEvent) => {
-		if (handle.classList.contains("hidden-pane")) return;
+		if (event.button !== 0 || handle.classList.contains("hidden-pane")) return;
 		event.preventDefault();
 		const startX = event.clientX;
-		const startWidth = fileSplitWidthPx;
+		const startWidth = chatPanelWidthPx;
 		handle.classList.add("dragging");
 		document.body.classList.add("file-split-resizing");
 
 		const onMove = (moveEvent: PointerEvent) => {
-			const delta = startX - moveEvent.clientX;
-			setFileSplitWidth(startWidth + delta, false);
+			setFileSplitWidth(chatPanelWidthFromPointer(startWidth, startX, moveEvent.clientX), false);
 		};
 
 		const onUp = () => {
@@ -365,22 +349,31 @@ function setupFileSplitResize(): void {
 			document.body.classList.remove("file-split-resizing");
 			window.removeEventListener("pointermove", onMove);
 			window.removeEventListener("pointerup", onUp);
-			persistFileSplitWidth();
+			window.removeEventListener("pointercancel", onUp);
+			window.removeEventListener("blur", onUp);
+			persistChatPanelWidth();
 		};
 
 		window.addEventListener("pointermove", onMove);
 		window.addEventListener("pointerup", onUp);
+		window.addEventListener("pointercancel", onUp);
+		window.addEventListener("blur", onUp);
 	};
 
 	const onWindowResize = () => {
 		applyFileSplitWidth();
 	};
+	const layoutResizeObserver = typeof ResizeObserver === "undefined"
+		? null
+		: new ResizeObserver(() => applyFileSplitWidth());
 
 	handle.addEventListener("pointerdown", onPointerDown);
 	window.addEventListener("resize", onWindowResize);
+	layoutResizeObserver?.observe(layout);
 	removeFileSplitResizeHandlers = () => {
 		handle.removeEventListener("pointerdown", onPointerDown);
 		window.removeEventListener("resize", onWindowResize);
+		layoutResizeObserver?.disconnect();
 	};
 }
 
@@ -586,6 +579,7 @@ function getOrCreateRuntimeForTab(workspaceId: string, tabId: string, projectPat
 		workspaceId,
 		tabId,
 		projectPath,
+		launchedNovelRole: undefined,
 		lastKnownSessionPath: null,
 		running: false,
 		draftInitialized: false,
@@ -613,6 +607,9 @@ function getOrCreateRuntimeForTab(workspaceId: string, tabId: string, projectPat
 }
 
 function setActiveRuntime(runtime: SessionRuntime | null): void {
+	if (activeSessionRuntimeKey !== (runtime?.key ?? null)) {
+		extensionUiHandler?.clearSessionStatus();
+	}
 	activeSessionRuntimeKey = runtime?.key ?? null;
 	setActiveRpcBridge(runtime?.bridge ?? null);
 	syncDebugOverlay();
@@ -1355,7 +1352,7 @@ function openOrActivateSessionTab(
 	projectId: string | null,
 	projectPath: string | null,
 	preferredTitle?: string,
-	options: { allowCreateTab?: boolean; preferredTabId?: string | null } = {},
+	options: { allowCreateTab?: boolean; preferredTabId?: string | null; novelRole?: NovelAgentRole | null } = {},
 ): WorkspaceSessionTab {
 	ensureWorkspaceContentState(workspace);
 	const normalized = normalizeSessionPath(sessionPath);
@@ -1404,16 +1401,18 @@ function openOrActivateSessionTab(
 			reusableTab.messageCount = null;
 			reusableTab.ephemeral = false;
 			setSessionTabProject(reusableTab, projectId, projectPath);
+			if (options.novelRole !== undefined) reusableTab.novelRole = options.novelRole;
 			tab = reusableTab;
 			if (shouldDiscardPreviousEphemeral && previousPath) {
 				scheduleDiscardEphemeralSessionPaths([previousPath]);
 			}
 		} else {
-			tab = createSessionTab(nextTitle, sessionPath, projectId, projectPath);
+			tab = createSessionTab(nextTitle, sessionPath, projectId, projectPath, { novelRole: options.novelRole ?? null });
 			workspace.sessionTabs.push(tab);
 		}
 	} else {
 		setSessionTabProject(tab, projectId, projectPath);
+		if (options.novelRole !== undefined) tab.novelRole = options.novelRole;
 		tab.messageCount = tab.messageCount ?? null;
 		tab.ephemeral = false;
 		if (preferredTitle && preferredTitle.trim().length > 0) {
@@ -2676,6 +2675,7 @@ function syncActiveChatRuntimeBinding(
 		setActiveRuntime(expectedRuntime);
 	}
 	if (options.forceReset || runtimeChanged || !expectedRuntime) {
+		extensionUiHandler?.clearSessionStatus();
 		chatView.prepareForSessionSwitch(
 			projectPath,
 			options.statusText ?? (activeSessionTab.sessionPath ? "Loading session…" : "Starting new session…"),
@@ -2761,10 +2761,12 @@ function setPaneVisibility(
 	const showFileSplit = showChatLayout && Boolean(options.showFileSplit);
 	chatFileLayout.classList.toggle("hidden-pane", !showChatLayout);
 	sessionPane.classList.toggle("hidden-pane", !showChatLayout);
-	fileSplitResizeHandle.classList.toggle("hidden-pane", !showFileSplit);
+	// The divider controls the right-hand chat panel, so keep it available
+	// when the left side is the empty editor state as well as an open file.
+	fileSplitResizeHandle.classList.toggle("hidden-pane", !showChatLayout);
 	filePane.classList.toggle("hidden-pane", !showFileSplit);
 	editorEmptyState?.classList.toggle("hidden-pane", showFileSplit || !showChatLayout);
-	if (showFileSplit) applyFileSplitWidth();
+	if (showChatLayout) applyFileSplitWidth();
 	packagesPane.classList.toggle("hidden-pane", pane !== "packages");
 	settingsPane.classList.toggle("hidden-pane", pane !== "settings");
 	if (!showChatLayout) {
@@ -2922,10 +2924,20 @@ async function ensureRuntimeForSessionTab(
 	taskVersion?: number,
 ): Promise<SessionRuntime> {
 	const runtimeKey = sessionRuntimeKey(workspace.id, sessionTab.id);
+	const requestedNovelRole = sessionTab.novelRole;
 	const existing = runtimeEnsurePromises.get(runtimeKey);
-	if (existing) return existing;
+	if (existing) {
+		const runtime = await existing;
+		// Never mutate an in-flight launch configuration. If navigation changed
+		// its structured role while the launch was pending, reconcile afterward.
+		if (runtime.launchedNovelRole !== requestedNovelRole) {
+			if (runtimeEnsurePromises.get(runtimeKey) === existing) runtimeEnsurePromises.delete(runtimeKey);
+			return ensureRuntimeForSessionTab(workspace, sessionTab, projectPath, makeActive, taskVersion);
+		}
+		return runtime;
+	}
 
-	const task = ensureRuntimeForSessionTabImpl(workspace, sessionTab, projectPath, makeActive, taskVersion);
+	const task = ensureRuntimeForSessionTabImpl(workspace, sessionTab, projectPath, requestedNovelRole, makeActive, taskVersion);
 	runtimeEnsurePromises.set(runtimeKey, task);
 	try {
 		return await task;
@@ -2940,6 +2952,7 @@ async function ensureRuntimeForSessionTabImpl(
 	workspace: WorkspaceState,
 	sessionTab: WorkspaceSessionTab,
 	projectPath: string,
+	requestedNovelRole: NovelAgentRole | null,
 	makeActive = true,
 	taskVersion?: number,
 ): Promise<SessionRuntime> {
@@ -2959,6 +2972,7 @@ async function ensureRuntimeForSessionTabImpl(
 	const bridge = runtime.bridge;
 
 	const projectChanged = normalizeProjectPath(runtime.projectPath) !== normalizeProjectPath(projectPath);
+	const novelRoleChanged = runtime.launchedNovelRole !== requestedNovelRole;
 	runtime.projectPath = projectPath;
 	runtime.lastError = null;
 	recordDebugTrace(
@@ -2966,7 +2980,7 @@ async function ensureRuntimeForSessionTabImpl(
 	);
 
 	try {
-		if (projectChanged && bridge.isConnected) {
+		if ((projectChanged || novelRoleChanged) && bridge.isConnected) {
 			runtime.phase = "starting";
 			await bridge.stop().catch(() => {
 				/* ignore */
@@ -2976,6 +2990,7 @@ async function ensureRuntimeForSessionTabImpl(
 			}
 			runtime.draftInitialized = false;
 			runtime.lastKnownSessionPath = null;
+			runtime.launchedNovelRole = undefined;
 			setRuntimeRunning(runtime, false, { suppressNotify: true });
 		}
 
@@ -2984,7 +2999,8 @@ async function ensureRuntimeForSessionTabImpl(
 			recordDebugTrace(`ensureRuntime:start-bridge instance=${runtime.instanceId}`);
 			const novelRoleEnv = {
 				PI_DESKTOP_SESSION_TITLE: "1",
-				...(sessionTab.novelRole ? { PI_DESKTOP_NOVEL_ROLE: sessionTab.novelRole } : {}),
+				// Explicitly shadow a same-named host variable for ordinary sessions.
+				PI_DESKTOP_NOVEL_ROLE: requestedNovelRole ?? "",
 			};
 			const started = await startSessionTab(bridge, {
 				cliPath: findCliPath(), piPath: findPiBinaryPath(), cwd: projectPath, env: novelRoleEnv,
@@ -2998,6 +3014,7 @@ async function ensureRuntimeForSessionTabImpl(
 			// --session restores the target during startup, including ID validation.
 			// Do not reload all extensions a second time through switch_session.
 			runtime.lastKnownSessionPath = sessionTab.sessionPath;
+			runtime.launchedNovelRole = requestedNovelRole;
 			recordDebugTrace(`ensureRuntime:bridge-started instance=${runtime.instanceId} discovery=${bridge.discoveryInfo ?? "-"}`);
 			if (typeof taskVersion === "number") {
 				assertProjectTaskCurrent(taskVersion);
@@ -3688,6 +3705,7 @@ async function initialize(): Promise<void> {
 		syncDebugOverlay();
 
 		extensionUiHandler?.setEditorTextHandler((text) => chatView?.setInputText(text));
+		extensionUiHandler?.setStatusDisplayHandler((status) => chatView?.setExtensionStatus(status));
 		wireCommandPaletteBuiltins();
 		commandPalette?.setOnRunSlashCommand(async (commandText) => {
 			if (!chatView) return false;
@@ -3844,6 +3862,14 @@ function initializeComponents(): void {
 
 		if (type === "extension_ui_request") {
 			const method = typeof event.method === "string" ? event.method : "unknown";
+			if (method === "setStatus" && event.statusKey === "pi-desktop-context-budget") {
+				// Structured local budget telemetry must never be rendered as a status
+				// banner. ChatView validates schema, session and selected model.
+				if (typeof event.statusText === "string" && event.statusText.length <= 16384) {
+					try { chatView?.setContextBudgetSnapshot(JSON.parse(event.statusText)); } catch { /* Ignore malformed telemetry. */ }
+				}
+				return;
+			}
 			const message = typeof event.message === "string" ? event.message : "";
 			recordDebugTrace(`extension_ui_request method=${method} message=${message.slice(0, 80)}`);
 
@@ -4355,9 +4381,10 @@ function renderApp(): void {
 						<div id="chat-file-layout">
 							<div id="session-pane">
 								<div id="chat-container"></div>
+								<div id="context-inspector-pane"></div>
 								<div id="terminal-pane" class="hidden-pane"></div>
 							</div>
-							<div id="file-split-resize-handle" class="hidden-pane" title="Resize file panel"></div>
+							<div id="file-split-resize-handle" class="hidden-pane" title="Resize chat panel"></div>
 							<div id="file-pane" class="hidden-pane"></div>
 							<div id="editor-empty-state" class="editor-empty-state">
 								<div class="editor-empty-icon">P</div>
@@ -4367,7 +4394,6 @@ function renderApp(): void {
 						</div>
 						<div id="packages-pane" class="hidden-pane"></div>
 						<div id="settings-pane" class="hidden-pane"></div>
-						<div id="context-inspector-pane"></div>
 						<div id="novel-workflow-dialog-pane"></div>
 						<div id="world-change-dialog-pane"></div>
 					</div>
@@ -5195,7 +5221,7 @@ function renderApp(): void {
 		projectId: string,
 		sessionPath: string,
 		sessionName?: string,
-		options?: { label?: string; onActivated?: () => void | Promise<void>; onFailed?: (err: unknown) => void },
+		options?: { label?: string; novelRole?: NovelAgentRole | null; onActivated?: () => void | Promise<void>; onFailed?: (err: unknown) => void },
 	): void => {
 		const workspace = getActiveWorkspace();
 		const project = sidebar?.getProjectById(projectId);
@@ -5207,6 +5233,7 @@ function renderApp(): void {
 
 		const sessionTab = openOrActivateSessionTab(workspace, sessionPath, project.id, project.path, sessionName, {
 			allowCreateTab: canAutoCreateTab,
+			novelRole: options?.novelRole,
 		});
 		pruneInactiveEphemeralSessionTabs(workspace, [sessionTab.id]);
 		persistWorkspaces();
@@ -5243,7 +5270,10 @@ function renderApp(): void {
 			chatView?.notify("请先将此会话所属的项目添加到当前工作区，再打开会话。", "info");
 			return false;
 		}
-		activateSidebarSession(project.id, session.path, session.name, { label: "browser-session-select" });
+		activateSidebarSession(project.id, session.path, session.name, {
+			label: "browser-session-select",
+			novelRole: session.novelRole,
+		});
 		return true;
 	});
 
@@ -5296,14 +5326,15 @@ function renderApp(): void {
 
 	sidebar.setOnNovelAgentTask((project, task) => activateNovelAgentTask(project, task));
 
-	sidebar.setOnSessionSelect((projectId, sessionPath, sessionName) => {
-		activateSidebarSession(projectId, sessionPath, sessionName, { label: "sidebar-session-select" });
+	sidebar.setOnSessionSelect((projectId, sessionPath, sessionName, novelRole) => {
+		activateSidebarSession(projectId, sessionPath, sessionName, { label: "sidebar-session-select", novelRole });
 	});
 
-	sidebar.setOnSessionFork((projectId, sessionPath, sessionName) => {
+	sidebar.setOnSessionFork((projectId, sessionPath, sessionName, novelRole) => {
 		chatView?.openHistoryViewerForFork({ loading: true, sessionName });
 		activateSidebarSession(projectId, sessionPath, sessionName, {
 			label: "sidebar-session-fork",
+			novelRole,
 			onActivated: () => {
 				chatView?.openHistoryViewerForFork({ loading: false, sessionName });
 			},

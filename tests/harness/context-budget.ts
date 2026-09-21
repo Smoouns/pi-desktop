@@ -5,18 +5,20 @@ import type { RunCase } from "./testkit.js";
 const scope = { projectId: "p", sessionId: "s", runId: "r", generation: 1, role: "write" };
 
 export async function runContextBudgetCases(runCase: RunCase): Promise<void> {
-	await runCase("CONTEXT-BUDGET-01 UTF-8 estimation covers CJK, emoji, history, and every tool", (record) => {
+	await runCase("CONTEXT-BUDGET-01 multilingual token estimation covers CJK, emoji, history, and every tool", (record) => {
 		const budget = createContextBudget({ defaultOutputReserve: 32, defaultSafetyMargin: 16 });
 		const messages = [{ role: "user", content: "白潮🌊" }, { role: "assistant", content: "保留全部历史" }];
 		const tools = [{ name: "read", schema: { description: "读取章节" } }, { name: "write", schema: { description: "写入✍️" } }];
 		const before = JSON.stringify({ messages, tools });
 		const planned = budget.planRequest({ systemPrompt: "系统约束", tools, messages, messageKinds: ["new_evidence", "history"], contextWindow: 4_096 });
 		assert.equal(planned.allowed, true);
-		assert.equal(planned.ledger.estimator.kind, "utf8_bytes_upper_bound");
+		assert.equal(planned.ledger.estimator.kind, "estimated_tokens");
 		assert.equal(planned.ledger.estimator.exactProviderTokens, false);
-		assert.ok(planned.ledger.system > "系统约束".length);
-		assert.ok(planned.ledger.tools > JSON.stringify(tools[0]).length + JSON.stringify(tools[1]).length);
-		assert.ok(planned.ledger.newEvidence > "白潮🌊".length);
+		assert.ok(planned.ledger.system > 0);
+		assert.ok(planned.ledger.tools > 0);
+		assert.ok(planned.ledger.newEvidence > 0);
+		assert.equal(planned.ledger.rawInputBytes, new TextEncoder().encode(JSON.stringify({ systemPrompt: "系统约束", tools, messages })).byteLength);
+		assert.ok(planned.ledger.inputEstimate < planned.ledger.rawInputBytes, "token estimate must no longer treat every UTF-8 byte as one token");
 		assert.ok(planned.ledger.history > 0);
 		assert.equal(
 			planned.ledger.system + planned.ledger.tools + planned.ledger.history + planned.ledger.checkpoint
@@ -26,7 +28,7 @@ export async function runContextBudgetCases(runCase: RunCase): Promise<void> {
 		);
 		assert.equal(planned.messages, messages);
 		assert.equal(JSON.stringify({ messages, tools }), before);
-		record("context.budget.utf8", { conservative: true, tools: tools.length });
+		record("context.budget.multilingual", { conservative: true, rawBytesSeparated: true, tools: tools.length });
 	});
 
 	await runCase("CONTEXT-BUDGET-02 request boundary blocks without truncating content", (record) => {
@@ -67,11 +69,14 @@ export async function runContextBudgetCases(runCase: RunCase): Promise<void> {
 		const budget = createContextBudget({ defaultOutputReserve: 7, defaultSafetyMargin: 11 });
 		const payload = { model: "x", messages: [{ role: "user", content: "中文🌊" }], tools: [{ name: "a" }, { name: "b" }] };
 		const bytes = new TextEncoder().encode(JSON.stringify(payload)).byteLength;
-		const allowed = budget.checkPayload(payload, bytes + 18, 7, 11);
+		const measured = budget.checkPayload(payload, 10_000, 7, 11);
+		const estimate = measured.ledger.inputEstimate;
+		const allowed = budget.checkPayload(payload, estimate + 18, 7, 11);
 		assert.equal(allowed.allowed, true);
-		assert.equal(allowed.ledger.payload, bytes);
-		assert.equal(allowed.ledger.total, bytes + 18);
-		assert.equal(budget.checkPayload(payload, bytes + 17, 7, 11).allowed, false);
+		assert.equal(allowed.ledger.payload, estimate);
+		assert.equal(allowed.ledger.rawInputBytes, bytes);
+		assert.equal(allowed.ledger.total, estimate + 18);
+		assert.equal(budget.checkPayload(payload, estimate + 17, 7, 11).allowed, false);
 		const image = budget.checkPayload({ messages: [{ role: "user", content: [{ type: "image_url", image_url: "https://example.invalid/a.png" }] }] }, 10_000);
 		assert.equal(image.allowed, false);
 		assert.equal(image.reason, "unsupported_media");
@@ -151,7 +156,7 @@ export async function runContextBudgetCases(runCase: RunCase): Promise<void> {
 
 	await runCase("CONTEXT-BUDGET-10 reserves and integer arithmetic fail closed at their boundaries", (record) => {
 		const budget = createContextBudget({ defaultOutputReserve: 0, defaultSafetyMargin: 0 });
-		const request = { systemPrompt: "S", tools: [], messages: [{ role: "user", content: "正文" }], contextWindow: 1_024 };
+		const request = { systemPrompt: "S", tools: [], messages: [{ role: "user", content: "正文".repeat(100) }], contextWindow: 1_024 };
 		const base = budget.planRequest(request);
 		assert.equal(base.allowed, true);
 		const reserved = budget.planRequest({ ...request, contextWindow: base.ledger.total, outputReserve: 1 });
@@ -168,5 +173,20 @@ export async function runContextBudgetCases(runCase: RunCase): Promise<void> {
 		assert.equal(huge.chargeRead(hugeScope, 2).allowed, false);
 		assert.equal(huge.getRunBudget(hugeScope).readUsed, Number.MAX_SAFE_INTEGER - 1);
 		record("context.budget.arithmetic", { reserveEnforced: true, overflowBlocked: true, stateUnchanged: true });
+	});
+
+	await runCase("CONTEXT-BUDGET-11 estimator is conservative for multilingual text without byte-token inflation", (record) => {
+		const budget = createContextBudget({ defaultOutputReserve: 0, defaultSafetyMargin: 0 });
+		const ascii = budget.checkPayload({ text: "a".repeat(3_000) }, 10_000);
+		const cjk = budget.checkPayload({ text: "汉".repeat(1_000) }, 10_000);
+		const emoji = budget.checkPayload({ text: "🌊".repeat(1_000) }, 10_000);
+		assert.ok(ascii.ledger.inputEstimate >= 1_000);
+		assert.ok(cjk.ledger.inputEstimate >= 2_000);
+		assert.ok(emoji.ledger.inputEstimate >= 2_600);
+		for (const result of [ascii, cjk, emoji]) {
+			assert.ok(result.ledger.inputEstimate < result.ledger.rawInputBytes);
+			assert.equal(result.ledger.total, result.ledger.inputEstimate);
+		}
+		record("context.budget.units", { providerExact: false, bytesTrackedSeparately: true });
 	});
 }

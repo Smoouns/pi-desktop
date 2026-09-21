@@ -1,5 +1,10 @@
 import { access, lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
+
+// Bind verification to the exact bytes read, including BOM/EOL and contracts.
+// A fresh receipt can be revalidated without trusting model-declared hashes.
+const verificationSources = new Map<string, string>();
 
 type Scalar = string | number | boolean | null;
 type YamlValue = Scalar | YamlValue[] | { [key: string]: YamlValue };
@@ -209,7 +214,13 @@ async function assertNoLinkedSegments(root: string, member: string, label: strin
 
 async function safeRead(root: string, member: string, label: string): Promise<string> {
 	await assertNoLinkedSegments(root, member, label);
-	return (await readFile(member, "utf8")).replace(/^\uFEFF/, "");
+	const raw = await readFile(member);
+	const relative = normalized(path.relative(root, member));
+	const digest = createHash("sha256").update(raw).digest("hex");
+	const previous = verificationSources.get(relative);
+	if (previous && previous !== digest) throw new ContractError("Source changed during verification: " + relative);
+	verificationSources.set(relative, digest);
+	return raw.toString("utf8").replace(/^\uFEFF/, "");
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -357,7 +368,8 @@ function narrativeUnits(scenes: Record<string, string>, minimum: number, maxPart
 
 function makeReport(chapter: string, mode: string, source: string, total: number | null, target: number | null, sceneCounts: Record<string, number>, contract: Contract | null, failures: Issue[], warnings: Warning[]): string {
 	const status = failures.length ? "FAIL" : warnings.length ? "PASS_WITH_WARNINGS" : "PASS";
-	const lines = ["---", "chapter: " + chapter, "mode: " + mode, "source_text: " + source, "verification_status: " + status, "generator: pi-desktop-verify-novel-chapter/v2", "generated_at: " + new Date().toISOString(), "body_chars: " + (total ?? "unavailable"), "---", "", "# 第 " + chapter + " 章机械验证报告", ""];
+	const sources = [...verificationSources].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([path, sha256]) => ({ path, sha256 }));
+	const lines = ["---", "chapter: " + chapter, "mode: " + mode, "source_text: " + source, "source_sha256: " + (verificationSources.get(source) ?? "unavailable"), "verification_sources: " + JSON.stringify(sources), "verification_status: " + status, "generator: pi-desktop-verify-novel-chapter/v3", "generated_at: " + new Date().toISOString(), "body_chars: " + (total ?? "unavailable"), "---", "", "# 第 " + chapter + " 章机械验证报告", ""];
 	if (target !== null && total !== null) lines.push("目标字符数（仅供参考）：" + target + "，偏差 " + (total - target >= 0 ? "+" : "") + (total - target) + "。", "");
 	if (Object.keys(sceneCounts).length) { lines.push("## 场景计数", ""); for (const [id, count] of Object.entries(sceneCounts)) lines.push("- " + id + "：" + count + (contract?.required[id] ? " / 最低 " + contract.required[id].minChars : "")); lines.push(""); }
 	if (failures.length) { lines.push("## 失败原因", ""); for (const item of failures) lines.push("- [" + item.code + "] " + item.message); lines.push(""); }

@@ -88,6 +88,13 @@ export async function runVerifierCases(runCase: RunCase): Promise<void> {
 		assert.match(dryRun.stdout, /^chapter: 002$/m);
 		assert.match(dryRun.stdout, /^source_text: drafts\/candidates\/chapters\/002\.md$/m);
 		assert.match(dryRun.stdout, /^verification_status: PASS$/m);
+		assert.match(dryRun.stdout, new RegExp(`^source_sha256: ${sourceSha}$`, "m"));
+		const sourcesLine = dryRun.stdout.match(/^verification_sources: (.+)$/m);
+		assert.ok(sourcesLine, "Verifier must bind the bytes actually read, not just a mutable path");
+		const sources = JSON.parse(sourcesLine[1]) as Array<{ path: string; sha256: string }>;
+		for (const member of [candidate, card, "planning/chapter-architecture.md", ".novel/project.json"]) {
+			assert.deepEqual(sources.find((item) => item.path === member), { path: member, sha256: initial[member] });
+		}
 		assert.deepEqual(await treeManifest(root), initial, "--no-write verifier must not mutate the project");
 
 		const written = await verify(root, false);
@@ -99,6 +106,23 @@ export async function runVerifierCases(runCase: RunCase): Promise<void> {
 		assert.equal(after[candidate], sourceSha, "PASS must not modify candidate prose");
 		await assert.rejects(access(path.join(root, "manuscript/chapters/002.md")), "PASS must not promote prose to Canon");
 		recordEvent("verifier.pass", { chapter: 2, exitCode: written.code, sourceSha, reportWritten: true, nonReportChanges: 0, acceptanceChanged: false, promoted: false });
+	}));
+
+	await runCase("P4-VFY raw byte fingerprints retain BOM and contract changes", (recordEvent) => withProject(async (root) => {
+		const filename = path.join(root, candidate);
+		await writeFile(filename, "\uFEFF" + await readFile(filename, "utf8"), "utf8");
+		const first = await verify(root);
+		assert.equal(first.code, 0, first.stdout);
+		const rawHash = sha256(await readFile(filename));
+		assert.match(first.stdout, new RegExp(`^source_sha256: ${rawHash}$`, "m"));
+		const before = JSON.parse(first.stdout.match(/^verification_sources: (.+)$/m)![1]);
+		await writeFile(path.join(root, card), (await readFile(path.join(root, card), "utf8")) + "\n", "utf8");
+		const second = await verify(root);
+		assert.equal(second.code, 0, second.stdout);
+		const after = JSON.parse(second.stdout.match(/^verification_sources: (.+)$/m)![1]);
+		assert.notDeepEqual(after, before, "Even semantically equivalent contract edits invalidate old verification receipts");
+		assert.match(second.stdout, new RegExp(`^source_sha256: ${rawHash}$`, "m"));
+		recordEvent("verifier.source_binding", { rawBytes: true, contractChanged: true, writes: 0 });
 	}));
 
 	await runCase("VFY-02", async (recordEvent) => {

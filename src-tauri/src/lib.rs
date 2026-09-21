@@ -1296,6 +1296,140 @@ fn get_created_at_ms(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
+fn structured_novel_role(entry: &serde_json::Value) -> Option<String> {
+    if entry.get("type").and_then(|value| value.as_str()) != Some("custom")
+        || entry.get("customType").and_then(|value| value.as_str()) != Some("pi-desktop-novel-role")
+    {
+        return None;
+    }
+
+    entry
+        .get("data")
+        .and_then(|data| data.get("role"))
+        .and_then(|role| role.as_str())
+        .filter(|role| matches!(*role, "world" | "plan" | "write"))
+        .map(ToOwned::to_owned)
+}
+
+#[derive(Default)]
+struct NovelRoleBranchTracker {
+    nodes: HashMap<String, (Option<String>, Option<String>)>,
+    active_leaf: Option<String>,
+}
+
+impl NovelRoleBranchTracker {
+    fn observe(&mut self, entry: &serde_json::Value) {
+        let Some(id) = entry
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return;
+        };
+        let parent_id = entry
+            .get("parentId")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|parent| !parent.is_empty())
+            .map(ToOwned::to_owned);
+        self.nodes
+            .insert(id.to_string(), (parent_id, structured_novel_role(entry)));
+        self.active_leaf = Some(id.to_string());
+    }
+
+    fn active_role(&self) -> Option<String> {
+        let mut current = self.active_leaf.clone();
+        let mut visited = HashSet::new();
+        while let Some(id) = current {
+            if !visited.insert(id.clone()) {
+                return None;
+            }
+            let Some((parent_id, role)) = self.nodes.get(&id) else {
+                return None;
+            };
+            if role.is_some() {
+                return role.clone();
+            }
+            current = parent_id.clone();
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod novel_role_session_tests {
+    use super::NovelRoleBranchTracker;
+    use serde_json::{json, Value};
+
+    fn active_role(entries: Vec<Value>) -> Option<String> {
+        let mut tracker = NovelRoleBranchTracker::default();
+        for entry in entries {
+            tracker.observe(&entry);
+        }
+        tracker.active_role()
+    }
+
+    #[test]
+    fn titles_and_message_prose_never_grant_a_novel_role() {
+        assert_eq!(
+            active_role(vec![
+                json!({"type":"session_info","id":"title","parentId":null,"name":"写作 Agent"}),
+                json!({"type":"message","id":"prompt","parentId":"title","message":{"role":"user","content":"请作为写文 agent 验证章节"}}),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn valid_structured_entry_grants_role_on_its_active_descendant_branch() {
+        assert_eq!(
+            active_role(vec![
+                json!({"type":"message","id":"root","parentId":null,"message":{"role":"user"}}),
+                json!({"type":"custom","id":"binding","parentId":"root","customType":"pi-desktop-novel-role","data":{"role":"write"}}),
+                json!({"type":"message","id":"leaf","parentId":"binding","message":{"role":"assistant"}}),
+            ]),
+            Some("write".to_string())
+        );
+    }
+
+    #[test]
+    fn role_from_a_sibling_branch_never_authorizes_the_active_branch() {
+        assert_eq!(
+            active_role(vec![
+                json!({"type":"message","id":"root","parentId":null}),
+                json!({"type":"custom","id":"world-binding","parentId":"root","customType":"pi-desktop-novel-role","data":{"role":"world"}}),
+                json!({"type":"message","id":"world-leaf","parentId":"world-binding"}),
+                json!({"type":"custom","id":"write-sibling","parentId":"root","customType":"pi-desktop-novel-role","data":{"role":"write"}}),
+                json!({"type":"message","id":"active-leaf","parentId":"world-leaf"}),
+            ]),
+            Some("world".to_string())
+        );
+    }
+
+    #[test]
+    fn newest_structured_binding_on_active_branch_wins_and_invalid_roles_are_ignored() {
+        assert_eq!(
+            active_role(vec![
+                json!({"type":"custom","id":"world","parentId":null,"customType":"pi-desktop-novel-role","data":{"role":"world"}}),
+                json!({"type":"custom","id":"invalid","parentId":"world","customType":"pi-desktop-novel-role","data":{"role":"admin"}}),
+                json!({"type":"custom","id":"plan","parentId":"invalid","customType":"pi-desktop-novel-role","data":{"role":"plan"}}),
+            ]),
+            Some("plan".to_string())
+        );
+    }
+
+    #[test]
+    fn role_values_are_exact_and_whitespace_does_not_authorize() {
+        assert_eq!(
+            active_role(vec![
+                json!({"type":"custom","id":"binding","parentId":null,"customType":"pi-desktop-novel-role","data":{"role":" write "}}),
+            ]),
+            None
+        );
+    }
+}
+
 fn parse_session_info(path: &Path) -> Option<SessionInfo> {
     let content = fs::read_to_string(path).ok()?;
 
@@ -1308,7 +1442,7 @@ fn parse_session_info(path: &Path) -> Option<SessionInfo> {
     let mut cwd: Option<String> = None;
     let mut tokens: u64 = 0;
     let mut cost: f64 = 0.0;
-    let mut novel_role: Option<String> = None;
+    let mut role_tracker = NovelRoleBranchTracker::default();
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -1319,6 +1453,8 @@ fn parse_session_info(path: &Path) -> Option<SessionInfo> {
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        role_tracker.observe(&entry);
 
         match entry.get("type").and_then(|t| t.as_str()) {
             Some("session") => {
@@ -1360,36 +1496,11 @@ fn parse_session_info(path: &Path) -> Option<SessionInfo> {
                     cost += message_cost;
                 }
             }
-            Some("custom") => {
-                if entry.get("customType").and_then(|v| v.as_str()) == Some("pi-desktop-novel-role") {
-                    let role = entry
-                        .get("data")
-                        .and_then(|data| data.get("role"))
-                        .and_then(|role| role.as_str())
-                        .map(str::trim)
-                        .filter(|role| matches!(*role, "world" | "plan" | "write"))
-                        .map(ToOwned::to_owned);
-                    if role.is_some() {
-                        novel_role = role;
-                    }
-                }
-            }
             _ => {}
         }
     }
 
-    // Older dedicated Novel sessions may only have the role in their title.
-    if novel_role.is_none() {
-        if let Some(session_name) = name.as_deref() {
-            if session_name.contains("世界观") {
-                novel_role = Some("world".to_string());
-            } else if session_name.contains("规划") {
-                novel_role = Some("plan".to_string());
-            } else if session_name.contains("写作") || session_name.contains("写文") {
-                novel_role = Some("write".to_string());
-            }
-        }
-    }
+    let novel_role = role_tracker.active_role();
 
     Some(SessionInfo {
         id,

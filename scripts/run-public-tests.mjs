@@ -11,7 +11,7 @@ const outputParent = path.join(root, "artifacts/harness");
 await mkdir(outputParent, { recursive: true });
 const work = await mkdtemp(path.join(outputParent, ".build-"));
 const mode = process.argv[2];
-assert.ok(mode === "harness" || mode === "regression", "Usage: run-public-tests.mjs harness|regression");
+assert.ok(["harness", "regression", "long-horizon"].includes(mode), "Usage: run-public-tests.mjs harness|regression|long-horizon");
 
 // Always use the installed, pinned loader. Bundled tests still resolve runtime packages
 // from this checkout, not a user's global Pi installation or home extensions.
@@ -60,8 +60,8 @@ async function fixtureBytes() {
 }
 
 try {
-	if (mode === "harness") {
-		execute(await bundle("tests/harness/run.ts", aliases));
+	if (mode === "harness" || mode === "long-horizon") {
+		execute(await bundle(mode === "harness" ? "tests/harness/run.ts" : "tests/harness/long-horizon-run.ts", aliases));
 	} else {
 		const before = await fixtureBytes();
 		const results = [];

@@ -9,9 +9,13 @@ import { createCheckpointStore } from "../harness/checkpoint-store.ts";
 import { createSourceVersioning } from "../harness/source-version.ts";
 import { createCheckpointInvalidation } from "../harness/invalidation.ts";
 import { createCheckpointRuntime } from "./checkpoint-runtime.ts";
+import { createRunSupervisor } from "../harness/run-supervisor.ts";
+import { createSupervisorRuntime } from "./supervisor-runtime.ts";
+import { createBudgetDiagnostics } from "./budget-diagnostics.ts";
+import { createContextMaintenance } from "./context-maintenance.ts";
 
 const NOVEL_TOOLS_EXTENSION_FILE = "pi-desktop-novel-tools.ts";
-const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v10";
+const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v15";
 const NOVEL_TOOLS_EXTENSION_MARKER_PREFIX = "pi-desktop-novel-tools-extension/";
 
 export const NOVEL_TOOLS_EXTENSION_CONTENT = `/**
@@ -22,6 +26,7 @@ export const NOVEL_TOOLS_EXTENSION_CONTENT = `/**
  * beneath that directory and every tool first requires .novel/project.json.
  */
 import { Type } from "@mariozechner/pi-ai";
+import { getAgentDir, SettingsManager } from "@mariozechner/pi-coding-agent";
 import { readFile, readdir, stat, lstat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import path from "node:path";
@@ -54,14 +59,142 @@ const sha = (text) => createHash("sha256").update(text).digest("hex");
 const observations = (${createObservationStore.toString()})({ digest: sha });
 const contextBudget = (${createContextBudget.toString()})({ defaultReadBudget: 16 * 1024 * 1024, defaultOutputBudget: 64 * 1024 });
 const rangeReader = (${createStoryRangeReader.toString()})();
+const createSupervisor = () => (${createRunSupervisor.toString()})({ digest: sha });
 const bytes = (text) => Buffer.byteLength(text, "utf8");
 const INLINE_BYTES = 6_000;
 const FILE_BYTES = 1_600_000;
 const requestLedgers = new Map();
+const budgetDiagnostics = (${createBudgetDiagnostics.toString()})();
+const maintenance = (${createContextMaintenance.toString()})();
+let contextGeneration = 0;
+let maintenanceBusy = false;
+let pressureTrim = false;
+let autoCompactionState = "idle";
+let postCompactionFailed = false;
+let lastContextSnapshot = null;
+let capacitySource = "model-config";
+let declaredCapacity = null;
+let lastBudgetDiagnostic = null;
+let appendBudgetDiagnostic;
 const processSession = randomUUID();
 let epoch = 0;
 let activeRun = null;
 let checkpoints;
+let supervisor;
+let supervisorGeneration = 0;
+
+function supervisorBaseScope(ctx) {
+	const root = path.resolve(projectRoot(ctx));
+	return { projectId: sha(process.platform === "win32" ? root.toLowerCase() : root), sessionId: ctx?.sessionManager?.getSessionId?.() || processSession, role: currentNovelRole(ctx) };
+}
+function statusText(snapshot) {
+	if (!snapshot) return "当前没有受监管的运行。提交一条新请求后开始。";
+	const labels = { RUNNING: "运行中", BLOCKED_USER: "等待用户处理", BLOCKED_PREREQUISITE: "前置条件不足", NO_PROGRESS: "无有效进展，已停止", CANCELLED: "已取消", FAILED: "运行失败", COMPLETED_CANDIDATE: "候选任务已完成" };
+	const guidance = { CORRUPT_RUN_STATUS: "运行记录损坏；请提交一条明确的新请求开始新一轮。", UNCHANGED_VERIFICATION: "正文、验证错误和新证据连续三次未变化；请人工调整策略后开始新一轮。", REPEATED_REPAIR_FAILURE: "同一修复错误重复出现；请检查参数或前置资料。", COMPLETION_NOT_VERIFIED: "本轮正常结束，但写作产物尚无当前版本的完整机械验证。", PENDING_OPERATIONS: "存在结果未确定的写入；请先读取目标文件核对，不要重放。", CHECKPOINT_NOT_READY: "检查点仍需重新验证；请重读失效来源并刷新检查点。" };
+	const diagnostic = diagnosticFor(snapshot);
+	const budgetGuidance = diagnostic ? budgetDiagnostics.format(diagnostic)
+		: snapshot.reasonCode === "CONTEXT_BUDGET" ? "旧记录没有保存具体预算失败原因；请更新扩展后重试一次以获取诊断，不能据此判断为历史过长。"
+		: budgetDiagnostics.sanitize({ version: 1, stage: "context-preflight", reason: snapshot.reasonCode?.toLowerCase() });
+	const detail = typeof budgetGuidance === "string" ? budgetGuidance : budgetGuidance ? budgetDiagnostics.format(budgetGuidance) : null;
+	return (labels[snapshot.state] || snapshot.state) + (snapshot.reasonCode ? "（" + snapshot.reasonCode + "）" : "") + "。" + (detail || guidance[snapshot.reasonCode] || (snapshot.state === "COMPLETED_CANDIDATE" ? "这不是用户验收或 Canon 晋升。" : snapshot.state === "RUNNING" ? "监管器正在检查预算、来源版本和验证进展。" : "提交新的明确请求可开始新一轮；不会自动恢复写入。"))
+		+ (snapshot.scope.role === null ? " 此旧会话尚未绑定职能；如需机械验证，请先执行 /novel-write，再检查并发送任务。" : "");
+}
+function showSupervisorStatus(ctx, snapshot, notify = false) {
+	const text = statusText(snapshot);
+	const labels = { RUNNING: "监管：运行中", BLOCKED_USER: "监管：等待用户", BLOCKED_PREREQUISITE: "监管：前置阻塞", NO_PROGRESS: "监管：无进展", CANCELLED: "监管：已取消", FAILED: "监管：失败", COMPLETED_CANDIDATE: "监管：候选完成" };
+	ctx?.ui?.setStatus?.("novel-supervisor", snapshot ? (snapshot.state === "RUNNING" ? labels.RUNNING : text) : undefined);
+	if (notify) ctx?.ui?.notify?.(text, snapshot?.state === "FAILED" || snapshot?.state === "NO_PROGRESS" ? "error" : "info");
+}
+
+function sameRunScope(left, right) {
+	return !!left && !!right && ["projectId", "sessionId", "role", "runId", "generation"].every((key) => left[key] === right[key]);
+}
+
+function resetContextMaintenance() {
+	contextGeneration++;
+	maintenanceBusy = false;
+	pressureTrim = false;
+	autoCompactionState = "idle";
+	postCompactionFailed = false;
+	lastContextSnapshot = null;
+	declaredCapacity = null;
+}
+async function inspectCapacity(ctx) {
+	// Read only numeric model metadata. Never serialize credentials or endpoints.
+	const generation = contextGeneration, model = ctx.model;
+	let source = "model-config";
+	try {
+		const config = JSON.parse(await readFile(path.join(getAgentDir(), "models.json"), "utf8"));
+		const provider = config.providers?.[model?.provider];
+		const definition = provider?.models?.find((item) => item.id === model?.id);
+		if (definition && definition.contextWindow === undefined && model?.contextWindow === 128000) source = "sdk-default";
+	} catch { /* Effective registry metadata remains the source, never guess a larger capacity. */ }
+	// Informational only: provider capabilities never expand the effective Pi
+	// working window or the per-request output limit from models.json.
+	let declaration = null;
+	try {
+		const target = path.join(getAgentDir(), "pi-desktop-model-capabilities.json");
+		const info = await stat(target);
+		if (info.isFile() && info.size <= 65536) {
+			const raw = await readFile(target);
+			if (raw.length <= 65536) {
+				const metadata = JSON.parse(raw.toString("utf8"));
+				if (metadata?.version === 1 && Array.isArray(metadata.models) && metadata.models.length <= 256) {
+					const matches = metadata.models.filter((item) => item?.provider === model?.provider && item?.id === model?.id);
+					const item = matches.length === 1 ? matches[0] : null;
+					const valid = (value) => Number.isSafeInteger(value) && value > 0 && value <= 1_000_000_000;
+					if (item?.source === "user-confirmed" && valid(item.contextWindow) && valid(item.maxOutputTokens)
+						&& item.contextWindow >= model.contextWindow && item.maxOutputTokens >= (model.maxTokens ?? 4096)) {
+						declaration = { declaredContextWindow: item.contextWindow, declaredMaxOutputTokens: item.maxOutputTokens, declaredSource: "user-confirmed" };
+					}
+				}
+			}
+		}
+	} catch { /* Missing or invalid display metadata cannot change budget enforcement. */ }
+	if (generation === contextGeneration && ctx.model?.id === model?.id && ctx.model?.provider === model?.provider) {
+		capacitySource = source;
+		declaredCapacity = declaration;
+	}
+}
+function publishContextBudget(ctx, plan, phase = "preflight", trimmedToolResults = 0, reason) {
+	if (!ctx.model || !plan?.ledger?.limit) return;
+	lastContextSnapshot = { version: 1, sessionId: ctx.sessionManager?.getSessionId?.() || processSession,
+		provider: ctx.model.provider, modelId: ctx.model.id,
+		capacity: { contextWindow: ctx.model.contextWindow, maxOutputTokens: ctx.model.maxTokens ?? 4096, source: capacitySource, verified: false, ...(declaredCapacity ?? {}) },
+		ledger: plan.ledger, estimator: "estimated_tokens", phase, trimmedToolResults,
+		autoCompaction: autoCompactionState, ...(reason ? { reason } : {}), measuredAt: Date.now() };
+	ctx.ui?.setStatus?.("pi-desktop-context-budget", JSON.stringify(lastContextSnapshot));
+}
+function diagnosticFor(snapshot) {
+	return snapshot && sameRunScope(lastBudgetDiagnostic?.scope, snapshot.scope)
+		&& lastBudgetDiagnostic.detail.reason.toUpperCase() === snapshot.reasonCode ? lastBudgetDiagnostic.detail : null;
+}
+function restoreBudgetDiagnostic(ctx, snapshot) {
+	lastBudgetDiagnostic = null;
+	if (!snapshot) return;
+	const branch = ctx?.sessionManager?.getBranch?.() ?? [];
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry?.type !== "custom" || entry.customType !== "pi-desktop-budget-diagnostic/v1" || !sameRunScope(entry.data?.scope, snapshot.scope)) continue;
+		const detail = budgetDiagnostics.sanitize(entry.data?.detail);
+		if (detail && detail.reason.toUpperCase() === snapshot.reasonCode) lastBudgetDiagnostic = { scope: { ...snapshot.scope }, detail };
+		break;
+	}
+}
+function blockBudgetRequest(ctx, run, reason, stage = "context-preflight", ledger = null) {
+	// Abort independently of persistence: extension-handler throws are swallowed by Pi.
+	ctx?.abort?.();
+	if (activeRun !== run) return;
+	const detail = budgetDiagnostics.from(reason, stage, ledger);
+	const snapshot = supervisor.stop("BLOCKED_PREREQUISITE", detail.reason.toUpperCase());
+	if (snapshot && sameRunScope(snapshot.scope, run.scope) && snapshot.reasonCode === detail.reason.toUpperCase()) {
+		lastBudgetDiagnostic = { scope: { ...run.scope }, detail };
+		try { appendBudgetDiagnostic(lastBudgetDiagnostic); }
+		finally { showSupervisorStatus(ctx, snapshot, true); }
+	} else if (!snapshot) {
+		ctx.ui?.setStatus?.("novel-supervisor", budgetDiagnostics.format(detail));
+	}
+}
 
 function toolError(kind, code, message) {
 	return Object.assign(new Error(message), { kind, code });
@@ -77,14 +210,15 @@ function endRun() {
 	activeRun = null;
 	epoch++;
 }
-function currentRun(ctx) {
+function currentRun(ctx, desiredScope = null) {
 	const root = path.resolve(projectRoot(ctx));
 	const projectId = sha(process.platform === "win32" ? root.toLowerCase() : root);
 	const sessionId = ctx?.sessionManager?.getSessionId?.() || processSession;
 	const role = currentNovelRole(ctx);
 	if (!activeRun || activeRun.scope.projectId !== projectId || activeRun.scope.sessionId !== sessionId || activeRun.scope.role !== role) {
 		endRun();
-		activeRun = { scope: { projectId, sessionId, runId: randomUUID(), generation: epoch, role }, controller: new AbortController(), builtinReads: new Map(), builtinCalls: new Set(), contextOutputs: new Map() };
+		const scope = desiredScope && desiredScope.projectId === projectId && desiredScope.sessionId === sessionId && desiredScope.role === role ? desiredScope : { projectId, sessionId, runId: randomUUID(), generation: epoch, role };
+		activeRun = { scope, controller: new AbortController(), builtinReads: new Map(), builtinCalls: new Set(), contextOutputs: new Map() };
 		contextBudget.beginRun(activeRun.scope);
 	}
 	activeRun.ctx = ctx;
@@ -98,6 +232,10 @@ const failureResult = (error, extra = {}) => {
 function registerReliableTool(pi, definition) {
 	pi.registerTool({ ...definition, async execute(id, params, signal, onUpdate, ctx) {
 		const run = currentRun(ctx);
+		let supervision;
+		try { supervision = supervisor.tool(id, definition.name); }
+		catch { throw toolError("precondition", "SUPERVISOR_PERSISTENCE", "运行监管状态无法持久化，已禁止继续调用工具。"); }
+		if (!supervision.allowed && supervision.snapshot) throw toolError("precondition", "RUN_STOPPED", statusText(supervision.snapshot));
 		const combined = signal ? AbortSignal.any([signal, run.controller.signal]) : run.controller.signal;
 		let pendingOperation;
 		const execution = await toolRuntime.execute({
@@ -118,6 +256,7 @@ function registerReliableTool(pi, definition) {
 		if (definition.name === "verify_chapter" && pendingOperation) await pendingOperation;
 		const metadata = { scope: { ...run.scope }, attempts: execution.attempts, actions: execution.actions };
 		if (!execution.result.ok) {
+			if (supervisor.snapshot()?.scope.runId === run.scope.runId && !(definition.name === "verify_chapter" && execution.result.error.kind === "validation")) supervisor.failure(execution.result.error);
 			let result = failureResult(execution.result.error, metadata);
 			if (activeRun === run && !run.controller.signal.aborted && !run.readBudgetFailure) {
 				try {
@@ -246,7 +385,13 @@ function boundToolOutput(value, toolName, toolCallId, run) {
 	}
 	const charged = contextBudget.chargeOutput(run.scope, bytes(JSON.stringify(result.content)));
 	if (!charged.allowed) throw toolError("precondition", "OUTPUT_BUDGET", "本轮工具结果累计预算已用尽；请缩小任务范围。观察记录仍可在后续运行按 ID 重读。");
-	if (!value.isError && result.details?.observation?.sourceRefs?.length) checkpoints.observe(run.ctx, run, result.details.observation.sourceRefs.map((ref) => ({ ...ref, path: process.platform === "win32" ? ref.path.toLowerCase() : ref.path })), result.details.observation.id);
+	if (!value.isError && result.details?.observation?.sourceRefs?.length) {
+		checkpoints.observe(run.ctx, run, result.details.observation.sourceRefs.map((ref) => ({ ...ref, path: process.platform === "win32" ? ref.path.toLowerCase() : ref.path })), result.details.observation.id);
+		if (supervisor.snapshot()?.scope.runId === run.scope.runId) for (const ref of result.details.observation.sourceRefs) {
+			const evidencePath = process.platform === "win32" ? ref.path.toLowerCase() : ref.path;
+			if (!evidencePath.startsWith("planning/verifications/")) supervisor.evidence(JSON.stringify([evidencePath, ref.sha256, ref.startLine ?? null, ref.endLine ?? null, ref.authority ?? null, ref.temporal ?? null, ref.memoryId ?? null]));
+		}
+	}
 	return result;
 }
 function budgetOwner(scope) { return JSON.stringify([scope.projectId, scope.sessionId, scope.role]); }
@@ -466,19 +611,70 @@ function isRoleWriteAllowed(role, relativePath) {
 }
 
 async function fileVersion(root, relativePath) {
-	const target = await secureStoryPath(root, relativePath, true);
 	const run = activeRun;
+	const target = await secureStoryPath(root, relativePath, true);
+	if (run) assertRun(run);
 	try {
 		const info = await stat(target);
+		if (run) assertRun(run);
 		if (!info.isFile() || info.size > FILE_BYTES) throw toolError("precondition", "FINGERPRINT_LIMIT", "目标文件超出有界指纹读取范围。");
 		if (run) chargeRead(run, info.size);
 		const raw = await readFile(target);
 		if (run) assertRun(run);
-		if (run && raw.length > info.size) chargeRead(run, raw.length - info.size);
 		if (raw.length > FILE_BYTES) throw toolError("precondition", "FINGERPRINT_LIMIT", "指纹读取期间目标文件超出范围。");
+		if (run && raw.length > info.size) chargeRead(run, raw.length - info.size);
 		return { hash: sha(raw), text: raw.toString("utf8") };
 	}
 	catch (error) { if (error?.code === "ENOENT") return { hash: null, text: null }; throw error; }
+}
+
+async function verifierReceipt(root, reportTarget, callId, run) {
+	if (!run || supervisor.snapshot()?.scope.runId !== run.scope.runId) return null;
+	const target = await secureStoryPath(root, reportTarget);
+	assertRun(run);
+	const reportInfo = await stat(target);
+	assertRun(run);
+	if (!reportInfo.isFile() || reportInfo.size > FILE_BYTES) throw toolError("precondition", "VERIFIER_METADATA_INVALID", "验证报告超过安全读取上限。");
+	chargeRead(run, reportInfo.size);
+	const reportRaw = await readFile(target);
+	assertRun(run);
+	if (reportRaw.length > FILE_BYTES) throw toolError("precondition", "VERIFIER_METADATA_INVALID", "验证报告读取期间超过安全上限。");
+	if (reportRaw.length > reportInfo.size) chargeRead(run, reportRaw.length - reportInfo.size);
+	const raw = reportRaw.toString("utf8");
+	const field = (name) => raw.match(new RegExp("^" + name + ":\\\\s*(.+)$", "m"))?.[1]?.trim() ?? null;
+	const rawSourceText = field("source_text"), sourceSha = field("source_sha256"), mode = field("mode"), status = field("verification_status"), sourceList = field("verification_sources");
+	const sourceText = typeof rawSourceText === "string" ? normalized(rawSourceText) : rawSourceText;
+	if (!sourceText || !/^[0-9a-f]{64}$/i.test(sourceSha || "") || !sourceList) throw toolError("precondition", "VERIFIER_METADATA_MISSING", "验证报告缺少可核验的来源 SHA；请更新项目验证器并重新运行完整验证。");
+	let sources;
+	try { sources = JSON.parse(sourceList); } catch { throw toolError("precondition", "VERIFIER_METADATA_INVALID", "验证报告的 verification_sources 无法解析。"); }
+	if (!Array.isArray(sources) || !sources.length || sources.length > 128) throw toolError("precondition", "VERIFIER_METADATA_INVALID", "验证报告没有有效的有界来源版本清单。");
+	const seenPaths = new Set();
+	for (const item of sources) {
+		if (!item || typeof item.path !== "string" || !/^[0-9a-f]{64}$/i.test(item.sha256 || "")) throw toolError("precondition", "VERIFIER_METADATA_INVALID", "验证来源条目无效。");
+		item.path = normalized(item.path);
+		const identityPath = process.platform === "win32" ? item.path.toLowerCase() : item.path;
+		if (seenPaths.has(identityPath)) throw toolError("precondition", "VERIFIER_METADATA_INVALID", "验证来源路径重复。");
+		seenPaths.add(identityPath);
+		const actual = await fileVersion(root, item.path);
+		assertRun(run);
+		if (actual.hash !== item.sha256.toLowerCase()) throw toolError("stale_source", "VERIFICATION_STALE", "验证后来源已变化：" + item.path + "。请重新运行验证。");
+	}
+	const sourceIdentity = process.platform === "win32" ? sourceText.toLowerCase() : sourceText;
+	const source = sources.find((item) => (process.platform === "win32" ? item.path.toLowerCase() : item.path) === sourceIdentity);
+	if (!source || source.sha256.toLowerCase() !== sourceSha.toLowerCase()) throw toolError("precondition", "VERIFIER_SOURCE_MISMATCH", "验证正文 SHA 与来源清单不一致。");
+	const subjectPath = sourceIdentity;
+	const failureSection = raw.match(/^## 失败原因\\s*$([\\s\\S]*?)(?=^## |(?![\\s\\S]))/m)?.[1] ?? "";
+	const failures = [...failureSection.matchAll(/^- \\[([^\\]]+)\\] (.+)$/gm)].map((match) => "[" + match[1].trim() + "] " + match[2].trim()).sort();
+	const passed = status === "PASS" || status === "PASS_WITH_WARNINGS";
+	const receipt = { callId, subject: subjectPath, artifactSha256: sourceSha.toLowerCase(), errorDigest: failures.length ? sha(JSON.stringify(failures)) : null, passed, full: mode === "full" };
+	supervisor.artifact(subjectPath, sourceSha.toLowerCase());
+	for (const item of sources) { const evidencePath = process.platform === "win32" ? item.path.toLowerCase() : item.path; if (!evidencePath.startsWith("planning/verifications/")) supervisor.evidence(JSON.stringify([evidencePath, item.sha256.toLowerCase(), null, null])); }
+	checkpoints.observe(run.ctx, run, sources.map((item) => ({ path: process.platform === "win32" ? item.path.toLowerCase() : item.path, sha256: item.sha256.toLowerCase(), authority: "reference", temporal: "unspecified" })), "verification:" + callId);
+	run.pendingVerifications ??= [];
+	run.pendingVerifications.push({ ...receipt, sources: sources.map((item) => ({ path: process.platform === "win32" ? item.path.toLowerCase() : item.path, sha256: item.sha256.toLowerCase() })) });
+	run.verificationSources ??= new Map();
+	run.verificationSources.set(subjectPath, sources.map((item) => ({ path: process.platform === "win32" ? item.path.toLowerCase() : item.path, sha256: item.sha256.toLowerCase() })));
+	return receipt;
 }
 
 function expectedEdit(text, input) {
@@ -491,6 +687,11 @@ function expectedEdit(text, input) {
 }
 
 export default function (pi) {
+	appendBudgetDiagnostic = (diagnostic) => pi.appendEntry("pi-desktop-budget-diagnostic/v1", diagnostic);
+	supervisor = (${createSupervisorRuntime.toString()})({
+		createSupervisor,
+		append: (snapshot) => pi.appendEntry("pi-desktop-run-status/v1", snapshot),
+	});
 	checkpoints = (${createCheckpointRuntime.toString()})({
 		store: (${createCheckpointStore.toString()})({ digest: sha }),
 		versions: (${createSourceVersioning.toString()})(),
@@ -526,17 +727,135 @@ export default function (pi) {
 			return { sha256, authority: "reference", temporal: "unspecified" };
 		},
 	});
-	for (const event of ["session_switch", "session_fork", "session_tree", "session_shutdown"]) pi.on(event, async () => { endRun(); checkpoints.reset(); });
-	pi.on("agent_end", async () => endRun());
-	pi.on("agent_start", async (_event, ctx) => { endRun(); currentRun(ctx); });
+	const restoreSupervisor = async (ctx) => {
+		try { await loadProject(ctx); }
+		catch { supervisor.disable(); lastBudgetDiagnostic = null; showSupervisorStatus(ctx, null); return null; }
+		supervisorGeneration++;
+		const snapshot = supervisor.restore(ctx?.sessionManager?.getBranch?.() ?? [], supervisorBaseScope(ctx), supervisorGeneration);
+		restoreBudgetDiagnostic(ctx, snapshot);
+		showSupervisorStatus(ctx, snapshot);
+		return snapshot;
+	};
+	const planMessages = (ctx, messages) => {
+		let reason = "budget_model_unavailable";
+		try {
+			if (!ctx.model) throw new Error(reason);
+			reason = "budget_tool_registry_unavailable";
+			const names = pi.getActiveTools(), all = pi.getAllTools();
+			if (!Array.isArray(names) || !Array.isArray(all)) throw new Error(reason);
+			const active = new Set(names);
+			reason = "budget_tool_schema_unavailable";
+			const tools = all.filter((tool) => active.has(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters }));
+			if (tools.length !== active.size || tools.some((tool) => !tool.parameters || typeof tool.parameters !== "object" || typeof tool.description !== "string")) throw new Error(reason);
+			reason = "budget_system_prompt_unavailable";
+			const systemPrompt = ctx.getSystemPrompt();
+			if (typeof systemPrompt !== "string") throw new Error(reason);
+			return contextBudget.planRequest({ systemPrompt, tools, messages,
+				messageKinds: messages.map((message) => message.customType === "novel-task-checkpoint" ? "checkpoint" : message.role === "toolResult" ? "observation_preview" : message.customType === "novel-request-context" ? "new_evidence" : "history"),
+				contextWindow: ctx.model.contextWindow, outputReserve: ctx.model.maxTokens ?? 4096, safetyMargin: 4096 });
+		} catch { return { allowed: false, reason, ledger: null }; }
+	};
+	const pendingToolNames = (checkpoint) => (checkpoint?.pendingOperations ?? [])
+		.filter((op) => !["completed", "failed", "cancelled"].includes(op.state)).map((op) => op.toolName);
+	const projectInput = (ctx, text, images = []) => {
+		const entries = ctx.sessionManager?.getBranch?.() ?? [];
+		let messages = maintenance.reconstructActiveMessages(entries);
+		const historyCount = messages.length;
+		const checkpoint = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === "pi-desktop-task-checkpoint")?.data;
+		if (checkpoint) messages.push({ role: "custom", customType: "novel-task-checkpoint", content: JSON.stringify(maintenance.projectCheckpoint(checkpoint, messages)), timestamp: 0 });
+		messages.push({ role: "user", content: [{ type: "text", text }, ...images], timestamp: 0 });
+		const initial = planMessages(ctx, messages);
+		const needsTrim = pressureTrim || initial.reason === "model_input_budget_exceeded" || (initial.allowed && initial.ledger.total > initial.ledger.limit * 0.85);
+		const trimmed = needsTrim ? maintenance.trimOldToolResults(messages, { maxInlineBytes: 1500, pendingToolNames: pendingToolNames(checkpoint) }) : { messages, trimmed: [] };
+		return { plan: planMessages(ctx, trimmed.messages), trimmed: trimmed.trimmed.length, checkpoint, historyCount };
+	};
+	pi.on("input", async (event, ctx) => {
+		if (!supervisor.snapshot()) await restoreSupervisor(ctx);
+		if (supervisor.snapshot()) supervisor.markExplicitInput(event.source);
+		// Never intercept steering, extension follow-ups or a live tool batch.
+		if (event.source === "extension" || !ctx.isIdle?.() || ctx.hasPendingMessages?.() || !ctx.model) return;
+		// The extension UI can restore text but not image attachments after a
+		// handled input. Preserve multimodal submissions byte-for-byte by leaving
+		// them on Pi's original path; final context/media budget checks still gate
+		// provider dispatch.
+		if (Array.isArray(event.images) && event.images.length) return;
+		try { await loadProject(ctx); } catch { return; }
+		if (maintenanceBusy) { ctx.ui?.notify?.("上下文正在压缩，请完成后再发送。", "info"); return { action: "handled" }; }
+		const generation = contextGeneration, scope = JSON.stringify(supervisorBaseScope(ctx));
+		const modelKey = JSON.stringify([ctx.model.provider, ctx.model.id]);
+		const owns = () => generation === contextGeneration && scope === JSON.stringify(supervisorBaseScope(ctx)) && modelKey === JSON.stringify([ctx.model?.provider, ctx.model?.id]);
+		await inspectCapacity(ctx);
+		if (!owns()) return { action: "handled" };
+		if (maintenanceBusy) { ctx.ui?.notify?.("上下文正在压缩，请完成后再发送。", "info"); return { action: "handled" }; }
+		autoCompactionState = "idle";
+		ctx.ui?.setStatus?.("novel-context-maintenance", undefined);
+		let projected = projectInput(ctx, event.text, event.images);
+		if (projected.trimmed) pressureTrim = true;
+		publishContextBudget(ctx, projected.plan, projected.trimmed ? "after-tool-trim" : "preflight", projected.trimmed);
+		// Final context hook remains the hard gate (skills expand after input).
+		if (!projected.plan.ledger || (projected.plan.reason && projected.plan.reason !== "model_input_budget_exceeded") || projected.plan.ledger.total <= projected.plan.ledger.limit * 0.85) return;
+		if (projected.historyCount < 2) return;
+		try {
+			const settings = SettingsManager.create(ctx.cwd, getAgentDir());
+			if (settings.drainErrors?.().length) throw new Error("Invalid settings");
+			if (!settings.getCompactionEnabled()) return;
+		}
+		catch { ctx.ui?.setEditorText?.(stripNovelContext({ role: "user", content: event.text }).message.content); ctx.ui?.notify?.("无法读取自动压缩设置，本次请求未发送。请检查 Pi 设置。", "error"); return { action: "handled" }; }
+		if (pendingToolNames(projected.checkpoint).length || typeof ctx.compact !== "function") return;
+		maintenanceBusy = true;
+		postCompactionFailed = false;
+		autoCompactionState = "running";
+		publishContextBudget(ctx, projected.plan, "preflight", projected.trimmed);
+		ctx.ui?.setStatus?.("novel-context-maintenance", "上下文接近上限，正在自动压缩…");
+		let error = null;
+		try {
+			await new Promise((resolve, reject) => ctx.compact({ onComplete: resolve, onError: reject }));
+		} catch (caught) { error = caught; }
+		if (!owns()) {
+			if (generation === contextGeneration) { maintenanceBusy = false; ctx.ui?.setStatus?.("novel-context-maintenance", undefined); }
+			return { action: "handled" };
+		}
+		if (postCompactionFailed) error = new Error("压缩后检查点未通过安全检查");
+		maintenanceBusy = false;
+		ctx.ui?.setStatus?.("novel-context-maintenance", undefined);
+		autoCompactionState = error ? "failed" : "completed";
+		projected = projectInput(ctx, event.text, event.images);
+		publishContextBudget(ctx, projected.plan, error || !projected.plan.allowed ? "blocked" : "after-compact", projected.trimmed, error ? "自动压缩失败；未发送本次请求" : undefined);
+		if (error || !projected.plan.allowed) {
+			// Preserve the unsent request in the editor. No synthetic user message,
+			// no replay, no second compaction attempt for this submission.
+			ctx.ui?.setEditorText?.(stripNovelContext({ role: "user", content: event.text }).message.content);
+			const message = error ? "自动压缩未完成，本次请求未发送，已恢复到输入框。可手动压缩或开启新会话；不会自动重试。" : budgetDiagnostics.format(budgetDiagnostics.from(projected.plan.reason, "context-preflight", projected.plan.ledger));
+			ctx.ui?.setStatus?.("novel-context-maintenance", message);
+			ctx.ui?.notify?.(message, "error");
+			return { action: "handled" };
+		}
+		// Let Pi continue the SAME original input exactly once.
+	});
+	for (const event of ["session_switch", "session_fork", "session_tree"]) pi.on(event, async (_event, ctx) => { resetContextMaintenance(); endRun(); checkpoints.reset(); await restoreSupervisor(ctx); });
+	pi.on("model_select", async (_event, ctx) => { resetContextMaintenance(); await inspectCapacity(ctx); });
+	pi.on("session_shutdown", async () => { resetContextMaintenance(); endRun(); checkpoints.reset(); });
+	pi.on("agent_start", async (_event, ctx) => {
+		try { await loadProject(ctx); } catch { supervisor.disable(); endRun(); showSupervisorStatus(ctx, null); return; }
+		const prior = supervisor.snapshot();
+		let run = activeRun;
+		const proposed = { ...supervisorBaseScope(ctx), runId: randomUUID(), generation: ++epoch };
+		const snapshot = supervisor.start(proposed);
+		if (!prior || snapshot?.scope.runId !== prior.scope.runId) { lastBudgetDiagnostic = null; endRun(); run = currentRun(ctx, snapshot?.scope ?? null); }
+		else if (!run) run = currentRun(ctx, snapshot?.scope ?? null);
+		showSupervisorStatus(ctx, snapshot);
+	});
 	pi.on("session_start", async (_event, ctx) => {
+		resetContextMaintenance();
 		endRun();
 		checkpoints.reset();
+		await restoreSupervisor(ctx);
+		await inspectCapacity(ctx);
 		const role = process.env.PI_DESKTOP_NOVEL_ROLE;
 		if (!role || !Object.prototype.hasOwnProperty.call(NOVEL_ROLE_WRITE_PATHS, role)) return;
 		const entries = ctx.sessionManager?.getBranch?.() ?? [];
-		const alreadyRecorded = entries.some((entry) => entry?.type === "custom" && entry.customType === "pi-desktop-novel-role" && entry.data?.role === role);
-		if (!alreadyRecorded) ctx.sessionManager?.appendCustomEntry?.("pi-desktop-novel-role", { role });
+		const latestRole = [...entries].reverse().find((entry) => entry?.type === "custom" && entry.customType === "pi-desktop-novel-role")?.data?.role;
+		if (latestRole !== role) pi.appendEntry("pi-desktop-novel-role", { role });
 	});
 	pi.on("session_before_compact", async (event, ctx) => {
 		try {
@@ -544,26 +863,27 @@ export default function (pi) {
 			try { await loadProject(ctx); } catch (error) { if (error.code === "NOVEL_PROJECT_MISSING") return; throw error; }
 			const run = checkpointRun(currentRun(ctx), event.signal);
 			if (event.signal?.aborted) return { cancel: true };
-			checkpoints.capture(ctx, run, "before_compact");
+			const checkpoint = checkpoints.capture(ctx, run, "before_compact");
+			if (pendingToolNames(checkpoint).length) throw new Error("存在未确定结果的写入，请先核对产物，不可自动重试。");
 			// Pi owns compaction. Its preparation object is shared with the native
 			// compactor in the pinned SDK: replace only tool payloads, preserving
 			// message order, tool pairs and every user instruction. Do not return a
 			// replacement compaction or mutate customInstructions.
 			for (const field of ["messagesToSummarize", "turnPrefixMessages"]) {
 				if (!Array.isArray(event.preparation?.[field])) continue;
-				event.preparation[field] = event.preparation[field].map((message) => message.role === "toolResult"
-					? { ...message, content: textResult("[工具观察已外置；内容不是 Canon，恢复后必须回源核验] " + JSON.stringify(message.details?.observation?.sourceRefs ?? [])).content, details: undefined }
-					: message);
+				event.preparation[field] = maintenance.trimOldToolResults(event.preparation[field], { maxInlineBytes: 1500 }).messages;
 			}
 		} catch (error) { ctx.ui?.notify?.("检查点未能安全保存，已取消压缩：" + error.message, "error"); return { cancel: true }; }
 	});
 	pi.on("session_compact", async (_event, ctx) => {
+		lastContextSnapshot = null;
 		try {
 			await loadProject(ctx);
 			const run = currentRun(ctx);
-			await checkpoints.inspect(ctx, run);
+			const status = await checkpoints.inspect(ctx, run);
+			if (status.error || status.blockedOperationIds?.length) throw new Error("压缩后检查点未通过安全检查");
 			checkpoints.capture(ctx, run, "after_compact");
-		} catch (error) { ctx?.abort?.(); ctx.ui?.notify?.("压缩后检查点核验失败；请查看检查点并重新读取来源。", "error"); }
+		} catch (error) { postCompactionFailed = true; ctx?.abort?.(); ctx.ui?.notify?.("压缩后检查点核验失败；请查看检查点并重新读取来源。", "error"); }
 	});
 
 	for (const [role, prompt] of Object.entries(NOVEL_ROLE_PROMPTS)) {
@@ -571,14 +891,46 @@ export default function (pi) {
 			description: "预填充 Novel " + role + " Agent 任务模板，不会自动提交",
 			handler: async (args, ctx) => {
 				if (!ctx.hasUI) return;
+				const injectedRole = process.env.PI_DESKTOP_NOVEL_ROLE;
+				if (injectedRole && Object.prototype.hasOwnProperty.call(NOVEL_ROLE_WRITE_PATHS, injectedRole) && injectedRole !== role) {
+					ctx.ui.notify("此会话已由 Desktop 绑定其他职能，请从小说工作流切换到对应 Agent 会话。", "error");
+					return;
+				}
 				const task = typeof args === "string" ? args.trim() : "";
-				ctx.sessionManager?.appendCustomEntry?.("pi-desktop-novel-role", { role });
+				pi.appendEntry("pi-desktop-novel-role", { role });
 				const text = (task ? "本次任务：\\n" + task : "本次任务：\\n");
 				ctx.ui.setEditorText(text);
 				ctx.ui.notify("已预填充 Novel " + role + " Agent 模板，请检查后提交。", "info");
 			},
 		});
 	}
+	pi.registerCommand("novel-run-status", {
+		description: "查看当前小说 Agent 运行监管状态（不会自动恢复任务）",
+		handler: async (_args, ctx) => {
+			const show = async (text) => {
+				// The Desktop deliberately suppresses native notifications while focused.
+				// Explicit inspection must use the RPC dialog channel, not a fleeting
+				// status/notify pair. Its response is ignored: this never resumes work,
+				// calls a model, appends a message or changes acceptance.
+				if (ctx.hasUI && typeof ctx.ui?.confirm === "function") await ctx.ui.confirm("小说运行状态", text);
+				else { ctx.ui?.setStatus?.("novel-supervisor", text); ctx.ui?.notify?.(text, "info"); }
+			};
+			try { await loadProject(ctx); } catch { await show("当前目录不是有效的小说项目。"); return; }
+			const snapshot = supervisor.snapshot(), base = supervisorBaseScope(ctx);
+			const current = snapshot && snapshot.scope.projectId === base.projectId && snapshot.scope.sessionId === base.sessionId && snapshot.scope.role === base.role ? snapshot : null;
+			await show(statusText(current));
+		},
+	});
+	pi.registerCommand("novel-context-status", {
+		description: "刷新当前上下文预算快照（本地计算，不调用模型）",
+		handler: async (_args, ctx) => {
+			if (!ctx.model) return;
+			try { await loadProject(ctx); } catch { return; }
+			await inspectCapacity(ctx);
+			const projected = projectInput(ctx, "");
+			publishContextBudget(ctx, projected.plan, projected.plan.allowed ? "preflight" : "blocked", projected.trimmed);
+		},
+	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		const role = currentNovelRole(ctx);
@@ -602,7 +954,7 @@ export default function (pi) {
 					break;
 				}
 			}
-			const messages = event.messages.map((message) => ({ ...stripNovelContext(message).message }));
+			let messages = event.messages.map((message) => ({ ...stripNovelContext(message).message }));
 			if (latestContext && latestUserIndex >= 0) messages.splice(latestUserIndex + 1, 0, {
 				customType: "novel-request-context",
 				content: latestContext,
@@ -615,15 +967,24 @@ export default function (pi) {
 			}
 			const run = currentRun(ctx);
 			contextRun = run;
+			const supervised = supervisor.snapshot();
+			if (supervised?.scope.runId === run.scope.runId) {
+				if (supervised.turns >= 32 && supervised.state === "RUNNING") supervisor.stop("FAILED", "MAX_TURNS");
+				const status = supervisor.snapshot();
+				if (status?.state !== "RUNNING") {
+					messages.push({ role: "custom", customType: "novel-run-status", display: false, timestamp: 0, content: statusText(status) });
+					ctx.abort();
+					return { messages };
+				}
+			}
 			const rawCheck = contextBudget.checkPayload(messages, Number.MAX_SAFE_INTEGER, 0, 0);
 			if (rawCheck.reason === "unsupported_media" || rawCheck.reason === "invalid_payload") {
 				rememberLedger(run.scope, { stage: "context-preflight", allowed: false, reason: rawCheck.reason, ledger: null });
-				ctx?.abort?.();
-				ctx.ui?.notify?.("当前请求包含无法计量的媒体或无效载荷，已停止；未删改原始内容。", "error");
+				blockBudgetRequest(ctx, run, rawCheck.reason);
 				return { messages };
 			}
 			let checkpointStatus = await checkpoints.inspect(ctx, run);
-			if (checkpointStatus.error) { ctx?.abort?.(); throw new Error(checkpointStatus.error); }
+			if (checkpointStatus.error) { supervisor.stop("BLOCKED_PREREQUISITE", "CHECKPOINT_ERROR"); ctx?.abort?.(); throw new Error(checkpointStatus.error); }
 			if (!checkpointStatus.checkpoint && messages.some((message) => message.role === "compactionSummary" || message.role === "branchSummary")) {
 				// Older or forked sessions have no compatible checkpoint. Reconstruct
 				// task constraints from this branch; never trust its inherited prose summary.
@@ -635,7 +996,15 @@ export default function (pi) {
 					if (messages[index].role === "compactionSummary" || messages[index].role === "branchSummary") messages[index] = { ...messages[index], summary: "原生摘要仅供会话存档，不作为当前事实；请依据版本检查点重新读取证据。" };
 				}
 				messages.push({ role: "custom", customType: "novel-task-checkpoint", display: false, timestamp: 0,
-					content: "结构化任务检查点（非 Canon；建议动作不是权限；用户原文按时间顺序保留，后续明确修订优先）：\\n" + JSON.stringify(checkpointStatus) });
+					content: "结构化任务检查点（非 Canon；建议动作不是权限；用户原文按时间顺序保留，后续明确修订优先；active-user-message 引用本上下文从 0 开始的消息序号，约束未删除）：\\n" + JSON.stringify({ ...checkpointStatus, checkpoint: maintenance.projectCheckpoint(checkpointStatus.checkpoint, messages) }) });
+			}
+			const pressurePlan = planMessages(ctx, messages);
+			let trimmedToolResults = 0;
+			if (pressureTrim || pressurePlan.reason === "model_input_budget_exceeded" || (pressurePlan.allowed && pressurePlan.ledger.total > pressurePlan.ledger.limit * 0.85)) {
+				const cleaned = maintenance.trimOldToolResults(messages, { maxInlineBytes: 1500, pendingToolNames: pendingToolNames(checkpointStatus.checkpoint) });
+				messages = cleaned.messages;
+				trimmedToolResults = cleaned.trimmed.length;
+				if (trimmedToolResults) pressureTrim = true;
 			}
 			const seen = new Set();
 			const checked = new Map();
@@ -672,30 +1041,24 @@ export default function (pi) {
 			assertRun(run);
 			if (run.readBudgetFailure) throw run.readBudgetFailure;
 			if (ctx?.model) {
-				let plan;
-				try {
-					const activeNames = pi.getActiveTools(), allTools = pi.getAllTools();
-					if (!Array.isArray(activeNames) || !Array.isArray(allTools)) throw new Error("Missing tool registry");
-					const active = new Set(activeNames);
-					const tools = allTools.filter((tool) => active.has(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters }));
-					if (tools.length !== active.size || tools.some((tool) => !tool.parameters || typeof tool.parameters !== "object" || typeof tool.description !== "string")) throw new Error("Missing active tool schema");
-					plan = contextBudget.planRequest({ systemPrompt: ctx.getSystemPrompt(), tools, messages,
-						messageKinds: messages.map((message) => message.customType === "novel-task-checkpoint" ? "checkpoint" : message.role === "toolResult" ? "observation_preview" : message.customType === "novel-request-context" ? "new_evidence" : "history"),
-						contextWindow: ctx.model.contextWindow, outputReserve: ctx.model.maxTokens ?? 4096, safetyMargin: 4096 });
-				} catch { plan = { allowed: false, reason: "budget_interface_unavailable", ledger: null }; }
+				const plan = planMessages(ctx, messages);
+				publishContextBudget(ctx, plan, !plan.allowed ? "blocked" : trimmedToolResults ? "after-tool-trim" : autoCompactionState === "completed" ? "after-compact" : "preflight", trimmedToolResults);
 				rememberLedger(run.scope, { stage: "context-preflight", allowed: plan.allowed, reason: plan.reason, ledger: plan.ledger });
 				if (!plan.allowed) {
 					// ExtensionRunner catches exceptions: an exception alone is NOT a gate.
 					// Abort before provider buildParams, especially for Google's abort check.
-					ctx.abort();
-					ctx.ui?.notify?.("请求预算不足或包含暂不支持计量的图片，已停止。请缩小任务、使用 /compact 或切换更大窗口模型；未删减用户指令。", "error");
+					blockBudgetRequest(ctx, run, plan.reason, "context-preflight", plan.ledger);
 				}
-			} else ctx?.abort?.();
+			} else blockBudgetRequest(ctx, run, "budget_model_unavailable");
 			return { messages };
 		} catch (error) {
 			// The extension runner swallows handler throws. Explicitly abort first,
 			// including unexpected serialization errors and cancelled-run races.
 			if (!contextRun || activeRun === contextRun) ctx?.abort?.();
+			if (contextRun && activeRun === contextRun && supervisor.snapshot()?.state === "RUNNING") {
+				const reason = { READ_BUDGET: "read_budget_exceeded", OUTPUT_BUDGET: "output_budget_exceeded", OUTPUT_CAPACITY: "output_capacity" }[error?.code] || "context_preflight_failed";
+				blockBudgetRequest(ctx, contextRun, reason, "context-preflight", contextBudget.getRunBudget(contextRun.scope));
+			}
 			throw error;
 		}
 	});
@@ -717,48 +1080,65 @@ export default function (pi) {
 		rememberLedger(run.scope, { ...previous, providerAudit: { allowed: check.allowed, reason: check.reason, ledger: check.ledger } });
 		// Final audit is defense in depth, NOT a portable no-HTTP gate: Google may
 		// already dispatch after a late abort. The context preflight above is primary.
-		if (!check.allowed) { ctx.abort(); ctx.ui?.notify?.("最终请求载荷超过预算，已请求停止；请缩小上下文。", "error"); }
+		if (!check.allowed) blockBudgetRequest(ctx, run, check.reason, "provider-audit", check.ledger);
 		return event.payload;
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		let callRun = null;
+		const ownsCall = () => { const status = supervisor.snapshot(); return !!callRun && activeRun === callRun && (!status || status.scope.runId === callRun.scope.runId); };
+		const deny = (kind, code, reason) => {
+			if (!ownsCall()) return { block: true, reason: "[cancelled] 原运行已结束；忽略迟到的工具阻断结果。" };
+			const status = supervisor.failure({ kind, code, signature: reason });
+			if (status && status.state !== "RUNNING") { showSupervisorStatus(ctx, status, true); ctx.abort(); }
+			return { block: true, reason };
+		};
 		let project;
 		try { project = await loadProject(ctx); } catch (error) {
 			if (error && typeof error === "object" && error.code === "NOVEL_PROJECT_MISSING") return;
 			if (["bash", "write", "edit", "read", "grep", "find", "ls"].includes(event.toolName)) return { block: true, reason: "[precondition] Novel Project metadata is invalid or unsafe; filesystem tools are blocked." };
 			return;
 		}
-		const callRun = currentRun(ctx);
+		callRun = currentRun(ctx);
+		let supervision;
+		try {
+			const status = supervisor.snapshot();
+			supervision = event.toolName === "get_run_status" && status?.state !== "RUNNING" ? { allowed: true, snapshot: status } : supervisor.tool(event.toolCallId, event.toolName);
+		}
+		catch { return { block: true, reason: "[run_status_persistence] 运行监管状态无法持久化，已禁止继续调用工具。" }; }
+		if (!supervision.allowed && supervision.snapshot) return { block: true, reason: "[run_stopped] " + statusText(supervision.snapshot) };
 		if (callRun.builtinCalls.size >= 4096) return { block: true, reason: "[precondition] 本轮工具调用记录已满，请开启新一轮。" };
 		callRun.builtinCalls.add(event.toolCallId);
 		if (event.toolName === "bash") {
-			return { block: true, reason: "Novel Agent 禁止使用 bash；请使用受角色权限限制的文件工具。" };
+			return deny("permission", "BASH_DENIED", "Novel Agent 禁止使用 bash；请使用受角色权限限制的文件工具。");
 		}
 		if (["read", "grep", "find", "ls"].includes(event.toolName)) {
 			const candidate = event.input?.path;
 			if (event.toolName !== "read" && (candidate === undefined || candidate === "." || candidate === project.root)) return;
 			const relativePath = await projectRelativeWritePath(project.root, candidate);
-			if (!relativePath) return { block: true, reason: "[permission] Novel Agent 读取路径必须位于当前项目内，且不能经过符号链接。" };
+			if (!ownsCall()) return { block: true, reason: "[cancelled] 原运行已结束。" };
+			if (!relativePath) return deny("permission", "READ_PATH_DENIED", "[permission] Novel Agent 读取路径必须位于当前项目内，且不能经过符号链接。");
 			if (event.toolName === "read") {
 				const run = currentRun(ctx);
 				try {
 					const source = await readStoryFile(project.root, relativePath, {}, run);
 					run.builtinReads.set(event.toolCallId, source.sources);
-				} catch (error) { return { block: true, reason: "[precondition] " + error.message }; }
+				} catch (error) { const failure = classifyError(error); return deny(failure.kind === "invalid_input" || failure.kind === "stale_source" ? failure.kind : "precondition", failure.code || "READ_GATE", "[precondition] " + failure.message); }
 			}
 			return;
 		}
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
 		const role = currentNovelRole(ctx);
 		if (!role) {
-			return { block: true, reason: "Novel Agent 写入需要通过 /novel-world、/novel-plan、/novel-write 或 /novel-review 选择角色。" };
+			return deny("permission", "ROLE_REQUIRED", "Novel Agent 写入需要通过 /novel-world、/novel-plan、/novel-write 或 /novel-review 选择角色。");
 		}
 		const relativePath = await projectRelativeWritePath(project.root, event.input?.path);
+		if (!ownsCall()) return { block: true, reason: "[cancelled] 原运行已结束。" };
 		if (!relativePath) {
-			return { block: true, reason: "Novel Agent 只能写入当前小说项目内的明确文件路径。" };
+			return deny("permission", "WRITE_PATH_DENIED", "Novel Agent 只能写入当前小说项目内的明确文件路径。");
 		}
 		if (!isRoleWriteAllowed(role, relativePath)) {
-			return { block: true, reason: "Novel " + role + " Agent 无权写入 " + relativePath + "。Canon、manuscript、.novel 及其他非提案目录只能由受控工作流修改。" };
+			return deny("permission", "ROLE_WRITE_DENIED", "Novel " + role + " Agent 无权写入 " + relativePath + "。Canon、manuscript、.novel 及其他非提案目录只能由受控工作流修改。");
 		}
 		const run = currentRun(ctx);
 		try {
@@ -768,9 +1148,15 @@ export default function (pi) {
 			const args = event.toolName === "write" ? [event.input.content] : [event.input.oldText, event.input.newText, event.input.edits];
 			const ledgerTarget = process.platform === "win32" ? relativePath.toLowerCase() : relativePath;
 			const checkpointBlock = await checkpoints.writeGate(ctx, run, { target: ledgerTarget, argsDigest: sha(JSON.stringify(args)), toolName: event.toolName, operationId: event.toolCallId });
-			if (checkpointBlock) return { block: true, reason: checkpointBlock };
+			if (!ownsCall()) return { block: true, reason: "[cancelled] 原运行已结束。" };
+			if (checkpointBlock?.startsWith("[reconciled]")) return { block: true, reason: checkpointBlock };
+			if (checkpointBlock) return deny(checkpointBlock.startsWith("[stale_source]") ? "stale_source" : checkpointBlock.startsWith("[unknown_outcome]") ? "unknown_outcome" : "precondition", "CHECKPOINT_BLOCKED", checkpointBlock);
 			const decision = operations.prepare({ scope: run.scope, toolCallId: event.toolCallId, toolName: event.toolName, target: ledgerTarget, preHash: before.hash, expectedPostHash, argsDigest: sha(JSON.stringify(args)) }, before.hash);
-			if (decision.action !== "dispatch") return { block: true, reason: decision.action === "satisfied" ? "[reconciled] 目标内容已满足 (satisfied)，未重复执行写入。请继续下一步。" : decision.reason === "repair-required" ? "[invalid_input] 上次调用已明确失败；请修正参数后重试，不要重复相同输入。" : "[unknown_outcome] 写入结果尚未解决，禁止重放：" + decision.reason };
+			if (decision.action !== "dispatch") {
+				if (decision.action === "satisfied") return { block: true, reason: "[reconciled] 目标内容已满足 (satisfied)，未重复执行写入。请继续下一步。" };
+				if (decision.reason === "repair-required") return deny("invalid_input", "WRITE_REPAIR_REQUIRED", "[invalid_input] 上次调用已明确失败；请修正参数后重试，不要重复相同输入。");
+				return deny("unknown_outcome", "WRITE_OUTCOME_UNKNOWN", "[unknown_outcome] 写入结果尚未解决，禁止重放：" + decision.reason);
+			}
 			try {
 				const intent = operations.snapshot().find((item) => item.operationId === decision.operationId);
 				checkpoints.operation(ctx, run, intent);
@@ -780,7 +1166,7 @@ export default function (pi) {
 			}
 			catch (error) { operations.cancel(decision.operationId); throw error; }
 			operations.markDispatched(decision.operationId);
-		} catch (error) { return { block: true, reason: "[precondition] Cannot establish write intent: " + classifyError(error).message }; }
+		} catch (error) { const failure = classifyError(error); return deny(failure.kind === "stale_source" || failure.kind === "invalid_input" || failure.kind === "unknown_outcome" ? failure.kind : "precondition", failure.code || "WRITE_INTENT", "[precondition] Cannot establish write intent: " + failure.message); }
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
@@ -803,13 +1189,78 @@ export default function (pi) {
 				// Record only the actual outcome; never pretend the patch reached Pi.
 				operations.completeFailed(entry.operationId, version.hash);
 				checkpoints.operation(ctx, run, operations.snapshot().find((item) => item.operationId === entry.operationId), version.hash);
+				if (supervisor.snapshot()?.scope.runId === run.scope.runId) supervisor.failure({ kind: "validation", code: "NATIVE_WRITE_FAILED", signature: JSON.stringify([event.toolName, entry.target]) });
 				return;
 			}
 			const decision = entry.expectedPostHash === null && version.hash !== null ? operations.completeAcknowledged(entry.operationId, version.hash) : operations.complete(entry.operationId, version.hash);
 			if (decision.action !== "satisfied") throw toolError("unknown_outcome", "WRITE_CONFLICT", "Write acknowledgement does not match the current target fingerprint.");
 			checkpoints.operation(ctx, run, { ...operations.snapshot().find((item) => item.operationId === entry.operationId), expectedPostHash: version.hash }, version.hash);
+			if (version.hash && supervisor.snapshot()?.scope.runId === run.scope.runId && !entry.target.startsWith("planning/verifications/")) supervisor.artifact(entry.target, version.hash);
 			return { details: { ...event.details, harness: { ok: true, operationId: entry.operationId, scope: entry.scope } } };
 		} catch (error) { operations.cancel(entry.operationId); return failureResult(classifyError(error), { operationId: entry.operationId, scope: entry.scope }); }
+	});
+	pi.on("turn_end", async (_event, ctx) => {
+		const run = activeRun;
+		if (!run || supervisor.snapshot()?.scope.runId !== run.scope.runId) return;
+		for (const receipt of run.pendingVerifications ?? []) supervisor.verification(receipt);
+		run.pendingVerifications = [];
+		const snapshot = supervisor.turn();
+		if (snapshot && snapshot.state !== "RUNNING") { showSupervisorStatus(ctx, snapshot, true); ctx.abort(); }
+	});
+	pi.on("agent_end", async (event, ctx) => {
+		const snapshot = supervisor.snapshot();
+		const eventRun = activeRun;
+		if (!snapshot || !eventRun || eventRun.scope.runId !== snapshot.scope.runId) return;
+		if (snapshot?.state === "RUNNING") {
+			const finishingRun = eventRun;
+			if (activeRun && snapshot.scope.runId === activeRun.scope.runId) {
+				for (const receipt of activeRun.pendingVerifications ?? []) supervisor.verification(receipt);
+				activeRun.pendingVerifications = [];
+			}
+			let checkpointReady = false, pendingOperations = true;
+			try {
+				const run = activeRun;
+				if (run && JSON.stringify(run.scope) === JSON.stringify(snapshot.scope)) {
+					const status = await checkpoints.inspect(ctx, run);
+					if (activeRun !== finishingRun || supervisor.snapshot()?.scope.runId !== finishingRun.scope.runId) return;
+					checkpointReady = !status.error && (status.status === "ready" || status.status === "empty");
+					pendingOperations = Boolean(status.blockedOperationIds?.length);
+				}
+			} catch { if (activeRun !== finishingRun || supervisor.snapshot()?.scope.runId !== finishingRun.scope.runId) return; checkpointReady = false; }
+			const last = [...(event.messages ?? [])].reverse().find((message) => message?.role === "assistant");
+			const hasText = Boolean(messageText(last).trim());
+			const stopReason = typeof last?.stopReason === "string" ? last.stopReason : "agent_end";
+			const current = supervisor.snapshot();
+			let completionVerified = current?.scope?.role !== "write";
+			const receipt = current?.lastVerification;
+			if (!completionVerified) {
+				const artifacts = Object.entries(current?.artifactHashes ?? {}).filter(([name]) => !name.startsWith("planning/verifications/"));
+				if (!artifacts.length) completionVerified = true;
+				else {
+					const receipts = current?.verificationReceipts ?? {};
+					const fullReceipts = Object.entries(receipts).filter(([, item]) => item?.passed && item?.full && item.artifactSha256);
+					const drafts = artifacts.filter(([name]) => name.startsWith("drafts/candidates/"));
+					completionVerified = fullReceipts.length > 0 && drafts.every(([name, hash]) => receipts[name]?.passed && receipts[name]?.full && receipts[name]?.artifactSha256 === hash);
+					for (const [name, item] of fullReceipts) {
+						try {
+							if ((await fileVersion(projectRoot(ctx), name)).hash !== item.artifactSha256) completionVerified = false;
+							for (const source of finishingRun.verificationSources?.get(name) ?? []) if ((await fileVersion(projectRoot(ctx), source.path)).hash !== source.sha256) completionVerified = false;
+							if (activeRun !== finishingRun) return;
+						} catch { completionVerified = false; }
+					}
+				}
+			}
+			if (activeRun !== finishingRun || supervisor.snapshot()?.scope.runId !== finishingRun.scope.runId) return;
+			if (stopReason === "aborted") supervisor.stop("CANCELLED", "AGENT_ABORTED");
+			else if (stopReason === "error") supervisor.stop("FAILED", "AGENT_ERROR");
+			else supervisor.finish({ stopReason, hasText, checkpointReady, pendingOperations, completionVerified });
+		}
+		if (activeRun !== eventRun) return;
+		const finalRun = eventRun;
+		const finalSnapshot = supervisor.snapshot();
+		if (!finalRun || !finalSnapshot || finalRun.scope.runId !== finalSnapshot.scope.runId) return;
+		showSupervisorStatus(ctx, finalSnapshot);
+		if (activeRun === finalRun && supervisor.snapshot()?.scope.runId === finalRun.scope.runId) endRun();
 	});
 	for (const [name, label] of [["get_task_checkpoint", "查看任务检查点"], ["capture_task_checkpoint", "保存任务检查点"], ["refresh_task_checkpoint", "刷新检查点证据"]]) registerReliableTool(pi, {
 		name, label,
@@ -825,9 +1276,22 @@ export default function (pi) {
 			return textResult(JSON.stringify(status));
 		},
 	});
+	pi.registerTool({
+		name: "get_run_status", label: "查看运行状态",
+		description: "Inspect the current deterministic run-supervisor status and Chinese next-step guidance. Read-only; never resumes work or grants acceptance/write authority.",
+		parameters: Type.Object({}),
+		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			await loadProject(ctx);
+			const snapshot = supervisor.snapshot();
+			const base = supervisorBaseScope(ctx);
+			const current = snapshot && snapshot.scope.projectId === base.projectId && snapshot.scope.sessionId === base.sessionId && snapshot.scope.role === base.role ? snapshot : null;
+			const summary = current ? { schemaVersion: current.schemaVersion, id: current.id, scope: current.scope, state: current.state, reasonCode: current.reasonCode, toolCalls: current.toolCalls, turns: current.turns, verificationAttempts: current.verificationAttempts, evidenceCount: current.evidenceCount, unchangedAttempts: current.unchangedAttempts, userAccepted: false } : null;
+			return textResult(JSON.stringify({ snapshot: summary, budgetDiagnostic: diagnosticFor(current), guidanceZh: statusText(current) }));
+		},
+	});
 
 	pi.on("tool_result", async (event, ctx) => {
-		if (event.details?.observation || event.toolName === "read_observation" || event.toolName === "get_context_budget" || event.toolName.endsWith("_task_checkpoint") || event.isError) return;
+		if (event.details?.observation || event.toolName === "read_observation" || event.toolName === "get_context_budget" || event.toolName === "get_run_status" || event.toolName.endsWith("_task_checkpoint") || event.isError) return;
 		try { await loadProject(ctx); } catch { return; }
 		const run = activeRun;
 		const root = path.resolve(projectRoot(ctx));
@@ -1056,6 +1520,11 @@ export default function (pi) {
 				const verifierInfo = await stat(verifierPath).catch(() => null);
 				if (!verifierInfo?.isFile()) throw toolError("precondition", "VERIFIER_MISSING", "This Novel Project has no installed verifier. Create the project with prepare-novel-agent-test.ps1 or install the verifier into .novel/tools.");
 				const verifierRun = currentRun(ctx);
+				const supervised = supervisor.snapshot();
+				if (supervised?.scope.runId === verifierRun.scope.runId && supervised.verificationAttempts + (verifierRun.pendingVerifications?.length ?? 0) >= 12) {
+					supervisor.stop("FAILED", "MAX_VERIFICATION_ATTEMPTS");
+					throw toolError("precondition", "MAX_VERIFICATION_ATTEMPTS", "本轮机械验证次数已达到上限，请检查策略后开始新一轮。");
+				}
 				const guardedRun = checkpointRun(verifierRun, _signal);
 				const checkpointBlock = await checkpoints.writeGate(ctx, guardedRun);
 				if (checkpointBlock) throw toolError("stale_source", "CHECKPOINT_BLOCKED", checkpointBlock);
@@ -1077,6 +1546,7 @@ export default function (pi) {
 					_signal?.throwIfAborted();
 					const result = await runCommand(process.execPath, args, { cwd: root, signal: _signal, timeout: 120_000, maxBuffer: MAX_VERIFIER_OUTPUT_CHARS * 4 });
 					await acknowledgeVerifier();
+					await verifierReceipt(root, reportTarget, "verify:" + _id, verifierRun);
 					return textResult(truncate("机械验证完成。\\n\\n" + (result.stdout || result.stderr || "No verifier output."), MAX_VERIFIER_OUTPUT_CHARS));
 				} catch (error) {
 					if (_signal?.aborted || error?.code === "ABORT_ERR" || error?.killed) {
@@ -1098,6 +1568,8 @@ export default function (pi) {
 					// verifier invocation, not manuscript acceptance. Interrupted runs stay
 					// pending in the durable checkpoint and are never automatically replayed.
 					await acknowledgeVerifier();
+					try { await verifierReceipt(root, reportTarget, "verify:" + _id, verifierRun); }
+					catch (receiptError) { if (receiptError?.code === "VERIFICATION_STALE") throw receiptError; supervisor.failure({ kind: "precondition", code: receiptError?.code || "VERIFIER_RECEIPT_INVALID", signature: receiptError?.message }); }
 					const failed = error && typeof error === "object" ? error : {};
 					const stdout = typeof failed.stdout === "string" ? failed.stdout : "";
 					const stderr = typeof failed.stderr === "string" ? failed.stderr : "";

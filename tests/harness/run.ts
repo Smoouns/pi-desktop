@@ -22,6 +22,11 @@ import { runSessionTitleCoreTests } from "../session-title-core.js";
 import { runSessionTitleExtensionTests } from "../session-title-extension.js";
 import { runObservationStoreTests } from "./observation-store.js";
 import { runContextBudgetCases } from "./context-budget.js";
+import { runBudgetDiagnosticCases } from "./budget-diagnostics.js";
+import { runContextUsageCases } from "./context-usage.js";
+import { runContextMaintenanceCases } from "./context-maintenance.js";
+import { runContextMaintenanceExtensionCases } from "./context-maintenance-extension.js";
+import { runContextMaintenanceGuardCases } from "./context-maintenance-extension-guards.js";
 import { runPhase2ExtensionCases } from "./phase2-extension.js";
 import { runProviderBudgetCases } from "./provider-budget.js";
 import { runStoryRangeCases } from "./read-range.js";
@@ -31,6 +36,12 @@ import { runSourceVersionCases, runInvalidationCases } from "./source-version.js
 import { runPhase3ExtensionCases } from "./phase3-extension.js";
 import { runCheckpointPersistenceCases } from "./checkpoint-persistence.js";
 import { runCheckpointRuntimeCases } from "./checkpoint-runtime.js";
+import { runSupervisorCases } from "./run-supervisor.js";
+import { runSupervisorRuntimeCases } from "./supervisor-runtime.js";
+import { runSupervisorAgentLoopCases } from "./supervisor-agent-loop.js";
+import { runPhase4ExtensionCases, runLongHorizonCases } from "./phase4-extension.js";
+import { runExtensionUiCases } from "./extension-ui.js";
+import { runStatusCommandRpcCases } from "./status-command-rpc.js";
 import { fixtureRoot, sha256, treeManifest, type RunCase } from "./testkit.js";
 
 type CaseResult = { id: string; status: "pass" | "fail" | "partial"; trace: TraceEvent[]; unsupported: Array<{ subcase: string; reason: string }>; error?: string };
@@ -90,6 +101,11 @@ for (let repetition = 1; repetition <= 3; repetition++) {
 	await runCase("SESSION-TITLE-02 loaded extension naming and isolation", () => runSessionTitleExtensionTests());
 	await runCase("P2-OBS immutable bounded observation store", () => { runObservationStoreTests(); });
 	await runContextBudgetCases(runCase);
+	await runBudgetDiagnosticCases(runCase);
+	await runContextUsageCases(runCase);
+	await runContextMaintenanceCases(runCase);
+	await runContextMaintenanceExtensionCases(runCase);
+	await runContextMaintenanceGuardCases(runCase);
 	await runStoryRangeCases(runCase);
 	await runPhase2ExtensionCases(runCase);
 	await runPhase2InvariantCases(runCase);
@@ -100,6 +116,13 @@ for (let repetition = 1; repetition <= 3; repetition++) {
 	await runPhase3ExtensionCases(runCase);
 	await runCheckpointPersistenceCases(runCase);
 	await runCheckpointRuntimeCases(runCase);
+	await runSupervisorCases(runCase);
+	await runSupervisorRuntimeCases(runCase);
+	await runSupervisorAgentLoopCases(runCase);
+	await runPhase4ExtensionCases(runCase);
+	await runExtensionUiCases(runCase);
+	await runStatusCommandRpcCases(runCase);
+	await runLongHorizonCases(runCase);
 	repetitions.push(results);
 	await writeFile(path.join(output, `run-${repetition}.json`), JSON.stringify(results, null, 2) + "\n");
 }
@@ -113,6 +136,14 @@ const packageVersion = async (name: string): Promise<string> => JSON.parse(await
 const implementationFiles: Record<string, string> = {};
 for (const name of [
 	"src/extensions/novel-tools-extension.ts", "src/extensions/checkpoint-runtime.ts", "src/novel/context.ts", "src/novel/context-attachment.ts",
+	"src/extensions/supervisor-runtime.ts",
+	"src/extensions/budget-diagnostics.ts",
+	"src/extensions/context-maintenance.ts",
+	"src/components/chat-view/context-usage-view.ts",
+	"src/components/chat-view/composer-stats-view.ts",
+	"src/components/chat-view/event-stream-handlers.ts",
+	"src/components/extension-ui-handler.ts",
+	"src/components/chat-view/extension-status-view.ts",
 	"src/components/chat-view.ts", "src/novel/memory-engine.ts", "src/rpc/bridge.ts",
 	"src/novel/tool-path-policy.ts", "src/novel/read-range.ts", "src/components/context-inspector.ts", "src-tauri/src/lib.rs", "src-tauri/src/session_file.rs",
 	"src/rpc/session-restore.ts", "src/main.ts", "src/components/chat-view/assistant-workflow-view.ts",
@@ -120,6 +151,10 @@ for (const name of [
 	"src/extensions/session-title-core.ts", "src/extensions/session-title-extension.ts", "tests/session-title-core.ts", "tests/session-title-extension.ts",
 	"src/components/chat-view/workflow-utils.ts", "src/i18n/ui-chinese.ts",
 	"scripts/verify-novel-chapter.ts", "scripts/run-public-tests.mjs", "scripts/run-harness-baseline.mjs",
+	"scripts/test-extension-status-ui.mjs",
+	"scripts/test-context-usage-ui.mjs",
+	"scripts/test-context-entry-ui.mjs",
+	"src/layout/chat-panel-resize.ts", "scripts/test-chat-panel-resize.mjs",
 	"scripts/novel-domain-smoke.ts", "scripts/novel-tools-extension-smoke.ts", "scripts/novel-verifier-smoke.ts",
 	"scripts/novel-memory-smoke.ts", "scripts/world-change-smoke.ts", "package.json", "tsconfig.harness.json",
 ]) implementationFiles[name] = sha256(await readFile(name));
@@ -127,7 +162,7 @@ for (const directory of ["src/harness", "tests/harness", "tests/support"]) {
 	for (const [name, hash] of Object.entries(await treeManifest(directory))) implementationFiles[`${directory}/${name}`] = hash;
 }
 const summary = {
-	schemaVersion: 1, phase: "phase3", phaseStartCommit: "f21b2b46a53729ed5722f5b816fe9fd21a447dc9", baselineCommit: "3b5f8b06131d46ee0b4b97dd646ba3d6f6bcd887",
+	schemaVersion: 1, phase: "phase4", phaseStartCommit: "828d36d9c0f3140c750616b97e7d7e92287e6444", baselineCommit: "3b5f8b06131d46ee0b4b97dd646ba3d6f6bcd887",
 	implementationHead: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
 	dirty: Boolean(execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim()),
 	node: process.version, npm: process.env.npm_config_user_agent?.split(" ")[0] ?? "unavailable",

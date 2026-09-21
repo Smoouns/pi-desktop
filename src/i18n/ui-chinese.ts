@@ -227,6 +227,7 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
 	["Resize sidebar", "调整侧边栏宽度"],
 	["Toggle sidebar", "切换侧边栏"],
 	["Resize file panel", "调整文件面板宽度"],
+	["Resize chat panel", "调整聊天面板宽度"],
 
 	["Keyboard shortcuts", "键盘快捷键"],
 	["New session", "新建会话"],

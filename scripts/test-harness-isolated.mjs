@@ -20,12 +20,20 @@ await mkdir(output, { recursive: true });
 // Existing tracked files plus an explicit allowlist of uncommitted Harness
 // deliverable. Do not copy arbitrary untracked files or ignored private fixtures.
 const additions = [
+	"src/extensions/budget-diagnostics.ts",
+	"src/extensions/context-maintenance.ts", "src/components/chat-view/context-usage-view.ts",
+	"scripts/test-context-usage-ui.mjs", "scripts/test-global-pi-context-maintenance.mjs", "docs/CONTEXT_BUDGET_RESEARCH.md",
+	"scripts/test-context-entry-ui.mjs",
+	"src/layout/chat-panel-resize.ts", "scripts/test-chat-panel-resize.mjs",
+	"src/extensions/supervisor-runtime.ts", "docs/HARNESS_PHASE4_ACCEPTANCE.md", "docs/HARNESS_PHASE4_RESULTS.md",
 	".gitattributes", "tsconfig.harness.json", "fixtures/harness-novel", "tests/harness", "tests/support",
 	"src/harness", "src/novel/context-attachment.ts", "scripts/run-public-tests.mjs",
 	"src/extensions/checkpoint-runtime.ts", "docs/HARNESS_PHASE3_ACCEPTANCE.md", "docs/HARNESS_PHASE3_RESULTS.md",
 	"src/extensions/session-title-core.ts", "src/extensions/session-title-extension.ts",
 	"src/components/chat-view/session-refresh-scope.ts", "tests/session-title-core.ts", "tests/session-title-extension.ts",
 	"scripts/test-chat-layout.mjs", "docs/SESSION_UX_FIXES.md",
+	"scripts/test-extension-status-ui.mjs",
+	"src/components/chat-view/extension-status-view.ts",
 	"src/novel/tool-path-policy.ts", "src/novel/read-range.ts", "docs/HARNESS_PHASE2_ACCEPTANCE.md", "docs/HARNESS_PHASE2_RESULTS.md",
 	"src/rpc/session-restore.ts", "src-tauri/src/session_file.rs",
 	"scripts/run-harness-baseline.mjs", "scripts/test-harness-isolated.mjs",
@@ -60,6 +68,7 @@ try {
 	const commands = [
 		["ci", "--no-audit", "--no-fund"],
 		["run", "check"], ["run", "check:harness-tests"], ["run", "test:harness"],
+		["run", "test:harness:long-horizon"],
 		["run", "test:novel-domain"], ["run", "build:frontend"],
 	];
 	const results = [];
@@ -83,7 +92,7 @@ try {
 		results, harnessCaseCount: harness.cases.length, deterministic: harness.deterministic,
 		note: "New deliverables are explicitly allowlisted until committed; this is not a remote CI or committed clean-clone claim.",
 	}, null, 2) + "\n");
-	console.log("Isolated source snapshot: all six commands passed");
+	console.log(`Isolated source snapshot: all ${commands.length} commands passed`);
 } finally {
 	const relative = path.relative(path.resolve(tmpdir()), path.resolve(temporary));
 	assert.ok(relative.startsWith("pi-harness-isolated-") && !relative.includes(path.sep), "Unsafe cleanup target");

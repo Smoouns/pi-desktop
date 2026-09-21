@@ -34,7 +34,9 @@ jobs:
       - run: npm run check:harness-tests
       - run: npm run test:harness:baseline
       - run: npm run test:harness
+      - run: npm run test:harness:long-horizon
       - run: npm run test:novel-domain
+      - run: npm run test:chat-panel-resize
       - run: npm run build:frontend
       - name: Upload synthetic traces
         if: always()
@@ -94,3 +96,6 @@ jobs:
 
       - name: Session file safety regression
         run: cargo test --manifest-path src-tauri/Cargo.toml session_file::tests
+
+      - name: Novel role branch isolation regression
+        run: cargo test --manifest-path src-tauri/Cargo.toml novel_role_session_tests

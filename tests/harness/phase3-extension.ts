@@ -129,15 +129,13 @@ export async function runPhase3ExtensionCases(runCase: RunCase): Promise<void> {
 						assert.equal(after.toolName, before.toolName);
 						assert.equal(after.isError, before.isError);
 						assert.equal(after.timestamp, before.timestamp);
-						assert.doesNotMatch(JSON.stringify(after.content), new RegExp(rawToolPayload));
-						assert.match(JSON.stringify(after.content), /工具观察已外置/);
-						assert.equal(after.details, undefined);
+						assert.deepEqual(after, before, "small recent tool result must remain available to the summarizer");
 					}
 				}
 			}
 			assert.match(JSON.stringify(preparation), /USER_INSTRUCTION_MUST_SURVIVE/);
 			assert.match(JSON.stringify(preparation), /SYSTEM_GUIDANCE_MUST_SURVIVE/);
-			assert.doesNotMatch(JSON.stringify(preparation), new RegExp(rawToolPayload));
+			assert.match(JSON.stringify(preparation), new RegExp(rawToolPayload));
 			const sdkCompactorSource = await readFile(path.resolve("node_modules/@mariozechner/pi-coding-agent/dist/core/compaction/compaction.js"), "utf8");
 			assert.match(sdkCompactorSource, /const \{ firstKeptEntryId, messagesToSummarize, turnPrefixMessages,[\s\S]*\} = preparation;/, "pinned native compact must consume the shared preparation object after hooks");
 			assert.match(sdkCompactorSource, /generateSummary\(messagesToSummarize,/);

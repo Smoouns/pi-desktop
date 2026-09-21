@@ -353,6 +353,7 @@ export function handleCompactionAndRetryEvent(
 	context: HandleCompactionAndRetryEventContext,
 ): boolean {
 	switch (type) {
+		case "compaction_start":
 		case "auto_compaction_start": {
 			context.setCompactionInsertIndex(context.messagesLength());
 			context.setCompactionCycle({
@@ -386,6 +387,7 @@ export function handleCompactionAndRetryEvent(
 			return true;
 		}
 
+		case "compaction_end":
 		case "auto_compaction_end": {
 			const aborted = Boolean(event.aborted);
 			const errorMessage = context.extractRuntimeErrorMessage(event);

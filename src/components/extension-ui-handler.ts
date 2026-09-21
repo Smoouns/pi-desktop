@@ -11,8 +11,9 @@
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { type Options as DesktopNotificationOptions, isPermissionGranted, onAction, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { html, render, type TemplateResult } from "lit";
+import { html, nothing, render, type TemplateResult } from "lit";
 import { rpcBridge } from "../rpc/bridge.js";
+import type { ExtensionStatusView } from "./chat-view/extension-status-view.js";
 
 /**
  * Explicit desktop capability contract for extension UI requests.
@@ -190,9 +191,11 @@ export interface NotificationActionTarget {
 
 export class ExtensionUiHandler {
 	private overlayContainer: HTMLElement | null = null;
-	private statusContainer: HTMLElement | null = null;
+	private statusTexts = new Map<string, string>();
+	private onStatusDisplay: ((status: ExtensionStatusView | null) => void) | null = null;
 	private widgetAboveContainer: HTMLElement | null = null;
 	private widgetBelowContainer: HTMLElement | null = null;
+	private activeReadonlyDialogClose: (() => void) | null = null;
 	private onSetEditorText: ((text: string) => void) | null = null;
 	private onTrace: ((message: string) => void) | null = null;
 	private onNotificationActionTarget: ((target: NotificationActionTarget) => void) | null = null;
@@ -219,6 +222,11 @@ export class ExtensionUiHandler {
 		this.onSetEditorText = handler;
 	}
 
+	setStatusDisplayHandler(handler: (status: ExtensionStatusView | null) => void): void {
+		this.onStatusDisplay = handler;
+		this.renderLatestStatus();
+	}
+
 	setTraceHandler(handler: ((message: string) => void) | null): void {
 		this.onTrace = handler;
 	}
@@ -229,6 +237,14 @@ export class ExtensionUiHandler {
 
 	primeNotificationPermission(): void {
 		void this.primeDesktopNotificationPermission();
+	}
+
+	clearSessionStatus(): void {
+		// Close while the originating runtime is still active, before rebinding
+		// the RPC proxy; a late click must not respond through another session.
+		this.activeReadonlyDialogClose?.();
+		this.statusTexts.clear();
+		this.renderLatestStatus();
 	}
 
 	private trace(message: string): void {
@@ -512,14 +528,9 @@ export class ExtensionUiHandler {
 		// Overlay for dialogs
 		this.overlayContainer = document.createElement("div");
 		this.overlayContainer.id = "extension-ui-overlay";
-		this.overlayContainer.className = "fixed inset-0 z-50 flex items-center justify-center bg-black/50 hidden";
+		this.overlayContainer.className = "fixed inset-0 flex items-center justify-center bg-black/50 hidden";
+		this.overlayContainer.style.zIndex = "2600";
 		document.body.appendChild(this.overlayContainer);
-
-		// Status bar container (above input)
-		this.statusContainer = document.createElement("div");
-		this.statusContainer.id = "extension-status-container";
-		this.statusContainer.className = "hidden fixed bottom-[92px] left-[278px] right-4 z-40 pointer-events-none";
-		document.body.appendChild(this.statusContainer);
 
 		// Widget containers
 		this.widgetAboveContainer = document.createElement("div");
@@ -537,6 +548,11 @@ export class ExtensionUiHandler {
 	 * Handle an extension UI request from the RPC bridge
 	 */
 	async handleRequest(request: ExtensionUiRequest): Promise<void> {
+		// A subsequent RPC dialog owns the overlay. Retire the local detail
+		// listener first so Escape cannot close a different pending request.
+		if (["select", "confirm", "input", "editor"].includes(request.method)) {
+			this.activeReadonlyDialogClose?.();
+		}
 		switch (request.method) {
 			case "select":
 				await this.showSelectDialog(request);
@@ -633,6 +649,10 @@ export class ExtensionUiHandler {
 
 	private async showConfirmDialog(request: ExtensionUiRequest): Promise<void> {
 		if (!this.overlayContainer) return;
+		if (request.title?.trim() === "小说运行状态") {
+			await this.showNovelRunStatusDialog(request);
+			return;
+		}
 
 		return new Promise((resolve) => {
 			const template = html`
@@ -674,6 +694,71 @@ export class ExtensionUiHandler {
 					resolve();
 				}, request.timeout);
 			}
+		});
+	}
+
+	private async showNovelRunStatusDialog(request: ExtensionUiRequest, reply = true): Promise<void> {
+		if (!this.overlayContainer) return;
+
+		return new Promise((resolve) => {
+			this.activeReadonlyDialogClose?.();
+			let finished = false;
+			let timeoutId: ReturnType<typeof setTimeout> | undefined;
+			const finish = (cancelled = false) => {
+				if (finished) return;
+				finished = true;
+				if (timeoutId !== undefined) clearTimeout(timeoutId);
+				window.removeEventListener("keydown", onKeyDown, true);
+				this.activeReadonlyDialogClose = null;
+				this.closeOverlay();
+				if (!reply) { resolve(); return; }
+				void this.sendResponse(request.id, cancelled ? { cancelled: true } : { confirmed: false })
+					.catch((error) => this.trace(`readonly-dialog:response-failed ${error instanceof Error ? error.message : String(error)}`))
+					.finally(() => resolve());
+			};
+			const onKeyDown = (event: KeyboardEvent) => {
+				if (event.key !== "Escape") return;
+				event.preventDefault();
+				event.stopPropagation();
+				finish();
+			};
+			const template = html`
+				<div
+					class="fixed inset-0 flex items-center justify-center p-4"
+					style="z-index: 2600"
+					@click=${(event: MouseEvent) => {
+						if (event.target === event.currentTarget) finish();
+					}}
+				>
+					<section
+						class="bg-background text-foreground rounded-xl shadow-2xl border border-border w-full max-w-xl overflow-hidden"
+						role="dialog"
+						aria-modal="true"
+						aria-labelledby="novel-run-status-title"
+					>
+						<header class="px-5 py-4 border-b border-border">
+							<h3 id="novel-run-status-title" class="text-sm font-semibold">${request.title || "小说运行状态"}</h3>
+						</header>
+						<div class="px-5 py-4 max-h-[min(60vh,32rem)] overflow-y-auto">
+							<p class="text-sm text-muted-foreground whitespace-pre-wrap break-words leading-6">${request.message || "当前没有可显示的运行状态。"}</p>
+						</div>
+						<footer class="px-5 py-3 border-t border-border flex justify-end">
+							<button
+								type="button"
+								class="px-4 py-1.5 rounded-md text-sm bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+								@click=${() => finish()}
+							>
+								关闭
+							</button>
+						</footer>
+					</section>
+				</div>
+			`;
+
+			window.addEventListener("keydown", onKeyDown, true);
+			this.activeReadonlyDialogClose = () => finish(true);
+			this.showOverlay(template);
+			if (request.timeout) timeoutId = setTimeout(() => finish(true), request.timeout);
 		});
 	}
 
@@ -873,32 +958,44 @@ export class ExtensionUiHandler {
 	}
 
 	private setStatus(request: ExtensionUiRequest): void {
-		if (!this.statusContainer) return;
-
 		const statusKey = typeof request.statusKey === "string" ? request.statusKey.trim() : "";
+		const storageKey = statusKey || "__default__";
 		if (statusKey && shouldSuppressUiStatusKey(statusKey)) {
-			this.statusContainer.classList.add("hidden");
-			this.statusContainer.innerHTML = "";
+			this.statusTexts.delete(storageKey);
+			this.renderLatestStatus();
 			return;
 		}
 
 		if (request.statusText === undefined) {
-			// Clear status
-			this.statusContainer.classList.add("hidden");
-			this.statusContainer.innerHTML = "";
+			this.statusTexts.delete(storageKey);
 		} else {
 			const text = sanitizeUiStatusText(request.statusText);
 			if (!text || shouldSuppressUiStatusText(text)) {
-				this.statusContainer.classList.add("hidden");
-				this.statusContainer.innerHTML = "";
-				return;
+				this.statusTexts.delete(storageKey);
+			} else {
+				// Refresh insertion order so the most recently updated key is visible.
+				this.statusTexts.delete(storageKey);
+				this.statusTexts.set(storageKey, text);
+				while (this.statusTexts.size > 32) {
+					const oldest = this.statusTexts.keys().next().value as string | undefined;
+					if (oldest === undefined) break;
+					this.statusTexts.delete(oldest);
+				}
 			}
-			this.statusContainer.classList.remove("hidden");
-			render(
-				html`<div class="text-xs text-muted-foreground px-3 py-1">${text}</div>`,
-				this.statusContainer,
-			);
 		}
+		this.renderLatestStatus();
+	}
+
+	private renderLatestStatus(): void {
+		const latest = [...this.statusTexts.entries()].at(-1);
+		this.onStatusDisplay?.(latest ? {
+			key: latest[0], text: latest[1],
+			onOpen: () => { void this.showNovelRunStatusDialog({
+				id: "local-extension-status", method: "confirm",
+				title: latest[0] === "novel-supervisor" ? "小说运行状态" : "扩展状态",
+				message: latest[1],
+			}, false); },
+		} : null);
 	}
 
 	private setWidget(request: ExtensionUiRequest): void {
@@ -911,7 +1008,7 @@ export class ExtensionUiHandler {
 			.filter((line) => Boolean(line) && !shouldSuppressUiStatusText(line));
 		if (lines.length === 0) {
 			container.classList.add("hidden");
-			container.innerHTML = "";
+			render(nothing, container);
 		} else {
 			container.classList.remove("hidden");
 			render(
@@ -951,7 +1048,7 @@ export class ExtensionUiHandler {
 	private closeOverlay(): void {
 		if (!this.overlayContainer) return;
 		this.overlayContainer.classList.add("hidden");
-		this.overlayContainer.innerHTML = "";
+		render(nothing, this.overlayContainer);
 	}
 
 	private async sendResponse(id: string, data: Record<string, unknown>): Promise<void> {
@@ -959,12 +1056,15 @@ export class ExtensionUiHandler {
 	}
 
 	destroy(): void {
+		this.onStatusDisplay?.(null);
+		this.onStatusDisplay = null;
+		this.activeReadonlyDialogClose?.();
+		this.activeReadonlyDialogClose = null;
 		this.releaseFocusTrackerSubscription?.();
 		this.releaseFocusTrackerSubscription = null;
 		this.releasePermissionBootstrapListeners?.();
 		this.releasePermissionBootstrapListeners = null;
 		this.overlayContainer?.remove();
-		this.statusContainer?.remove();
 		this.widgetAboveContainer?.remove();
 		this.widgetBelowContainer?.remove();
 	}

@@ -9,6 +9,7 @@ import { NOVEL_TOOLS_EXTENSION_CONTENT } from "../src/extensions/novel-tools-ext
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixtureRoot = path.join(workspaceRoot, "fixtures", "harness-novel");
 const expectedTools = [
+	"get_run_status",
 	"get_task_checkpoint",
 	"capture_task_checkpoint",
 	"refresh_task_checkpoint",
@@ -25,7 +26,7 @@ const expectedTools = [
 	"search_story",
 	"verify_chapter",
 ].sort();
-const expectedCommands = ["novel-plan", "novel-review", "novel-world", "novel-write"].sort();
+const expectedCommands = ["novel-plan", "novel-review", "novel-world", "novel-write", "novel-run-status", "novel-context-status"].sort();
 
 function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content.find((part) => part.type === "text")?.text ?? "";
@@ -65,7 +66,7 @@ const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "pi-desktop-novel-t
 const extensionPath = path.join(temporaryDirectory, "pi-desktop-novel-tools.ts");
 
 try {
-	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v10/);
+	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v15/);
 	assert.doesNotMatch(NOVEL_TOOLS_EXTENSION_CONTENT, /\b(?:writeFile|writeTextFile|appendFile|rename|unlink|rm)\s*\(/);
 	await writeFile(extensionPath, NOVEL_TOOLS_EXTENSION_CONTENT, "utf8");
 

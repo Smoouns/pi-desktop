@@ -22,8 +22,8 @@ export interface ContextBudgetRequest {
 
 /**
  * A dependency-free factory because the Pi extension adapter may embed its
- * source. Units are deliberately conservative UTF-8 bytes, not provider token
- * counts. The provider adapter must still call checkPayload on its final body.
+ * source. Context units are a conservative multilingual token estimate, not a
+ * provider tokenizer. Read/output run budgets remain exact UTF-8 bytes.
  */
 export function createContextBudget(options: ContextBudgetOptions = {}) {
 	type MessageKind = "history" | "checkpoint" | "observation_preview" | "new_evidence";
@@ -60,21 +60,32 @@ export function createContextBudget(options: ContextBudgetOptions = {}) {
 	const maxRuns = configured("maxRuns");
 	const runs = new Map<string, RunState>();
 	const estimator = {
-		kind: "utf8_bytes_upper_bound" as const,
-		units: "utf8_bytes" as const,
+		kind: "estimated_tokens" as const,
+		units: "estimated_tokens" as const,
 		exactProviderTokens: false,
-		description: "Conservative UTF-8 byte proxy over complete JSON serialization; not a provider tokenizer.",
+		description: "Conservative multilingual estimate over complete JSON: ASCII /3, CJK x2, other Unicode UTF-8 bytes x2/3, plus 5% slack; not a provider tokenizer.",
 	};
 
-	function encodedJson(value: unknown): { ok: true; bytes: number } | { ok: false } {
+	function encodedJson(value: unknown): { ok: true; bytes: number; score: number } | { ok: false } {
 		try {
 			const serialized = JSON.stringify(value);
 			if (serialized === undefined) return { ok: false };
-			return { ok: true, bytes: encoder.encode(serialized).byteLength };
+			let score = 0;
+			for (const character of serialized) {
+				const point = character.codePointAt(0)!;
+				if (point <= 0x7f) score += 1;
+				else if (
+					(point >= 0x3400 && point <= 0x4dbf) || (point >= 0x4e00 && point <= 0x9fff)
+					|| (point >= 0xf900 && point <= 0xfaff) || (point >= 0x20000 && point <= 0x323af)
+				) score += 6;
+				else score += encoder.encode(character).byteLength * 2;
+			}
+			return { ok: true, bytes: encoder.encode(serialized).byteLength, score };
 		} catch {
 			return { ok: false };
 		}
 	}
+	const tokenEstimate = (score: number, slack = false): number => Math.ceil((score + (slack ? Math.ceil(score / 20) : 0)) / 3);
 
 	function safeSum(...values: number[]): number | null {
 		let total = 0;
@@ -127,7 +138,7 @@ export function createContextBudget(options: ContextBudgetOptions = {}) {
 			unsupportedMedia: [] as string[],
 			ledger: {
 				system: 0, tools: 0, history: 0, checkpoint: 0, observationPreview: 0, newEvidence: 0,
-				serializationOverhead: 0, outputReserve: 0, safetyMargin: 0, total: 0, limit: 0, available: 0, estimator,
+				serializationOverhead: 0, rawInputBytes: 0, inputEstimate: 0, outputReserve: 0, safetyMargin: 0, total: 0, limit: 0, available: 0, estimator,
 			},
 		};
 	}
@@ -151,28 +162,44 @@ export function createContextBudget(options: ContextBudgetOptions = {}) {
 		const system = encodedJson(request.systemPrompt);
 		const tools = encodedJson(request.tools);
 		if (!payload.ok || !system.ok || !tools.ok) return invalidPlan(request.messages, "invalid_payload");
-		const categories: Record<MessageKind, number> = { history: 0, checkpoint: 0, observation_preview: 0, new_evidence: 0 };
-		let messageBytes = 0;
+		const categoryScores: Record<MessageKind, number> = { history: 0, checkpoint: 0, observation_preview: 0, new_evidence: 0 };
 		for (let index = 0; index < request.messages.length; index += 1) {
 			const measured = encodedJson(request.messages[index]);
 			if (!measured.ok) return invalidPlan(request.messages, "invalid_payload");
 			const kind = request.messageKinds?.[index] ?? "history";
 			if (!["history", "checkpoint", "observation_preview", "new_evidence"].includes(kind)) return invalidPlan(request.messages, "invalid_payload");
-			categories[kind] += measured.bytes;
-			messageBytes += measured.bytes;
+			categoryScores[kind] += measured.score;
 		}
-		const serializationOverhead = Math.max(0, payload.bytes - system.bytes - tools.bytes - messageBytes);
-		const total = safeSum(payload.bytes, integer(outputReserve), integer(safetyMargin));
+		// Allocate rounded estimates cumulatively so every displayed component
+		// conserves the final input estimate exactly.
+		let allocatedScore = 0;
+		const allocate = (score: number): number => {
+			const before = tokenEstimate(allocatedScore);
+			allocatedScore += score;
+			return tokenEstimate(allocatedScore) - before;
+		};
+		const systemEstimate = allocate(system.score);
+		const toolsEstimate = allocate(tools.score);
+		const historyEstimate = allocate(categoryScores.history);
+		const checkpointEstimate = allocate(categoryScores.checkpoint);
+		const observationEstimate = allocate(categoryScores.observation_preview);
+		const evidenceEstimate = allocate(categoryScores.new_evidence);
+		const inputEstimate = tokenEstimate(payload.score, true);
+		const allocated = systemEstimate + toolsEstimate + historyEstimate + checkpointEstimate + observationEstimate + evidenceEstimate;
+		const serializationOverhead = Math.max(0, inputEstimate - allocated);
+		const total = safeSum(inputEstimate, integer(outputReserve), integer(safetyMargin));
 		if (total === null) return invalidPlan(request.messages);
 		const limit = integer(contextWindow);
 		const ledger = {
-			system: system.bytes,
-			tools: tools.bytes,
-			history: categories.history,
-			checkpoint: categories.checkpoint,
-			observationPreview: categories.observation_preview,
-			newEvidence: categories.new_evidence,
+			system: systemEstimate,
+			tools: toolsEstimate,
+			history: historyEstimate,
+			checkpoint: checkpointEstimate,
+			observationPreview: observationEstimate,
+			newEvidence: evidenceEstimate,
 			serializationOverhead,
+			rawInputBytes: payload.bytes,
+			inputEstimate,
 			outputReserve: integer(outputReserve),
 			safetyMargin: integer(safetyMargin),
 			total,
@@ -186,7 +213,7 @@ export function createContextBudget(options: ContextBudgetOptions = {}) {
 	}
 
 	function checkPayload(payload: unknown, limit: number, outputReserve = defaultOutputReserve, safetyMargin = defaultSafetyMargin) {
-		const empty = { payload: 0, outputReserve: 0, safetyMargin: 0, total: 0, limit: 0, available: 0, estimator };
+		const empty = { payload: 0, rawInputBytes: 0, inputEstimate: 0, outputReserve: 0, safetyMargin: 0, total: 0, limit: 0, available: 0, estimator };
 		if (invalidOptions.length > 0 || !finitePositive(limit) || limit < minimumContextWindow || !finiteNonNegative(outputReserve) || !finiteNonNegative(safetyMargin)) {
 			return { allowed: false as const, reason: "invalid_budget", unsupportedMedia: [] as string[], ledger: empty };
 		}
@@ -194,9 +221,10 @@ export function createContextBudget(options: ContextBudgetOptions = {}) {
 		if (media.length > 0) return { allowed: false as const, reason: "unsupported_media", unsupportedMedia: media, ledger: empty };
 		const measured = encodedJson(payload);
 		if (!measured.ok) return { allowed: false as const, reason: "invalid_payload", unsupportedMedia: media, ledger: empty };
-		const total = safeSum(measured.bytes, integer(outputReserve), integer(safetyMargin));
+		const inputEstimate = tokenEstimate(measured.score, true);
+		const total = safeSum(inputEstimate, integer(outputReserve), integer(safetyMargin));
 		if (total === null) return { allowed: false as const, reason: "invalid_budget", unsupportedMedia: media, ledger: empty };
-		const ledger = { payload: measured.bytes, outputReserve: integer(outputReserve), safetyMargin: integer(safetyMargin), total, limit: integer(limit), available: Math.max(0, integer(limit) - total), estimator };
+		const ledger = { payload: inputEstimate, rawInputBytes: measured.bytes, inputEstimate, outputReserve: integer(outputReserve), safetyMargin: integer(safetyMargin), total, limit: integer(limit), available: Math.max(0, integer(limit) - total), estimator };
 		return total <= limit
 			? { allowed: true as const, reason: null, unsupportedMedia: media, ledger }
 			: { allowed: false as const, reason: "model_input_budget_exceeded", unsupportedMedia: media, ledger };

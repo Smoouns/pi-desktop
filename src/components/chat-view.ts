@@ -5,6 +5,12 @@
 import "@mariozechner/mini-lit/dist/CodeBlock.js";
 import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { html, nothing, render, type TemplateResult } from "lit";
+import { renderExtensionStatusView, type ExtensionStatusView } from "./chat-view/extension-status-view.js";
+import {
+	renderContextUsageView,
+	sanitizeContextBudgetSnapshot,
+	type ContextBudgetSnapshot,
+} from "./chat-view/context-usage-view.js";
 import {
 	type PiAuthProviderStatus,
 	type RpcImageInput,
@@ -278,11 +284,6 @@ function truncate(value: string, len: number): string {
 
 function normalizeComparablePath(value: string | null | undefined): string {
 	return (value ?? "").replace(/\\/g, "/").replace(/\/+$|\s+$/g, "").toLowerCase();
-}
-
-function formatUsd(value: number): string {
-	if (value < 0.01) return `$${value.toFixed(3)}`;
-	return `$${value.toFixed(2)}`;
 }
 
 function formatAge(ts: number): string {
@@ -592,6 +593,9 @@ export class ChatView {
 	private lastAssistantContextTokens: number | null = null;
 	private refreshingSessionStats = false;
 	private sessionStatsHover = false;
+	private contextUsageOpen = false;
+	private contextBudgetSnapshot: ContextBudgetSnapshot | null = null;
+	private updatingAutoCompaction = false;
 	private gitSummary: GitSummary = {
 		isRepo: false,
 		branch: null,
@@ -612,6 +616,7 @@ export class ChatView {
 	private projectPath: string | null = null;
 	private novelContextProvider: ((prompt: string) => Promise<string>) | null = null;
 	private novelContextAttachedForSession = false;
+	private extensionStatus: ExtensionStatusView | null = null;
 	private bindingStatusText: string | null = null;
 	private gitKnownBranchesByProject = new Map<string, string[]>();
 	private welcomeDashboard: WelcomeDashboardSummary = {
@@ -756,6 +761,9 @@ export class ChatView {
 
 	setProjectPath(path: string | null): void {
 		if (this.projectPath === path) return;
+		this.contextUsageOpen = false;
+		this.contextBudgetSnapshot = null;
+		this.extensionStatus = null;
 		this.sessionRefreshScope.invalidate();
 		const previous = this.projectPath;
 		this.sessionStatsRequestSequence += 1;
@@ -793,12 +801,76 @@ export class ChatView {
 		this.novelContextProvider = provider;
 	}
 
+	setExtensionStatus(status: ExtensionStatusView | null): void {
+		this.extensionStatus = status;
+		this.render();
+	}
+
+	/** Accept only a bounded snapshot for the currently bound session and model. */
+	setContextBudgetSnapshot(raw: unknown): boolean {
+		const snapshot = sanitizeContextBudgetSnapshot(raw);
+		if (!snapshot || !this.contextBudgetMatchesCurrentSession(snapshot)) return false;
+		this.contextBudgetSnapshot = snapshot;
+		this.render();
+		return true;
+	}
+
+	private contextBudgetMatchesCurrentSession(snapshot: ContextBudgetSnapshot): boolean {
+		const model = this.state?.model;
+		return Boolean(this.state?.sessionId && model
+			&& snapshot.sessionId === this.state.sessionId
+			&& snapshot.provider === model.provider
+			&& snapshot.modelId === model.id);
+	}
+
+	private openContextUsage(): void {
+		this.contextUsageOpen = true;
+		this.sessionStatsHover = false;
+		this.render();
+		void this.refreshContextUsage();
+	}
+
+	private async refreshContextUsage(): Promise<void> {
+		const isCurrent = this.captureSessionScope();
+		await this.refreshSessionStats(true);
+		if (!isCurrent() || !this.isConnected) return;
+		// Check the command registry first: never send an unknown slash command
+		// that an older runtime could forward to the model as normal user text.
+		await this.ensureSlashCommandsLoaded(true);
+		if (!isCurrent() || !this.slashRuntimeCommands.some((command) => command.name === "novel-context-status" && command.source === "extension")) return;
+		try { await rpcBridge.prompt("/novel-context-status"); } catch { /* Pi stats remain useful without extension telemetry. */ }
+	}
+
+	private closeContextUsage(): void {
+		this.contextUsageOpen = false;
+		this.render();
+	}
+
+	private async toggleAutoCompaction(enabled: boolean): Promise<void> {
+		if (!this.isConnected || !this.state || this.updatingAutoCompaction) return;
+		this.updatingAutoCompaction = true;
+		const isCurrent = this.captureSessionScope();
+		this.render();
+		try {
+			await rpcBridge.setAutoCompaction(enabled);
+			if (isCurrent() && this.state) this.state = { ...this.state, autoCompactionEnabled: enabled };
+		} catch (error) {
+			if (isCurrent()) this.pushNotice(error instanceof Error ? error.message : "无法更新自动压缩设置", "error");
+		} finally {
+			this.updatingAutoCompaction = false;
+			this.render();
+		}
+	}
+
 	/** Explicit user context changes refresh the attachment once, including in a continued session. */
 	refreshNovelContextOnNextRequest(): void {
 		this.novelContextAttachedForSession = false;
 	}
 
 	prepareForSessionSwitch(projectPath: string | null, statusText?: string): void {
+		this.extensionStatus = null;
+		this.contextUsageOpen = false;
+		this.contextBudgetSnapshot = null;
 		this.sessionRefreshScope.invalidate();
 		this.modelLoadRequestSeq += 1;
 		this.loadingModels = false;
@@ -1623,6 +1695,12 @@ export class ChatView {
 	};
 
 	private onGlobalEscapeForModelPicker = (event: KeyboardEvent): void => {
+		if (event.key === "Escape" && this.contextUsageOpen) {
+			event.preventDefault();
+			event.stopPropagation();
+			this.closeContextUsage();
+			return;
+		}
 		if ((!this.modelPickerOpen && !this.thinkingPickerOpen) || event.key !== "Escape") return;
 		event.preventDefault();
 		this.closeModelPicker();
@@ -1910,6 +1988,9 @@ export class ChatView {
 			const state = await rpcBridge.getState();
 			if (!isCurrent()) return false;
 			this.state = state;
+			if (this.contextBudgetSnapshot && !this.contextBudgetMatchesCurrentSession(this.contextBudgetSnapshot)) {
+				this.contextBudgetSnapshot = null;
+			}
 			this.syncComposerQueueFromState(this.state);
 			this.recomputeProviderAuthConfigured();
 			if (this.state) this.onStateChange?.(this.state);
@@ -2118,34 +2199,6 @@ export class ChatView {
 				if (isCurrent()) this.render();
 			}
 		}
-	}
-
-	private sessionStatsLines(): string[] {
-		const parts: string[] = [];
-		if (this.sessionStats.tokens !== null) {
-			parts.push(`Context tokens: ${Math.round(this.sessionStats.tokens).toLocaleString()}`);
-		}
-		if (this.sessionStats.contextWindow) {
-			parts.push(`Context window: ${Math.round(this.sessionStats.contextWindow).toLocaleString()}`);
-		}
-		if (this.sessionStats.usageRatio !== null) {
-			parts.push(`Usage: ${(this.sessionStats.usageRatio * 100).toFixed(1)}%`);
-		}
-		if (this.sessionStats.lifetimeTokens !== null) {
-			parts.push(`Session tokens total: ${Math.round(this.sessionStats.lifetimeTokens).toLocaleString()}`);
-		}
-		if (this.sessionStats.costUsd !== null) {
-			parts.push(`Cost: ${formatUsd(this.sessionStats.costUsd)}`);
-		}
-		parts.push(`Messages: ${this.sessionStats.messageCount}`);
-		parts.push(`Pending: ${this.sessionStats.pendingCount}`);
-		return parts;
-	}
-
-	private sessionStatsTooltip(): string {
-		const lines = this.sessionStatsLines();
-		if (lines.length === 0) return "Session stats";
-		return lines.join("\n");
 	}
 
 	private parseBashResult(raw: unknown): { stdout: string; stderr: string; exitCode: number } {
@@ -3266,6 +3319,7 @@ export class ChatView {
 	private isComposerInteractionLocked(): boolean {
 		if (!this.projectPath) return true;
 		if (!this.isConnected) return true;
+		if (this.contextBudgetSnapshot?.autoCompaction === "running") return true;
 		return Boolean(this.bindingStatusText);
 	}
 
@@ -3726,7 +3780,7 @@ export class ChatView {
 	}
 
 	async compactNow(customInstructions?: string): Promise<boolean> {
-		if (this.compactionCycle?.status === "running") {
+		if (this.compactionCycle?.status === "running" || this.contextBudgetSnapshot?.autoCompaction === "running") {
 			this.pushNotice("Compaction already in progress", "info");
 			return false;
 		}
@@ -4738,15 +4792,15 @@ export class ChatView {
 		}
 		const connectivityStatus = this.bindingStatusText || (!this.isConnected && this.projectPath ? "RPC disconnected" : "");
 		const ratio = Math.min(1, Math.max(0, this.sessionStats.usageRatio ?? 0));
-		const ratioPercent = `${Math.round(ratio * 100)}%`;
+		const ratioPercent = this.sessionStats.usageRatio === null ? "—" : `${Math.round(ratio * 100)}%`;
 		const ringRadius = 9;
 		const circumference = 2 * Math.PI * ringRadius;
 		const strokeOffset = circumference * (1 - ratio);
-		const statsLines = this.sessionStatsLines();
 
 		return html`
 			<div class="composer-shell">
 				<div class="composer-inner">
+					${renderExtensionStatusView(this.extensionStatus)}
 					${renderQueuedComposerMessagesView(this.queuedComposerMessages, truncate)}
 					<div class="composer-panel">
 						${this.selectedSkillDraft
@@ -4782,14 +4836,15 @@ export class ChatView {
 						${renderComposerStatsView({
 							hover: this.sessionStatsHover,
 							refreshing: this.refreshingSessionStats,
-							tooltip: this.sessionStatsTooltip(),
+							currentTokens: this.sessionStats.tokens,
+							contextWindow: this.sessionStats.contextWindow,
 							ratioPercent,
 							ringRadius,
 							circumference,
 							strokeOffset,
-							statsLines,
 							onMouseEnter: () => this.setSessionStatsHover(true),
 							onMouseLeave: () => this.setSessionStatsHover(false),
+							onOpen: () => this.openContextUsage(),
 						})}
 					</div>
 
@@ -4936,6 +4991,22 @@ export class ChatView {
 					${showWorkingIndicator ? this.renderWorkingIndicatorRow() : nothing}
 				</div>
 				${hasProject ? this.renderComposer() : nothing}
+				${hasProject ? renderContextUsageView({
+					open: this.contextUsageOpen,
+					refreshing: this.refreshingSessionStats,
+					compacting: this.state?.isCompacting === true || this.compactionCycle?.status === "running",
+					connected: this.isConnected,
+					streaming: this.currentIsStreaming(),
+					currentTokens: this.sessionStats.tokens,
+					contextWindow: this.sessionStats.contextWindow,
+					usageRatio: this.sessionStats.usageRatio,
+					autoCompactionEnabled: this.updatingAutoCompaction ? null : this.state ? this.state.autoCompactionEnabled : null,
+					budget: this.contextBudgetSnapshot,
+					onClose: () => this.closeContextUsage(),
+					onRefresh: () => { void this.refreshContextUsage(); },
+					onCompact: () => { void this.compactNow(); },
+					onToggleAutoCompaction: (enabled) => { void this.toggleAutoCompaction(enabled); },
+				}) : nothing}
 				${hasProject ? this.renderHistoryViewer() : nothing}
 				${hasProject ? this.renderJumpToLatest() : nothing}
 				${this.renderNotices()}

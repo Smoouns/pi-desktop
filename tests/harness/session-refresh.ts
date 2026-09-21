@@ -45,6 +45,10 @@ export async function runSessionRefreshCases(runCase: RunCase): Promise<void> {
 		}
 		assert.match(main, /await startSessionTab\(bridge,/);
 		assert.match(main, /PI_DESKTOP_SESSION_TITLE: "1"/);
+		assert.match(main, /PI_DESKTOP_NOVEL_ROLE: requestedNovelRole \?\? ""/);
+		assert.match(main, /const novelRoleChanged = runtime\.launchedNovelRole !== requestedNovelRole/);
+		assert.match(main, /if \(\(projectChanged \|\| novelRoleChanged\) && bridge\.isConnected\)/);
+		assert.match(main, /runtime\.launchedNovelRole = requestedNovelRole/);
 		assert.match(main, /await ensureSessionTitleExtensionInstalled\(\)/);
 		assert.match(main, /if \(err instanceof StaleProjectTaskError\) \{[\s\S]*?runtime.phase = "idle"/);
 	});
