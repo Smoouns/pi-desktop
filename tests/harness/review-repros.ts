@@ -13,19 +13,19 @@ function contract(condition: boolean, code: string): void {
 const text = (result: any): string => result.content.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n");
 type RunnerState = Parameters<Parameters<typeof withRunner>[2]>[0];
 
-async function start(state: RunnerState): Promise<void> {
+export async function start(state: RunnerState): Promise<void> {
 	await state.runner.emit({ type: "session_start" } as never);
 	await state.runner.emitInput("在当前候选目录内执行审查复现", undefined, "interactive");
 	await state.runner.emit({ type: "agent_start" } as never);
 }
-async function checkpoint(state: RunnerState, name: "get" | "capture" | "refresh", id: string): Promise<any> {
+export async function checkpoint(state: RunnerState, name: "get" | "capture" | "refresh", id: string): Promise<any> {
 	const result = await state.extension.tools.get(`${name}_task_checkpoint`)!.definition.execute(id, {}, undefined, undefined, state.ctx());
 	assert.notEqual(result.isError, true, text(result));
 	return JSON.parse(text(result));
 }
 
 /** Real pinned SDK native tools + ExtensionRunner hooks; no provider or model. */
-async function native(state: RunnerState, root: string, toolName: "read" | "write", id: string, input: Record<string, unknown>, afterExecute?: () => Promise<void>): Promise<{ native: any; delivered: any }> {
+export async function native(state: RunnerState, root: string, toolName: "read" | "write", id: string, input: Record<string, unknown>, afterExecute?: () => Promise<void>): Promise<{ native: any; delivered: any }> {
 	const before = await state.runner.emitToolCall({ type: "tool_call", toolName, toolCallId: id, input } as never);
 	assert.notEqual(before?.block, true, before?.reason);
 	const tool = toolName === "read" ? createReadTool(root) : createWriteTool(root);

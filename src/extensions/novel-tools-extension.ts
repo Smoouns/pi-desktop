@@ -3,6 +3,7 @@ import { createToolRuntime } from "../harness/tool-policy.ts";
 import { createOperationLedger } from "../harness/operation-ledger.ts";
 import { createNovelPathPolicy } from "../novel/tool-path-policy.ts";
 import { createObservationStore } from "../harness/observation-store.ts";
+import { createReadDelivery } from "../harness/read-delivery.ts";
 import { createContextBudget } from "../harness/context-budget.ts";
 import { createStoryRangeReader } from "../novel/read-range.ts";
 import { createCheckpointStore } from "../harness/checkpoint-store.ts";
@@ -15,7 +16,7 @@ import { createBudgetDiagnostics } from "./budget-diagnostics.ts";
 import { createContextMaintenance } from "./context-maintenance.ts";
 
 const NOVEL_TOOLS_EXTENSION_FILE = "pi-desktop-novel-tools.ts";
-const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v15";
+const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v16";
 const NOVEL_TOOLS_EXTENSION_MARKER_PREFIX = "pi-desktop-novel-tools-extension/";
 
 export const NOVEL_TOOLS_EXTENSION_CONTENT = `/**
@@ -57,6 +58,7 @@ const operations = (${createOperationLedger.toString()})();
 const pathPolicy = (${createNovelPathPolicy.toString()})();
 const sha = (text) => createHash("sha256").update(text).digest("hex");
 const observations = (${createObservationStore.toString()})({ digest: sha });
+const readDelivery = (${createReadDelivery.toString()})();
 const contextBudget = (${createContextBudget.toString()})({ defaultReadBudget: 16 * 1024 * 1024, defaultOutputBudget: 64 * 1024 });
 const rangeReader = (${createStoryRangeReader.toString()})();
 const createSupervisor = () => (${createRunSupervisor.toString()})({ digest: sha });
@@ -372,22 +374,33 @@ function observationReference(item, preview = false) {
 function boundToolOutput(value, toolName, toolCallId, run) {
 	assertRun(run);
 	const raw = messageText(value);
-	let result = value;
+	// Spans are host-only provenance, never persisted as payload copies or trusted
+	// from a model's arguments. Observation sources describe capture, not delivery.
+	const { deliverySpans = [], deliveryWindow, ...details } = value.details ?? {};
+	let result = { ...value, details };
+	let window = deliveryWindow;
 	const textOnly = Array.isArray(value.content) && value.content.every((part) => part.type === "text");
 	if (textOnly && toolName !== "read_observation" && toolName !== "get_context_budget" && !toolName.endsWith("_task_checkpoint")) {
 		let observation;
 		try { observation = observations.put({ scope: run.scope, toolName, toolCallId, text: raw, sources: value.details?.sources ?? [], previewChars: 500 }); }
 		catch (error) { throw toolError("precondition", "OBSERVATION_CAPACITY", "观察记录无法保存；请重启 Pi 运行时后重新读取来源（仅新建会话不会清空存储）。" + error.message); }
 		const offloaded = bytes(raw) > INLINE_BYTES;
+		try { readDelivery.register(observation.id, raw.length, deliverySpans); }
+		catch (error) { throw toolError("precondition", "DELIVERY_CAPACITY", error.message); }
+		window = { id: observation.id, start: 0, end: offloaded ? observation.preview.length : raw.length };
 		// Do not smuggle full source text through result details after offloading.
 		result = { ...value, content: offloaded ? textResult(observationReference(observation, true)).content : value.content,
-			details: { ...(offloaded ? { kind: value.details?.kind, paths: value.details?.paths, path: value.details?.path, sources: value.details?.sources } : value.details), observation, observedRun: { ...run.scope }, offloaded } };
+			details: { ...(offloaded ? { kind: details.kind, paths: details.paths, path: details.path, sources: details.sources, sourceVersion: details.sourceVersion, truncation: details.truncation ? { ...details.truncation, content: undefined } : undefined } : details), observation, observedRun: { ...run.scope }, offloaded } };
 	}
 	const charged = contextBudget.chargeOutput(run.scope, bytes(JSON.stringify(result.content)));
 	if (!charged.allowed) throw toolError("precondition", "OUTPUT_BUDGET", "本轮工具结果累计预算已用尽；请缩小任务范围。观察记录仍可在后续运行按 ID 重读。");
-	if (!value.isError && result.details?.observation?.sourceRefs?.length) {
-		checkpoints.observe(run.ctx, run, result.details.observation.sourceRefs.map((ref) => ({ ...ref, path: process.platform === "win32" ? ref.path.toLowerCase() : ref.path })), result.details.observation.id);
-		if (supervisor.snapshot()?.scope.runId === run.scope.runId) for (const ref of result.details.observation.sourceRefs) {
+	if (!value.isError && window) {
+		const generation = JSON.stringify([run.scope.runId, checkpoints.deliveryEpoch(run.ctx, run)]);
+		const receipt = readDelivery.deliver(window.id, generation, window.start, window.end);
+		result.details.readDelivery = { ...receipt, truncated: Boolean(details.truncation?.truncated || result.details.offloaded) };
+		try { checkpoints.observe(run.ctx, run, receipt.sourceRefs.map((ref) => ({ ...ref, path: process.platform === "win32" ? ref.path.toLowerCase() : ref.path })), window.id); }
+		catch (error) { readDelivery.forgetCoverage(window.id); throw error; }
+		if (supervisor.snapshot()?.scope.runId === run.scope.runId) for (const ref of receipt.sourceRefs) {
 			const evidencePath = process.platform === "win32" ? ref.path.toLowerCase() : ref.path;
 			if (!evidencePath.startsWith("planning/verifications/")) supervisor.evidence(JSON.stringify([evidencePath, ref.sha256, ref.startLine ?? null, ref.endLine ?? null, ref.authority ?? null, ref.temporal ?? null, ref.memoryId ?? null]));
 		}
@@ -524,6 +537,48 @@ async function readStoryFile(root, relativePath, selector = {}, run = activeRun)
 	if (raw.length > FILE_BYTES) throw toolError("precondition", "SOURCE_TOO_LARGE", "读取期间文件超过大小上限。");
 	const selected = rangeReader.select(raw.toString("utf8"), selector);
 	return { relativePath: relativeTo(root, target), ...selected, sources: [{ path: relativeTo(root, target), sha256: sha(raw), startLine: selected.startLine, endLine: selected.endLine, authority: "reference", temporal: "unspecified" }] };
+}
+
+function documentResult(documents, details = {}) {
+	let output = "";
+	const deliverySpans = [];
+	for (const document of documents) {
+		if (output) output += "\\n\\n";
+		output += "# " + document.relativePath + "\\n\\n";
+		deliverySpans.push(readDelivery.span(document.sources[0], document.text, output.length));
+		output += document.text;
+	}
+	return textResult(output, { ...details, sources: documents.flatMap((document) => document.sources), deliverySpans });
+}
+
+function memoryResult(value, items, details) {
+	const output = JSON.stringify(value, null, 2), deliverySpans = [];
+	let offset = 0;
+	for (let index = 0; index < items.length; index++) {
+		const encoded = JSON.stringify(items[index].text);
+		const field = output.indexOf('"text": ' + encoded, offset);
+		if (field < 0) throw toolError("precondition", "MEMORY_DELIVERY_MAPPING", "记忆正文无法映射到返回内容。");
+		const start = field + 8;
+		deliverySpans.push(readDelivery.span(details.sources[index], encoded, start, true));
+		offset = start + encoded.length;
+	}
+	return textResult(output, { ...details, deliverySpans });
+}
+
+function nativeReadResult(capture, event) {
+	const original = capture.document, lines = original.text.split("\\n");
+	const first = capture.offset - 1, selected = Math.min(capture.limit ?? lines.length, lines.length - first);
+	const truncation = event.details?.truncation;
+	const count = truncation?.firstLineExceedsLimit ? 0 : truncation?.truncated ? truncation.outputLines : selected;
+	const sourceVersion = { path: original.relativePath, sha256: original.sources[0].sha256 };
+	if (!Array.isArray(event.content) || event.content.some((part) => part.type !== "text")) return { sourceVersion, sources: [], deliverySpans: [] };
+	if (!Number.isSafeInteger(count) || count < 0 || count > selected || truncation?.lastLinePartial) throw toolError("stale_source", "READ_DELIVERY_MISMATCH", "原生读取回执范围无效，请重读。");
+	if (!count) return { sourceVersion, sources: [], deliverySpans: [] };
+	const body = lines.slice(first, first + count).join("\\n");
+	// Compare real SDK output, not just matching pre/post hashes (ABA edits).
+	if (!messageText(event).startsWith(body)) throw toolError("stale_source", "READ_DELIVERY_MISMATCH", "实际读取内容与捕获版本不一致，请重读。");
+	const source = { ...original.sources[0], startLine: first + 1, endLine: first + count };
+	return { sourceVersion, sources: [source], deliverySpans: [readDelivery.span(source, body, 0)] };
 }
 
 function messageText(message) {
@@ -698,6 +753,7 @@ export default function (pi) {
 		invalidation: (${createCheckpointInvalidation.toString()})(),
 		append: (checkpoint) => pi.appendEntry("pi-desktop-task-checkpoint", checkpoint),
 		assertRun: assertCheckpointRun,
+		pathKey: (value) => process.platform === "win32" ? value.toLowerCase() : value,
 		budget: (scope) => { const { readUsed, outputUsed } = contextBudget.getRunBudget(scope); return { readUsed, outputUsed }; },
 		async resolve(ref, ctx, run, cache) {
 			assertCheckpointRun(run);
@@ -714,17 +770,17 @@ export default function (pi) {
 					assertCheckpointRun(run);
 					if (raw.length > info.size) chargeRead(budgetRun, raw.length - info.size);
 					if (raw.length > FILE_BYTES) throw new Error("Source grew beyond read limit");
-					cache.set(key, sha(raw));
+					cache.set(key, { sha256: sha(raw), totalLines: raw.toString("utf8").split("\\n").length });
 				} catch (error) { if (error?.code === "ENOENT") cache.set(key, null); else throw error; }
 			}
-			const sha256 = cache.get(key);
+			const { sha256 = null, totalLines } = cache.get(key) ?? {};
 			if (ref.memoryId && sha256 === ref.sha256) {
 				if (!cache.has("memory")) cache.set("memory", await novelMemory.snapshot(root, memoryIO(root, budgetRun)));
 				assertCheckpointRun(run);
 				try { const item = novelMemory.read(cache.get("memory"), ref.memoryId); return { sha256, authority: item.authority, temporal: item.temporal, memoryId: item.id, eligible: true }; }
 				catch { return { sha256, eligible: false }; }
 			}
-			return { sha256, authority: "reference", temporal: "unspecified" };
+			return { sha256, totalLines, authority: "reference", temporal: "unspecified" };
 		},
 	});
 	const restoreSupervisor = async (ctx) => {
@@ -1121,8 +1177,11 @@ export default function (pi) {
 			if (event.toolName === "read") {
 				const run = currentRun(ctx);
 				try {
+					const offset = event.input.offset ?? 1, limit = event.input.limit;
+					if (!Number.isSafeInteger(offset) || offset < 1 || (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1))) throw toolError("invalid_input", "READ_RANGE", "offset / limit 必须是正整数。");
 					const source = await readStoryFile(project.root, relativePath, {}, run);
-					run.builtinReads.set(event.toolCallId, source.sources);
+					if (offset > source.totalLines) throw toolError("invalid_input", "READ_RANGE", "offset 超出文件范围。");
+					run.builtinReads.set(event.toolCallId, { document: source, offset, limit });
 				} catch (error) { const failure = classifyError(error); return deny(failure.kind === "invalid_input" || failure.kind === "stale_source" ? failure.kind : "precondition", failure.code || "READ_GATE", "[precondition] " + failure.message); }
 			}
 			return;
@@ -1305,13 +1364,14 @@ export default function (pi) {
 		const projectId = sha(process.platform === "win32" ? root.toLowerCase() : root);
 		if (!run || run.controller.signal.aborted || !run.builtinCalls.has(event.toolCallId) || run.scope.projectId !== projectId || run.scope.role !== currentNovelRole(ctx) || run.scope.sessionId !== (ctx.sessionManager?.getSessionId?.() || processSession)) return;
 		try {
-			let sources = run.builtinReads.get(event.toolCallId) ?? [];
+			const capture = run.builtinReads.get(event.toolCallId);
 			run.builtinReads.delete(event.toolCallId);
-			for (const source of sources) {
+			for (const source of capture?.document.sources ?? []) {
 				const version = await fileVersion(projectRoot(ctx), source.path);
 				if (source.sha256 !== version.hash) throw toolError("stale_source", "CHANGED_DURING_READ", "来源在读取中发生变化，请重读。");
 			}
-			const value = boundToolOutput({ content: event.content, details: { ...event.details, sources } }, event.toolName, event.toolCallId, run);
+			const captured = capture ? nativeReadResult(capture, event) : { sources: [], deliverySpans: [] };
+			const value = boundToolOutput({ content: event.content, details: { ...event.details, ...captured } }, event.toolName, event.toolCallId, run);
 			return { content: value.content, details: value.details };
 		} catch (error) {
 			// This hook cannot change Pi 0.63's success flag; never imply rollback.
@@ -1334,7 +1394,7 @@ export default function (pi) {
 			assertRun(run);
 			const page = observations.read({ id: item.id, scope: run.scope, toolName: "read_observation", toolCallId: id, start, limit });
 			chargeRead(run, bytes(page.payload));
-			return textResult(page.payload + (page.hasMore ? "\\n[更多内容：start=" + (start + page.payload.length) + "]" : "\\n[记录结束]"), { observation: item, observationPage: true, observedRun: run.scope, start, hasMore: page.hasMore, totalChars: page.totalChars });
+			return textResult(page.payload + (page.hasMore ? "\\n[更多内容：start=" + (start + page.payload.length) + "]" : "\\n[记录结束]"), { observation: item, observationPage: true, observedRun: run.scope, start, hasMore: page.hasMore, totalChars: page.totalChars, deliveryWindow: { id: item.id, start, end: start + page.payload.length } });
 		},
 	});
 	registerReliableTool(pi, {
@@ -1375,7 +1435,7 @@ export default function (pi) {
 			try {
 				const { root } = await loadProject(ctx);
 				const document = await readStoryFile(root, params.path, params);
-				return textResult("# " + document.relativePath + "\\n\\n" + document.text, { path: document.relativePath, sources: document.sources, complete: document.complete, totalLines: document.totalLines });
+				return documentResult([document], { path: document.relativePath, complete: document.complete, totalLines: document.totalLines });
 			} catch (error) { throw error; }
 		},
 	});
@@ -1398,7 +1458,7 @@ export default function (pi) {
 				}).sort((left, right) => Number(!left.startsWith("manuscript/")) - Number(!right.startsWith("manuscript/")));
 				if (!matches[0]) throw toolError("precondition", "NO_CHAPTER", "No chapter matched " + params.identifier + ".");
 				const document = await readStoryFile(root, matches[0], params);
-				return textResult("# " + document.relativePath + "\\n\\n" + document.text, { path: document.relativePath, sources: document.sources, complete: document.complete, totalLines: document.totalLines });
+				return documentResult([document], { path: document.relativePath, complete: document.complete, totalLines: document.totalLines });
 			} catch (error) { throw error; }
 		},
 	});
@@ -1420,7 +1480,7 @@ export default function (pi) {
 				if (!matches.length) throw toolError("precondition", "NO_CHARACTER", "No character document matched " + params.name + ".");
 				const documents = [];
 				for (const relativePath of matches) documents.push(await readStoryFile(root, relativePath));
-				return textResult(documents.map((document) => "# " + document.relativePath + "\\n\\n" + document.text).join("\\n\\n"), { paths: matches, sources: documents.flatMap((document) => document.sources) });
+				return documentResult(documents, { paths: matches });
 			} catch (error) { throw error; }
 		},
 	});
@@ -1441,7 +1501,7 @@ export default function (pi) {
 				if (!matches.length) throw toolError("precondition", "NO_DOCUMENT", "No matching outline or planning documents.");
 				const documents = [];
 				for (const relativePath of matches) documents.push(await readStoryFile(root, relativePath));
-				return textResult(documents.map((document) => "# " + document.relativePath + "\\n\\n" + document.text).join("\\n\\n"), { paths: matches, sources: documents.flatMap((document) => document.sources) });
+				return documentResult(documents, { paths: matches });
 			} catch (error) { throw error; }
 		},
 	});
@@ -1459,19 +1519,25 @@ export default function (pi) {
 				const limit = Math.max(1, Math.min(MAX_RESULTS, Number(params.limit) || 12));
 				const matches = [];
 				const sources = [];
+				const deliverySpans = [];
+				let outputLength = 0;
 				for (const filePath of await storyFiles(root)) {
 					if (matches.length >= limit) break;
 					const relativePath = relativeTo(root, filePath);
 					const document = await readStoryFile(root, relativePath);
 					const text = document.text;
 					const lines = text.split(/\\r?\\n/);
-					const countBefore = matches.length;
 					for (let index = 0; index < lines.length && matches.length < limit; index += 1) {
-						if (relativePath.toLowerCase().includes(query) || lines[index].toLowerCase().includes(query)) matches.push(relativePath + ":" + (index + 1) + " " + lines[index].trim().slice(0, 280));
+						if (relativePath.toLowerCase().includes(query) || lines[index].toLowerCase().includes(query)) {
+							const prefix = relativePath + ":" + (index + 1) + " ", excerpt = lines[index].slice(0, 280);
+							const source = { ...document.sources[0], startLine: index + 1, endLine: index + 1 };
+							if (matches.length) outputLength++;
+							if (excerpt === lines[index]) deliverySpans.push(readDelivery.span(source, excerpt, outputLength + prefix.length));
+							matches.push(prefix + excerpt); sources.push(source); outputLength += prefix.length + excerpt.length;
+						}
 					}
-					if (matches.length > countBefore) sources.push(...document.sources);
 				}
-				return textResult(matches.length ? matches.join("\\n") : "No story matches.", { query, count: matches.length, sources });
+				return textResult(matches.length ? matches.join("\\n") : "No story matches.", { query, count: matches.length, sources, deliverySpans });
 			} catch (error) { throw error; }
 		},
 	});
@@ -1487,7 +1553,7 @@ export default function (pi) {
 				const snapshot = await novelMemory.snapshot(root, memoryIO(root));
 				let result;
 				try { result = novelMemory.search(snapshot, params); } catch (error) { throw toolError("invalid_input", "INVALID_MEMORY_QUERY", error.message); }
-				return textResult(JSON.stringify(result, null, 2), { kind: "novel-memory-search", ...result, sources: result.hits.map((item) => ({ path: item.path, sha256: item.sourceFingerprint, startLine: item.startLine, endLine: item.endLine, memoryId: item.id, authority: item.authority, temporal: item.temporal })) });
+				return memoryResult(result, result.hits, { kind: "novel-memory-search", ...result, sources: result.hits.map((item) => ({ path: item.path, sha256: item.sourceFingerprint, startLine: item.startLine, endLine: item.endLine, memoryId: item.id, authority: item.authority, temporal: item.temporal })) });
 			} catch (error) { throw error; }
 		},
 	});
@@ -1502,7 +1568,7 @@ export default function (pi) {
 				const snapshot = await novelMemory.snapshot(root, memoryIO(root));
 				let item;
 				try { item = novelMemory.read(snapshot, params.id); } catch (error) { throw toolError("stale_source", "STALE_MEMORY", error.message); }
-				return textResult(JSON.stringify(item, null, 2), { kind: "novel-memory-read", ...item, sources: [{ path: item.path, sha256: item.sourceFingerprint, startLine: item.startLine, endLine: item.endLine, memoryId: item.id, authority: item.authority, temporal: item.temporal }] });
+				return memoryResult(item, [item], { kind: "novel-memory-read", ...item, sources: [{ path: item.path, sha256: item.sourceFingerprint, startLine: item.startLine, endLine: item.endLine, memoryId: item.id, authority: item.authority, temporal: item.temporal }] });
 			} catch (error) { throw error; }
 		},
 	});
@@ -1602,7 +1668,7 @@ export default function (pi) {
 				const relativePath = currentDocumentFromSession(ctx);
 				if (!relativePath) throw toolError("precondition", "NO_ACTIVE_DOCUMENT", "Pi Desktop did not supply an active document in this session's current request context.");
 				const document = await readStoryFile(root, relativePath);
-				return textResult("# " + document.relativePath + "\\n\\n" + document.text, { path: document.relativePath, sources: document.sources });
+				return documentResult([document], { path: document.relativePath });
 			} catch (error) { throw error; }
 		},
 	});

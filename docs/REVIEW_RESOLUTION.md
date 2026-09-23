@@ -2,7 +2,7 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后获准提交推送首批改动、验证双平台 CI，并进入 B1 生产写入状态修复。B2 读取凭证与 C 任务完成合同仍未实施；不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1 并验证双平台 CI，再进入 B2 读取交付凭证修复。B2 当前为本地改动，C 任务完成合同仍未实施；不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
@@ -11,8 +11,8 @@
 | ID | 状态 | 本轮动作 / 后续计划 | 证据与限制 |
 | --- | --- | --- | --- |
 | AUD-01 | fixed / CI_passed | 新增拒绝原因枚举；仅规范化隔离测试子进程的临时根；补路径正反例与 Windows 短路径回归 | `f472e8d` 双平台 CI 全绿；Windows 8.3 用例实际执行，journal=11、unsupported=[]。原失败 CI 未输出具体拒绝分支，仍不冒充已确认其唯一根因 |
-| AUD-02 | fixed_locally / CI_pending | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | 新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放。本批单独提交，远程 CI 待验证；首批 CI 不包含此修复 |
-| AUD-03 | confirmed / not_fixed | B2：固定 SDK 原生 read 的范围、截断、预览与刷新复现 | LF/CRLF、无正文交付、隐藏尾部、无关片段刷新共五例违反合同；生产读取凭证逻辑保持不变 |
+| AUD-02 | fixed / CI_passed | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | `c67467e` 双平台 CI 全绿；新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放 |
+| AUD-03 | fixed_locally / not_committed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | 原 5 个 B2 红灯全部转绿，独立审查合同 10/10；新增局部页、旧会话、预算拒绝、ABA 改版等回归。尚无本批远程 CI / Desktop 验收 |
 | AUD-04 | deferred | C：工作流绑定稳定 taskId、任务类型、目标产物及完成条件 | 需显式版本化持久化 schema 与旧会话兼容策略 |
 | AUD-05 | deferred | C 中保留必需任务恢复信息，E 中测量压缩质量 | 不将进度摘要当作 Canon |
 | AUD-06 | in_progress | D 随 B/C 补完整生产接线回归 | 复现优先复用完整扩展、固定 SDK 与隔离 fixture；不声称已有完整 Desktop/冷恢复验收 |
@@ -26,7 +26,8 @@
 - 原始本地基线：`npm run test:pilot` 通过（journal=7；rehearsal=2/2；broker dry-run=pass；真实模型请求=0）。这不是对原 Windows CI 根因的动态确认。
 - 首批修复已提交并推送：`f472e8d36252f527ba6d69774dcc4657ef312d5c`。远程 [CI 35866381033](https://github.com/Smoouns/pi-desktop/actions/runs/35866381033) 的 Windows/Node 24、Ubuntu/Node 22、TypeScript + Rust 三个任务全部通过。
 - Windows 日志确认 `PASS journal.windows-short-temp`，两次 Pilot journal 均为 passed=11、unsupported=[]，后续全部 SDK 检查实际执行。Ubuntu 唯一的平台条件跳过为 Windows 专属短路径步骤；不是必需测试被意外跳过。
-- B1 后续生产修复、回归与本清单更新作为独立批次提交；其固定提交的远程 CI 待验证，不属于上述 CI 的验收范围。
+- B1 已独立提交推送：`c67467ec4f812a722df5398033bc2858ad8507bd`。[CI 35871188658](https://github.com/Smoouns/pi-desktop/actions/runs/35871188658) 的 Windows/Node 24、Ubuntu/Node 22、TypeScript + Rust 三个任务全部通过。两平台均实际执行 Harness 235 例 × 3，以及新增三进程冷恢复用例。
+- B1 Windows 日志确认 journal=11、unsupported=[]、真实 8.3 TEMP 用例通过，全部后续 SDK 检查和前端构建实际执行。Ubuntu 仅按条件跳过 Windows 专属短路径步骤。冻结评测中的既定负例 / unsupported 仍不冒充生产通过。
 - 远程验收门槛：固定修复提交上的 Windows/Node 24 与 Ubuntu/Node 22 必需检查实际执行并通过，未经说明的 skipped 不算通过。
 
 后续记录将在实际执行后追加，不预填通过结果。
@@ -100,4 +101,29 @@
 - `s3-offline-BNwpT8` 的三个生成扩展 SHA 与本轮前的 `s3-offline-Ec6DG2` 完全相同；`s3-lifecycle-vNNqTu` 亦保持旧 lifecycle 生成扩展 SHA。不是把新生产行为冒充旧实验版本。
 - 上述冻结矩阵的能力负例仍按原合同验证，不当作新的生产 B1 验收；生产 B1 的证据来自新增完整扩展与冷恢复回归。
 
-下一步：单独提交并验证 B1 的双平台 CI，再实施 B2 实际读取交付范围 / receipt 修复，随后进入 C 稳定 TaskContract。
+## B2：读取捕获与实际交付（本地修复）
+
+- 管理扩展升级到 v16。原生 `read` 保留原始字节 SHA，但将 `offset`、`limit` 和固定 SDK 的真实 truncation 回执映射到返回正文；返回内容必须与捕获版本逐字相符。仅返回超限提示时没有正文凭证；前后 SHA 一样、实际却读到另一版的 ABA 场景也拒绝交付。
+- `observation.sourceRefs` / `sources` 只表示捕获来源；`readDelivery.schemaVersion=1` 单独记录交付。`deliveredSourceRefs` 是本次完整交付的行，`sourceRefs` 是同一观察、运行及失效代次内累计交付完整的行。二者均不等于“模型理解了内容”。`start/end/totalChars/hasMore` 使用 UTF-16 坐标；`truncated` 保留截断信息。
+- 预览、分页、标题前缀和 SDK 续读提示有独立边界。缺一个字符的行不能当作读完；相邻分页补齐后可累计，出现失效锁存后旧覆盖范围不能借回。跨版本 / 不同权威性 / 不连续区间不拼接；记忆条目必须完整交付对应正文，保留原 memoryId / 人工验收 / 权威性校验，不由普通文本读取升级权威性。
+- 自定义文档、章节、当前文件、多文件、搜索与记忆工具走同一边界。搜索中裁掉的长行、尚在 Observation 里的隐藏尾部、仅出现路径的其他文档都不算已读。offload 时移除 SDK truncation 中的正文副本，内部跨度映射不进入持久化 details。
+- 输出预算批准后才登记交付，拒绝输出不产生读取凭证。版本指纹核验、角色路径限制、写入后置状态与机械验证版本依赖保留；机械验证依赖及 artifact 指纹不是模型阅读凭证。
+- `refresh_task_checkpoint` 可以合并当前同版本、同权威性的连续读取区间，不要求用户先调用一次状态查询。已过期的 exact receipt 不能遮住足够的新分页凭证；未被覆盖的旧依赖仍阻塞。
+
+### 旧会话与容量边界
+
+- Checkpoint 的 `schemaVersion=1` 保留，新增可选且严格校验的 `evidenceFormat: "delivered-v1"` 子合同。旧数据原有 digest 仍可校验；缺少新标记的旧依赖及旧 capture-only 工具结果保留为待重验，不直接恢复为已读。仅保存一次新检查点不能绕过重读要求；不清空历史，也不重放写入。
+- 旧版本程序不认识新字段时会拒绝该检查点，不静默降级使用；本次没有增加向旧程序回写会话的降级迁移。
+- 新增进程内覆盖索引有记录数、行单元数与不连续分页数上限，超限须缩小读取范围；没有新增数据库或跨进程 Observation 存储。跨进程仍需回源，A/B1 已冻结的快照和历史报告不改写。
+- B1 Windows Harness 已实际耗时约 166 秒，新增读取定向测试本机约 9 秒/轮；常规三轮 Harness 的子进程总期限从 180 秒调整到 240 秒，保留硬上限。产品工具期限、预算与失败断言未放宽。
+
+### 本地直接证据
+
+- `npm run test:read-delivery`：47 例通过，含完整生产扩展、固定 SDK 原生工具、源码 / minified 变体、Checkpoint 单元合同与原审查复现；真实模型调用 0。旧会话恢复 80 条依赖时不会重复计数误触容量上限。
+- `artifacts/harness/review-repros/review-AUaHQ1/summary.json`：10/10 合同通过、剩余违反 0、工装错误 0、fixture 前后不变；含本批新增交付模块的源码 SHA，未覆盖旧红灯报告。
+- 真实 SessionManager 磁盘会话重开：只恢复实际交付的第 8–9 行；变更后无关重读不解锁，相关两行分别重读后恢复 ready，原生写入数 0。本项在同一 Node 进程内重新加载完整扩展；不冒充独立 OS 进程的 B2 读取验收。
+- 最终完整回归：263 例 × 3，deterministic=true、失败 0、unsupported 0、真实模型调用 0；最终本机总耗时 154.5 秒。此前 262 例运行在并行构建 / SDK 检查时耗时 175.4 秒，因此仍保留有界的 240 秒工装总期限，不据本机一次较快运行推断远端耗时。
+- 最终应用 / 测试 TypeScript 检查、前端构建、长程 Harness、小说领域回归、离线 eval 通过；构建仅保留原有 bundle/import 提示。v16 标记已同步到安装冒烟断言，没有跳过测试。冻结 SDK context / lifecycle 分别通过 103 / 175 项检查，保留声明过的历史能力负例；不当作当前生产 B2 的直接验收。
+- 未做真实模型调用、Desktop 人工点击或任意并发文件系统替换审计。工具结果边界的交付不证明 provider 实际消费 / 模型理解，B2 不关闭 C 的任务完成合同。
+
+下一步：提交 B2 并验证其固定提交的双平台 CI，再进入 C 稳定 TaskContract。

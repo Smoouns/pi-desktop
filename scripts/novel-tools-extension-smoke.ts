@@ -66,7 +66,7 @@ const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "pi-desktop-novel-t
 const extensionPath = path.join(temporaryDirectory, "pi-desktop-novel-tools.ts");
 
 try {
-	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v15/);
+	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v16/);
 	assert.doesNotMatch(NOVEL_TOOLS_EXTENSION_CONTENT, /\b(?:writeFile|writeTextFile|appendFile|rename|unlink|rm)\s*\(/);
 	await writeFile(extensionPath, NOVEL_TOOLS_EXTENSION_CONTENT, "utf8");
 

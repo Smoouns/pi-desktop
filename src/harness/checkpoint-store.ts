@@ -9,6 +9,8 @@ export interface PendingCheckpointOperation {
 }
 export interface CheckpointInput {
 	scope: RunScope;
+	/** Absent in legacy checkpoints; those references are not delivery receipts. */
+	evidenceFormat?: "delivered-v1";
 	objective: string;
 	hardConstraints: string[];
 	evidence: SourceVersionRef[];
@@ -110,8 +112,9 @@ export function createCheckpointStore(options: { digest: (text: string) => strin
 	};
 	const normalizeInput = (value: unknown, parsing: boolean): CheckpointInput => {
 		const raw = object(value, "checkpoint");
-		const base = ["scope", "objective", "hardConstraints", "evidence", "observationIds", "artifacts", "unresolvedIssues", "allowedNextActions", "pendingOperations", "budget", "cause", "parentId"];
+		const base = ["scope", "objective", "hardConstraints", "evidence", "observationIds", "artifacts", "unresolvedIssues", "allowedNextActions", "pendingOperations", "budget", "cause", "parentId", "evidenceFormat"];
 		exact(raw, parsing ? ["schemaVersion", "id", ...base] : base, "checkpoint");
+		if (raw.evidenceFormat !== undefined && raw.evidenceFormat !== "delivered-v1") throw new TypeError("checkpoint.evidenceFormat is invalid");
 		const cause = raw.cause;
 		if (cause !== "manual" && cause !== "before_compact" && cause !== "after_compact" && cause !== "write_intent" && cause !== "write_result" && cause !== "refresh") throw new TypeError("checkpoint.cause is invalid");
 		const budget = object(raw.budget, "budget"); exact(budget, ["readUsed", "outputUsed", "requestEstimate"], "budget");
@@ -126,6 +129,7 @@ export function createCheckpointStore(options: { digest: (text: string) => strin
 			pendingOperations: list(raw.pendingOperations, "pendingOperations", 64, (item, index) => { const operation = object(item, `pendingOperations[${index}]`); exact(operation, ["operationId", "toolName", "target", "preHash", "expectedPostHash", "argsDigest", "state", "dispatched"], `pendingOperations[${index}]`); if (typeof operation.dispatched !== "boolean") throw new TypeError(`pendingOperations[${index}].dispatched must be a boolean`); const nullable = (field: "preHash" | "expectedPostHash") => operation[field] === null ? null : sha(operation[field], `pendingOperations[${index}].${field}`); const state = operation.state; if (state !== "issued" && state !== "completed" && state !== "unknown" && state !== "cancelled" && state !== "failed") throw new TypeError(`pendingOperations[${index}].state is invalid`); return { operationId: text(operation.operationId, `pendingOperations[${index}].operationId`, 4096), toolName: text(operation.toolName, `pendingOperations[${index}].toolName`, 4096), target: safePath(operation.target, `pendingOperations[${index}].target`), preHash: nullable("preHash"), expectedPostHash: nullable("expectedPostHash"), argsDigest: sha(operation.argsDigest, `pendingOperations[${index}].argsDigest`), state, dispatched: operation.dispatched }; }),
 			budget: { readUsed: integer(budget.readUsed, "budget.readUsed"), outputUsed: integer(budget.outputUsed, "budget.outputUsed"), requestEstimate: budget.requestEstimate === null ? null : integer(budget.requestEstimate, "budget.requestEstimate") },
 			cause, ...(raw.parentId === undefined ? {} : { parentId: text(raw.parentId, "parentId", 4096) }),
+			...(raw.evidenceFormat === undefined ? {} : { evidenceFormat: "delivered-v1" as const }),
 		};
 	};
 	const serialize = (input: CheckpointInput): string => JSON.stringify({ schemaVersion: 1, ...input });

@@ -23,6 +23,10 @@ export function runCheckpointStoreTests(): void {
 	const first = store.build(input());
 	assert.match(first.id, /^cp_[0-9a-f]+$/); assert.equal(first.schemaVersion, 1);
 	const parsed = store.parse(JSON.parse(JSON.stringify(first))); assert.deepEqual(parsed, first); assert.notEqual(parsed, first);
+	const delivered = store.build(input({ evidenceFormat: "delivered-v1" } as Partial<CheckpointInput>));
+	assert.equal((store.parse(delivered) as any).evidenceFormat, "delivered-v1");
+	assert.equal((store.parse(first) as any).evidenceFormat, undefined, "legacy checkpoints retain their exact original digest and lack of receipt provenance");
+	assert.throws(() => store.build(input({ evidenceFormat: "future-format" } as any)), /evidenceFormat/);
 	const mutable = input(); const built = store.build(mutable); mutable.hardConstraints[0] = "changed"; mutable.evidence[0]!.path = "changed.md"; assert.equal(built.hardConstraints[0], "Do not edit canon"); assert.equal(built.evidence[0]!.path, "canon/world.md");
 	(parsed.scope as RunScope).projectId = "mutated"; parsed.evidence[0]!.path = "mutated.md"; assert.equal(store.parse(first).scope.projectId, "project-a"); assert.equal(store.parse(first).evidence[0]!.path, "canon/world.md");
 

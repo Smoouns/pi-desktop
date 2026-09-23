@@ -18,6 +18,8 @@ export interface SourceVersionCheck {
 
 export interface SourceVersionResolverResult {
 	sha256: string | null;
+	/** Only for comparing a legacy whole-file dependency with fresh delivered ranges. */
+	totalLines?: number;
 	authority?: string;
 	temporal?: string;
 	memoryId?: string;

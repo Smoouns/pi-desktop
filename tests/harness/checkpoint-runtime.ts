@@ -103,7 +103,7 @@ export async function runCheckpointRuntimeCases(runCase: RunCase): Promise<void>
 	await runCase("checkpoint-runtime-restores-only-post-checkpoint-scoped-receipts", () => {
 		const f = fixture(); f.runtime.observe(f.ctx, f.run, [ref({ path: "canon/base.md" })]); const checkpoint = f.runtime.capture(f.ctx, f.run);
 		const before = { type: "message", message: { role: "toolResult", details: { observedRun: scope, observation: { sourceRefs: [ref({ path: "canon/before.md" })] } } } };
-		const after = { type: "message", message: { role: "toolResult", details: { observedRun: scope, observation: { sourceRefs: [ref({ path: "canon/after.md" })] } } } };
+		const after = { type: "message", message: { role: "toolResult", details: { observedRun: scope, readDelivery: { schemaVersion: 1, sourceRefs: [ref({ path: "canon/after.md" })] } } } };
 		const foreign = { type: "message", message: { role: "toolResult", details: { observedRun: { ...scope, projectId: "other" }, observation: { sourceRefs: [ref({ path: "canon/foreign.md" })] } } } };
 		f.branch.splice(0, f.branch.length, before, { type: "custom", customType: "pi-desktop-task-checkpoint", data: checkpoint }, after, foreign);
 		f.entries.splice(0, f.entries.length);
@@ -112,12 +112,57 @@ export async function runCheckpointRuntimeCases(runCase: RunCase): Promise<void>
 		assert.equal(restored.evidence.some((item) => item.path === "canon/before.md" || item.path === "canon/foreign.md"), false);
 	});
 
-	await runCase("checkpoint-runtime-harvests-legacy-raw-ref-as-neutral", () => {
+	await runCase("checkpoint-runtime-legacy-capture-remains-an-unproven-dependency", async () => {
 		const f = fixture();
 		f.branch.splice(0, f.branch.length, { type: "message", message: { role: "toolResult", details: { observedRun: scope, observation: { sourceRefs: [{ path: "drafts/legacy.md", sha256: hash("legacy"), startLine: 1, endLine: 2, authority: "unclassified", temporal: "old" }] } } } });
 		f.runtime.restore(f.ctx, f.run); const checkpoint = f.runtime.capture(f.ctx, f.run);
 		const legacy = checkpoint.evidence.find((item) => item.path === "drafts/legacy.md");
 		assert.deepEqual({ authority: legacy?.authority, temporal: legacy?.temporal }, { authority: "reference", temporal: "unspecified" });
+		assert.equal((await f.runtime.inspect(f.ctx, f.run)).status, "needs_revalidation");
+		assert.equal((await f.runtime.refresh(f.ctx, f.run)).status, "needs_revalidation", "a matching file hash is not proof of legacy content delivery");
+	});
+
+	await runCase("checkpoint-runtime-legacy-checkpoint-needs-new-delivery-but-retains-history", async () => {
+		const f = fixture(); f.runtime.observe(f.ctx, f.run, [ref({ startLine: 8, endLine: 9 })]);
+		const current = f.runtime.capture(f.ctx, f.run);
+		const { id: _id, schemaVersion: _version, evidenceFormat: _format, ...legacyInput } = current as any;
+		const legacy = createCheckpointStore({ digest: hash }).build(legacyInput);
+		f.entries.splice(0, f.entries.length, { type: "custom", customType: "pi-desktop-task-checkpoint", data: legacy });
+		f.runtime.restore(f.ctx, f.run);
+		assert.equal((await f.runtime.inspect(f.ctx, f.run)).status, "needs_revalidation");
+		f.runtime.capture(f.ctx, f.run); f.runtime.restore(f.ctx, f.run);
+		assert.equal((await f.runtime.refresh(f.ctx, f.run)).status, "needs_revalidation", "saving the new format must not erase legacy revalidation requirements");
+		f.runtime.observe(f.ctx, f.run, [ref({ startLine: 8, endLine: 9 })]);
+		assert.equal((await f.runtime.refresh(f.ctx, f.run)).status, "ready");
+		assert.deepEqual(f.runtime.capture(f.ctx, f.run).hardConstraints, legacy.hardConstraints);
+	});
+	await runCase("checkpoint-runtime-legacy-capture-does-not-double-count-restored-dependencies", async () => {
+		const f = fixture();
+		const refs = Array.from({ length: 80 }, (_, i) => ref({ startLine: i + 1, endLine: i + 1 }));
+		for (let i = 0; i < refs.length; i += 20) f.branch.push({ type: "message", message: { role: "toolResult", details: { observedRun: scope, observation: { sourceRefs: refs.slice(i, i + 20) } } } });
+		f.runtime.restore(f.ctx, f.run); f.runtime.capture(f.ctx, f.run);
+		assert.equal((await f.runtime.inspect(f.ctx, f.run)).status, "needs_revalidation");
+		f.runtime.observe(f.ctx, f.run, refs);
+		assert.equal((await f.runtime.refresh(f.ctx, f.run)).status, "ready");
+	});
+
+	await runCase("checkpoint-runtime-contiguous-delivered-ranges-cover-only-one-version", async () => {
+		for (const mode of ["complete", "gap", "mixed-hash", "different-authority"] as const) {
+			const f = fixture(), changed = hash("new");
+			f.runtime.observe(f.ctx, f.run, [ref({ startLine: 8, endLine: 10 })]); f.runtime.capture(f.ctx, f.run);
+			f.current.set("canon/world.md", { sha256: changed, authority: "canonical", temporal: "current" });
+			assert.equal((await f.runtime.inspect(f.ctx, f.run)).status, "needs_revalidation");
+			f.runtime.observe(f.ctx, f.run, [ref({ sha256: changed, startLine: 8, endLine: 8 }),
+				ref({ sha256: mode === "mixed-hash" ? hash("other") : changed, startLine: mode === "gap" ? 10 : 9, endLine: 10, authority: mode === "different-authority" ? "reference" : "canonical" })]);
+			assert.equal((await f.runtime.refresh(f.ctx, f.run)).status, mode === "complete" ? "ready" : "needs_revalidation");
+		}
+	});
+	await runCase("checkpoint-runtime-fresh-paged-reread-does-not-require-a-prior-status-query", async () => {
+		const f = fixture(), changed = hash("new");
+		f.runtime.observe(f.ctx, f.run, [ref({ startLine: 8, endLine: 10 })]); f.runtime.capture(f.ctx, f.run);
+		f.current.set("canon/world.md", { sha256: changed, authority: "canonical", temporal: "current" });
+		f.runtime.observe(f.ctx, f.run, [ref({ sha256: changed, startLine: 8, endLine: 8 }), ref({ sha256: changed, startLine: 9, endLine: 10 })]);
+		assert.equal((await f.runtime.refresh(f.ctx, f.run)).status, "ready");
 	});
 
 	await runCase("checkpoint-runtime-artifact-refresh-accepts-fresh-ranged-raw-read", async () => {

@@ -11,7 +11,7 @@ const outputParent = path.join(root, "artifacts/harness");
 await mkdir(outputParent, { recursive: true });
 const work = await mkdtemp(path.join(outputParent, ".build-"));
 const mode = process.argv[2];
-assert.ok(["harness", "regression", "long-horizon", "review-repros"].includes(mode), "Usage: run-public-tests.mjs harness|regression|long-horizon|review-repros");
+assert.ok(["harness", "regression", "long-horizon", "review-repros", "read-delivery"].includes(mode), "Usage: run-public-tests.mjs harness|regression|long-horizon|review-repros|read-delivery");
 
 // Always use the installed, pinned loader. Bundled tests still resolve runtime packages
 // from this checkout, not a user's global Pi installation or home extensions.
@@ -39,7 +39,9 @@ function execute(filename) {
 	// Test inputs are synthetic. Do not pass provider credentials to the test process.
 	for (const key of Object.keys(environment)) if (/(?:API_KEY|AUTH_TOKEN|ACCESS_TOKEN|SECRET_ACCESS_KEY)$/.test(key)) delete environment[key];
 	const result = spawnSync(process.execPath, ["--experimental-strip-types", filename], {
-		cwd: root, stdio: "inherit", timeout: 180_000,
+		// B1's Windows CI already took about 166 s. The delivery contracts add
+		// ~9 s per repetition locally; retain a bounded margin for all 3 repeats.
+		cwd: root, stdio: "inherit", timeout: mode === "harness" ? 240_000 : 180_000,
 		env: environment,
 	});
 	if (result.error) throw result.error;
@@ -61,7 +63,9 @@ async function fixtureBytes() {
 }
 
 try {
-	if (mode === "review-repros") {
+	if (mode === "read-delivery") {
+		execute(await bundle("tests/harness/read-delivery-run.ts", aliases));
+	} else if (mode === "review-repros") {
 		execute(await bundle("tests/harness/review-repros-run.ts", aliases));
 	} else if (mode === "harness" || mode === "long-horizon") {
 		execute(await bundle(mode === "harness" ? "tests/harness/run.ts" : "tests/harness/long-horizon-run.ts", aliases));

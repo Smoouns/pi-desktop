@@ -9,16 +9,20 @@ export function createCheckpointRuntime(deps: {
 	append: (checkpoint: TaskCheckpoint) => void;
 	resolve: (ref: SourceVersionRef, ctx: any, run: any, cache: Map<string, any>) => Promise<SourceVersionResolverResult>;
 	assertRun: (run: any) => void; budget: (scope: RunScope) => { readUsed: number; outputUsed: number };
+	pathKey?: (path: string) => string;
 }) {
 	type Receipt = { ref: SourceVersionRef; sequence: number };
-	type State = { owner: string; checkpoint: TaskCheckpoint | null; error: string | null; sequence: number; receipts: Map<string, Receipt>; observationIds: Set<string>; artifacts: Map<string, SourceVersionRef>; operations: Map<string, PendingCheckpointOperation>; stale: Set<string> };
+	type State = { owner: string; checkpoint: TaskCheckpoint | null; error: string | null; sequence: number; receipts: Map<string, Receipt>; legacy: Map<string, SourceVersionRef>; deliveryEpoch: number; observationIds: Set<string>; artifacts: Map<string, SourceVersionRef>; operations: Map<string, PendingCheckpointOperation>; stale: Set<string> };
 	let state: State | null = null;
+	let epoch = 0;
 	const owner = (scope: RunScope) => JSON.stringify([scope.projectId, scope.sessionId, scope.role]);
 	const sourceKey = (ref: SourceVersionRef) => JSON.stringify([ref.path, ref.startLine ?? null, ref.endLine ?? null, ref.authority ?? null, ref.temporal ?? null, Boolean(ref.memoryId)]);
+	const normalize = (raw: SourceVersionRef) => deps.versions.normalize({ ...raw, path: deps.pathKey?.(raw.path) ?? raw.path });
 	const text = (message: any): string => typeof message?.content === "string" ? message.content : (message?.content ?? []).filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n");
 	const cloneOperation = (operation: PendingCheckpointOperation): PendingCheckpointOperation => ({ operationId: operation.operationId, toolName: operation.toolName, target: operation.target, preHash: operation.preHash, expectedPostHash: operation.expectedPostHash, argsDigest: operation.argsDigest, state: operation.state, dispatched: operation.dispatched });
 	const currentEvidence = (current: State): SourceVersionRef[] => {
 		const evidence = new Map((current.checkpoint?.evidence ?? []).map((ref) => [sourceKey(ref), ref]));
+		for (const [key, ref] of current.legacy) if (!evidence.has(key)) evidence.set(key, ref);
 		for (const [key, receipt] of current.receipts) if (!evidence.has(key)) evidence.set(key, receipt.ref);
 		return [...evidence.values()];
 	};
@@ -26,7 +30,7 @@ export function createCheckpointRuntime(deps: {
 	const ensure = (ctx: any, run: any): State => {
 		deps.assertRun(run);
 		if (state?.owner === owner(run.scope)) return state;
-		state = { owner: owner(run.scope), checkpoint: null, error: null, sequence: 0, receipts: new Map(), observationIds: new Set(), artifacts: new Map(), operations: new Map(), stale: new Set() };
+		state = { owner: owner(run.scope), checkpoint: null, error: null, sequence: 0, receipts: new Map(), legacy: new Map(), deliveryEpoch: ++epoch, observationIds: new Set(), artifacts: new Map(), operations: new Map(), stale: new Set() };
 		try {
 			const branch = ctx.sessionManager?.getBranch?.() ?? [];
 			state.checkpoint = deps.store.latest(branch, run.scope);
@@ -34,16 +38,23 @@ export function createCheckpointRuntime(deps: {
 			for (const ref of state.checkpoint?.artifacts ?? []) state.artifacts.set(sourceKey(ref), { ...ref });
 			for (const id of state.checkpoint?.observationIds ?? []) state.observationIds.add(id);
 			for (const issue of state.checkpoint?.unresolvedIssues ?? []) if (issue.code === "STALE_SOURCE") state.stale.add(issue.message);
+			if (state.checkpoint && state.checkpoint.evidenceFormat !== "delivered-v1") for (const ref of state.checkpoint.evidence) state.stale.add(ref.path);
 			// Only tool results after the restored checkpoint can be new dependencies.
 			// A durable stale latch still requires an in-process read after restoration.
 			const checkpointIndex = state.checkpoint ? branch.findLastIndex((entry: any) => entry?.type === "custom" && entry?.customType === "pi-desktop-task-checkpoint" && entry?.data?.id === state!.checkpoint!.id) : -1;
 			for (const entry of branch.slice(checkpointIndex + 1)) {
 				const details = entry?.type === "message" && entry.message?.role === "toolResult" ? entry.message?.details : entry?.details;
 				const observed = details?.observedRun;
-				if (!observed || owner(observed) !== state.owner || !Array.isArray(details?.observation?.sourceRefs)) continue;
-				for (const raw of details.observation.sourceRefs) {
+				if (!observed || owner(observed) !== state.owner || entry.message?.isError) continue;
+				const delivered = details.readDelivery?.schemaVersion === 1;
+				const refs = delivered ? details.readDelivery.sourceRefs : details?.observation?.sourceRefs;
+				if (!Array.isArray(refs)) continue;
+				for (const raw of refs) {
 					const neutral = raw?.authority === "unclassified" && !raw?.memoryId ? { ...raw, authority: "reference", temporal: "unspecified" } : raw;
-					const ref = deps.versions.normalize(neutral); if (!state.stale.has(ref.path)) state.receipts.set(sourceKey(ref), { ref, sequence: ++state.sequence });
+					const ref = normalize(neutral);
+					if (!delivered) { state.legacy.set(sourceKey(ref), ref); state.stale.add(ref.path); }
+					else if (!state.stale.has(ref.path)) state.receipts.set(sourceKey(ref), { ref, sequence: ++state.sequence });
+					if (state.receipts.size > 128 || state.legacy.size > 128) throw new Error("Checkpoint restored receipt capacity exceeded");
 				}
 			}
 		} catch { state.error = "检查点格式或完整性无效；请检查会话记录，不能回退使用旧检查点。"; }
@@ -56,9 +67,7 @@ export function createCheckpointRuntime(deps: {
 		for (const entry of ctx.sessionManager?.getBranch?.() ?? []) if (entry.type === "message" && entry.message?.role === "user") { const value = text(entry.message); if (value) branchConstraints.push(value); }
 		const constraints = branchConstraints.length ? branchConstraints : [...(previous?.hardConstraints ?? [])];
 		const objective = branchConstraints.at(-1) ?? previous?.objective ?? "";
-		const evidence = new Map((previous?.evidence ?? []).map((ref) => [sourceKey(ref), ref]));
-		for (const [key, receipt] of current.receipts) if (!evidence.has(key)) evidence.set(key, receipt.ref);
-		return deps.store.build({ scope: { ...run.scope }, objective, hardConstraints: constraints, evidence: [...evidence.values()], observationIds: [...current.observationIds].slice(-128), artifacts: [...current.artifacts.values()], unresolvedIssues: [...(previous?.unresolvedIssues ?? []).filter((issue) => issue.code !== "STALE_SOURCE"), ...[...current.stale].map((path) => ({ code: "STALE_SOURCE", message: path }))], allowedNextActions: ["核验来源；失效时重新读取并 refresh_task_checkpoint；只在现有角色权限内继续；人工验收与 Canon 晋升仍由用户决定"], pendingOperations: [...current.operations.values()].map(cloneOperation), budget: { ...deps.budget(run.scope), requestEstimate: null }, cause, ...supplied });
+		return deps.store.build({ scope: { ...run.scope }, evidenceFormat: "delivered-v1", objective, hardConstraints: constraints, evidence: currentEvidence(current), observationIds: [...current.observationIds].slice(-128), artifacts: [...current.artifacts.values()], unresolvedIssues: [...(previous?.unresolvedIssues ?? []).filter((issue) => issue.code !== "STALE_SOURCE"), ...[...current.stale].map((path) => ({ code: "STALE_SOURCE", message: path }))], allowedNextActions: ["核验来源；失效时重新读取并 refresh_task_checkpoint；只在现有角色权限内继续；人工验收与 Canon 晋升仍由用户决定"], pendingOperations: [...current.operations.values()].map(cloneOperation), budget: { ...deps.budget(run.scope), requestEstimate: null }, cause, ...supplied });
 	};
 	const poison = (current: State): void => { current.error = "检查点持久化失败；为避免重放或越权，本任务已禁止继续写入。"; };
 	const persist = (ctx: any, run: any, cause: TaskCheckpoint["cause"], supplied?: Partial<TaskCheckpoint>): TaskCheckpoint => {
@@ -70,7 +79,10 @@ export function createCheckpointRuntime(deps: {
 	const inspect = async (ctx: any, run: any) => {
 		const current = ensure(ctx, run);
 		if (current.error) return { checkpoint: current.checkpoint, status: "blocked", invalidPaths: [...current.stale], blockedOperationIds: [...current.operations.values()].filter((x) => !["completed", "cancelled", "failed"].includes(x.state)).map((x) => x.operationId), writeAuthority: false, error: current.error };
-		const checkpoint = current.checkpoint; const evidence = checkpoint?.evidence ?? [];
+		const checkpoint = current.checkpoint;
+		const pinned = new Map((checkpoint?.evidence ?? []).map((ref) => [sourceKey(ref), ref]));
+		for (const [key, ref] of current.legacy) if (!pinned.has(key)) pinned.set(key, ref);
+		const evidence = [...pinned.values()];
 		const receiptRefs = [...current.receipts.values()].map((x) => x.ref).filter((ref) => !evidence.some((old) => sourceKey(old) === sourceKey(ref) && old.sha256 === ref.sha256));
 		const cache = new Map<string, any>(); const check = (refs: SourceVersionRef[]) => deps.versions.revalidate(refs, (ref) => deps.resolve(ref, ctx, run, cache), run.controller.signal);
 		const sources = await check([...evidence, ...receiptRefs]); assertOwned(current, run);
@@ -78,7 +90,7 @@ export function createCheckpointRuntime(deps: {
 		const pinnedEvidence = currentEvidence(current);
 		let newlyStale = false;
 		for (const item of [...sources.checks, ...artifacts.checks]) if (item.status !== "valid" && !current.stale.has(item.ref.path)) { newlyStale = true; current.stale.add(item.ref.path); for (const [key, receipt] of current.receipts) if (receipt.ref.path === item.ref.path) current.receipts.delete(key); }
-		if (newlyStale) try { persist(ctx, run, "refresh", { evidence: pinnedEvidence }); } catch { return { checkpoint: current.checkpoint, status: "blocked", invalidPaths: [...current.stale], blockedOperationIds: [...current.operations.values()].filter((x) => !["completed", "cancelled", "failed"].includes(x.state)).map((x) => x.operationId), writeAuthority: false, error: current.error }; }
+		if (newlyStale) try { current.deliveryEpoch = ++epoch; persist(ctx, run, "refresh", { evidence: pinnedEvidence }); } catch { return { checkpoint: current.checkpoint, status: "blocked", invalidPaths: [...current.stale], blockedOperationIds: [...current.operations.values()].filter((x) => !["completed", "cancelled", "failed"].includes(x.state)).map((x) => x.operationId), writeAuthority: false, error: current.error }; }
 		const evaluation = deps.invalidation.evaluate({ scopeMatches: true, sources: sources.checks, artifactChecks: artifacts.checks, pendingOperations: [...current.operations.values()] });
 		const status = evaluation.status === "ready" && current.stale.size ? "needs_revalidation" : (!checkpoint && evaluation.status === "ready" ? "empty" : evaluation.status);
 		return { checkpoint: current.checkpoint, status, invalidPaths: [...new Set([...current.stale, ...evaluation.invalidPaths])], blockedOperationIds: evaluation.blockedOperationIds, writeAuthority: false };
@@ -97,28 +109,47 @@ export function createCheckpointRuntime(deps: {
 	};
 	return {
 		reset() { state = null; }, restore(ctx: any, run: any) { state = null; ensure(ctx, run); },
+		deliveryEpoch(ctx: any, run: any) { return ensure(ctx, run).deliveryEpoch; },
 		observe(ctx: any, run: any, refs: SourceVersionRef[], observationId?: string) {
-			const current = ensure(ctx, run); for (const raw of refs) { const ref = deps.versions.normalize(raw); const key = sourceKey(ref); if (!current.receipts.has(key) && current.receipts.size >= 128) throw new Error("Checkpoint evidence receipt capacity exceeded"); current.receipts.set(key, { ref, sequence: ++current.sequence }); }
+			const current = ensure(ctx, run), receipts = new Map(current.receipts); let sequence = current.sequence;
+			for (const raw of refs) { const ref = normalize(raw); receipts.set(sourceKey(ref), { ref, sequence: ++sequence }); }
+			if (receipts.size > 128) throw new Error("Checkpoint evidence receipt capacity exceeded");
+			current.receipts = receipts; current.sequence = sequence;
 			if (observationId) { current.observationIds.delete(observationId); current.observationIds.add(observationId); while (current.observationIds.size > 128) current.observationIds.delete(current.observationIds.values().next().value as string); }
 		},
 		capture(ctx: any, run: any, cause: TaskCheckpoint["cause"] = "manual") { return persist(ctx, run, cause); }, inspect,
 		async refresh(ctx: any, run: any) {
-			const current = ensure(ctx, run); if (current.error) return inspect(ctx, run); const checkpoint = current.checkpoint;
-			if (!checkpoint) { persist(ctx, run, "refresh"); return inspect(ctx, run); }
+			const current = ensure(ctx, run); if (current.error) return inspect(ctx, run); const checkpoint = current.checkpoint ?? persist(ctx, run, "refresh");
 			const evidence: SourceVersionRef[] = [], artifacts: SourceVersionRef[] = [], cache = new Map<string, any>(), unresolved = new Set<string>();
-			for (const [refs, output, artifact] of [[checkpoint.evidence, evidence, false], [[...current.artifacts.values()], artifacts, true]] as const) for (const old of refs) {
-				const exact = current.receipts.get(sourceKey(old));
-				const rawReceipts = [...current.receipts.values()].filter((item) => item.ref.path === old.path && !item.ref.memoryId).sort((a, b) => b.sequence - a.sequence);
+			for (const [refs, output, artifact] of [[currentEvidence(current), evidence, false], [[...current.artifacts.values()], artifacts, true]] as const) for (const old of refs) {
+				let version: SourceVersionResolverResult;
+				try { version = await deps.resolve(old, ctx, run, cache); } catch { version = { sha256: null }; }
+				assertOwned(current, run);
+				const recorded = current.receipts.get(sourceKey(old));
+				const exact = recorded?.ref.sha256 === version.sha256 ? recorded : undefined;
+				const rawReceipts = [...current.receipts.values()].filter((item) => item.ref.path === old.path && !item.ref.memoryId && item.ref.sha256 === version.sha256).sort((a, b) => b.sequence - a.sequence);
 				const covering = !artifact && !old.memoryId ? rawReceipts.find((item) => item.ref.authority === old.authority && item.ref.temporal === old.temporal && old.startLine !== undefined && item.ref.startLine !== undefined && item.ref.startLine <= old.startLine && item.ref.endLine! >= old.endLine!) : undefined;
+				let combined: SourceVersionRef | undefined;
+				if (!exact && !covering && !artifact && !old.memoryId) {
+					const start = old.startLine ?? 1, end = old.endLine ?? version.totalLines;
+					const compatible = rawReceipts.map((item) => item.ref).filter((ref) => ref.sha256 === version.sha256 && ref.authority === old.authority && ref.temporal === old.temporal && ref.startLine !== undefined).sort((a, b) => a.startLine! - b.startLine!);
+					let next = start;
+					for (const ref of compatible) { if (ref.startLine! > next) break; next = Math.max(next, ref.endLine! + 1); }
+					if (end !== undefined && next > end && version.sha256) combined = { ...old, sha256: version.sha256, startLine: start, endLine: end };
+				}
 				const artifactProof = artifact && !old.memoryId ? rawReceipts[0] : undefined;
-				const receipt = exact ?? covering ?? artifactProof;
-				const candidate = exact?.ref ?? covering?.ref ?? (artifactProof ? { ...old, sha256: artifactProof.ref.sha256 } : old);
+				const receipt = exact ?? covering ?? combined ?? artifactProof;
+				const candidate = exact?.ref ?? covering?.ref ?? combined ?? (artifactProof ? { ...old, sha256: artifactProof.ref.sha256 } : old);
 				const check = await deps.versions.revalidate([candidate], (ref) => deps.resolve(ref, ctx, run, cache), run.controller.signal); assertOwned(current, run);
 				if (!check.valid || (current.stale.has(old.path) && !receipt)) { unresolved.add(old.path); output.push(old); } else output.push(candidate);
 			}
 			await reconcile(ctx, run); assertOwned(current, run);
 			for (const ref of current.artifacts.values()) if (!artifacts.some((old) => sourceKey(old) === sourceKey(ref))) artifacts.push(ref);
-			persist(ctx, run, "refresh", { evidence, artifacts, unresolvedIssues: [...checkpoint.unresolvedIssues.filter((x) => x.code !== "STALE_SOURCE"), ...[...unresolved].map((path) => ({ code: "STALE_SOURCE", message: path }))] }); current.stale = unresolved; current.artifacts = new Map(artifacts.map((ref) => [sourceKey(ref), ref])); return inspect(ctx, run);
+			persist(ctx, run, "refresh", { evidence, artifacts, unresolvedIssues: [...checkpoint.unresolvedIssues.filter((x) => x.code !== "STALE_SOURCE"), ...[...unresolved].map((path) => ({ code: "STALE_SOURCE", message: path }))] });
+			// Every old dependency on these paths was covered above. Retire only its
+			// obsolete version, so a stale exact receipt cannot shadow fresh pages.
+			for (const [key, receipt] of current.receipts) if (!unresolved.has(receipt.ref.path) && evidence.some((ref) => ref.path === receipt.ref.path && ref.sha256 !== receipt.ref.sha256)) current.receipts.delete(key);
+			current.legacy.clear(); current.stale = unresolved; current.artifacts = new Map(artifacts.map((ref) => [sourceKey(ref), ref])); return inspect(ctx, run);
 		},
 		async writeGate(ctx: any, run: any, intent?: { target: string; argsDigest: string; toolName: string; operationId: string }) {
 			const current = ensure(ctx, run); if (current.error) return "[checkpoint_persistence] 检查点持久化失败，禁止写入。"; try { await reconcile(ctx, run); } catch { return "[checkpoint_persistence] 检查点持久化失败，禁止写入。"; }

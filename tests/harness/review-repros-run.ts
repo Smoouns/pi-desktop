@@ -30,6 +30,7 @@ const runCase: RunCase = async (id, body) => {
 await runReviewRepros(runCase);
 const implementation: Record<string, string> = {};
 for (const name of ["src/extensions/novel-tools-extension.ts", "src/extensions/checkpoint-runtime.ts", "src/harness/checkpoint-store.ts",
+	"src/harness/read-delivery.ts", "src/harness/source-version.ts",
 	"src/harness/operation-ledger.ts", "tests/harness/review-repros.ts", "tests/harness/review-repros-run.ts", "tests/harness/phase4-extension.ts", "package-lock.json"]) {
 	implementation[name] = sha256(await readFile(name));
 }
@@ -42,7 +43,7 @@ const summary = { schemaVersion: 1, reviewBase: "87b4ac8e009e36471a9530ce3918f2a
 	boundary: "Full production extension + pinned SDK native tools and ExtensionRunner; synthetic session manager; no model, Desktop or cold reopen.", cases };
 await writeFile(path.join(output, "summary.json"), JSON.stringify(summary, null, 2) + "\n", { flag: "wx" });
 console.log(`Review repro evidence: ${path.relative(process.cwd(), output)}`);
-console.log(`Review contracts: ${cases.filter((item) => item.status === "confirmed").length} confirmed violations (NOT fixed), ${cases.filter((item) => item.status === "error").length} infrastructure/control errors.`);
+console.log(`Review contracts: ${cases.filter((item) => item.status === "contract_pass").length} passed, ${cases.filter((item) => item.status === "confirmed").length} remaining contract violations, ${cases.filter((item) => item.status === "error").length} infrastructure/control errors.`);
 // A confirmed bug must remain RED. Do not make the normal regression suite green
 // by relabelling known failures as passing; this target is deliberately opt-in.
 process.exitCode = cases.some((item) => item.status === "error") ? 2 : cases.some((item) => item.status === "confirmed") ? 1 : 0;
