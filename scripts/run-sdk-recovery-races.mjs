@@ -15,7 +15,7 @@ try {
   const bundle = path.join(work, "sdk-recovery-races.mjs"), inputs = {};
   await build({ entryPoints: [path.join(root, "evals/sdk-recovery-races/cli.ts")], outfile: bundle, bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "warning", plugins: [{
     name: "race-pinned-inputs", setup(api) { api.onLoad({ filter: /\.(ts|json)$/ }, async ({ path: filename }) => {
-      const name = path.relative(root, filename).replaceAll("\\", "/"); assert.ok(/^(evals|tests)\//.test(name) || name === "src/extensions/checkpoint-runtime.ts");
+      const name = path.relative(root, filename).replaceAll("\\", "/"); assert.ok(/^(evals|tests)\//.test(name));
       const contents = await readFile(filename); inputs[name] = createHash("sha256").update(contents).digest("hex"); return { contents, loader: filename.endsWith(".json") ? "json" : "ts" };
     }); }
   }] });

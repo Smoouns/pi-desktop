@@ -69,6 +69,7 @@ export async function runOperationCases(runCase: RunCase): Promise<void> {
 		assert.equal(decision.state, "unknown");
 		assert.equal(decision.reason, "pre-state-conflict");
 		assert.equal(ledger.prepare(intent(), "before").action, "blocked", "A conflicted operation ID is not reusable");
+		assert.equal(ledger.prepare(intent(), "after").action, "blocked", "Externally matching bytes do not complete an operation that was never dispatched");
 	});
 
 	await runCase("operations.scope-and-args-collisions", () => {
@@ -167,7 +168,8 @@ export async function runOperationCases(runCase: RunCase): Promise<void> {
 		const before = createOperationLedger();
 		before.prepare(intent(), "before");
 		assert.equal(before.cancel("call-1").state, "cancelled");
-		assert.equal(before.prepare(intent(), "before").action, "dispatch", "Cancellation before dispatch may be retried");
+		assert.equal(before.prepare(intent(), "before").reason, "operation-cancelled", "A cancelled operation ID is a terminal tombstone");
+		assert.equal(before.prepare(intent({ toolCallId: "fresh-call" }), "before").action, "dispatch", "A fresh call may replace a certainly undispatched cancellation");
 		const changed = createOperationLedger();
 		changed.prepare(intent(), "before");
 		changed.cancel("call-1");
@@ -178,6 +180,55 @@ export async function runOperationCases(runCase: RunCase): Promise<void> {
 		after.markDispatched("call-1");
 		assert.equal(after.cancel("call-1").state, "unknown");
 		assert.equal(after.prepare(intent(), "before").action, "blocked", "Cancellation after dispatch must not replay blindly");
+	});
+
+	await runCase("operations.history-is-not-current-satisfaction", () => {
+		for (const reuseId of [true, false]) {
+			const ledger = createOperationLedger();
+			ledger.prepare(intent(), "before"); ledger.markDispatched("call-1"); ledger.complete("call-1", "after");
+			const retry = intent({ toolCallId: reuseId ? "call-1" : "call-2", preHash: "external" });
+			const verdict = ledger.prepare(retry, "external");
+			assert.equal(verdict.action, "blocked");
+			assert.equal(verdict.reason, "completed-state-no-longer-observed");
+			assert.equal(verdict.state, "completed", "The historical success must not become an unknown execution");
+			assert.equal(ledger.snapshot().length, 1, "A new transport ID is not permission to repeat a completed intent");
+			assert.equal(ledger.snapshot()[0]!.state, "completed");
+			assert.equal(ledger.prepare(intent({ toolCallId: "corrected", argsDigest: "new-intent", expectedPostHash: "C", preHash: "external" }), "external").action, "dispatch");
+		}
+	});
+
+	await runCase("operations.terminal-history-survives-late-callbacks", () => {
+		const ledger = createOperationLedger();
+		ledger.prepare(intent(), "before"); ledger.markDispatched("call-1"); ledger.complete("call-1", "after");
+		const original = ledger.snapshot();
+		for (const result of [ledger.cancel("call-1"), ledger.complete("call-1", "external"), ledger.completeAcknowledged("call-1", "external"), ledger.completeFailed("call-1", "before")]) {
+			assert.equal(result.action, "blocked"); assert.equal(result.state, "completed");
+		}
+		assert.deepEqual(ledger.snapshot(), original);
+		assert.equal(ledger.prepare(intent(), "after").action, "satisfied");
+		const failed = createOperationLedger();
+		failed.prepare(intent(), "before"); failed.markDispatched("call-1"); failed.completeFailed("call-1", "before");
+		assert.equal(failed.complete("call-1", "after").action, "blocked");
+		assert.equal(failed.cancel("call-1").state, "failed");
+		assert.equal(failed.snapshot()[0]!.state, "failed");
+	});
+
+	await runCase("operations.acknowledged-post-image-is-pinned", () => {
+		const ledger = createOperationLedger(), fuzzy = intent({ toolName: "edit", expectedPostHash: null });
+		ledger.prepare(fuzzy, "before"); ledger.markDispatched("call-1"); ledger.completeAcknowledged("call-1", "after");
+		assert.equal(ledger.prepare({ ...fuzzy, toolCallId: "retry", preHash: "external" }, "external").reason, "completed-state-no-longer-observed");
+		assert.equal(ledger.completeAcknowledged("call-1", "external").action, "blocked");
+		assert.equal(ledger.snapshot()[0]!.acknowledgedPostHash, "after");
+	});
+
+	await runCase("operations.undispatched-or-unresolved-intent-cannot-borrow-success", () => {
+		const ledger = createOperationLedger();
+		ledger.prepare(intent(), "before"); ledger.markDispatched("call-1"); ledger.complete("call-1", "after");
+		const second = intent({ toolCallId: "pending", argsDigest: "different", expectedPostHash: "later", preHash: "after" });
+		ledger.prepare(second, "after");
+		assert.equal(ledger.prepare(intent({ toolCallId: "replay" }), "after").action, "blocked", "Earlier success cannot conceal another in-flight write to this target");
+		assert.equal(ledger.prepare({ ...second, toolCallId: "fresh" }, "later").action, "blocked", "Never reconcile an undispatched intent solely from preexisting bytes");
+		assert.equal(ledger.snapshot().find((item) => item.operationId === "pending")!.state, "issued");
 	});
 
 	await runCase("operations.capacity-fails-closed", () => {

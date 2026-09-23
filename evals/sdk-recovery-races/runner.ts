@@ -14,7 +14,7 @@ import { initialHash, passes, policy, rebuild, validateManifest, validateRecord,
 const guardUrl = () => pathToFileURL(path.resolve("scripts/eval-network-guard.mjs")).href;
 export async function snapshot() {
   const sources = JSON.parse(await readBounded(process.env.PI_RACE_BUILD_INPUTS!));
-  for (const [file, expected] of Object.entries(sources)) { assert.ok(/^(evals|tests)\//.test(file) || file === "src/extensions/checkpoint-runtime.ts"); assert.equal(sha256(await readFile(file)), expected); }
+  for (const [file, expected] of Object.entries(sources)) { assert.ok(/^(evals|tests)\//.test(file)); assert.equal(sha256(await readFile(file)), expected); }
   for (const file of ["package.json", "package-lock.json", "scripts/run-sdk-recovery-races.mjs", "scripts/eval-network-guard.mjs"]) sources[file] = sha256(await readFile(file));
   for (const name of ["@mariozechner/pi-coding-agent", "@mariozechner/pi-agent-core", "@mariozechner/pi-ai"]) { const dir = `node_modules/${name}`; sources[`${dir}/package.json`] = sha256(await readFile(`${dir}/package.json`)); sources[`${dir}/dist-tree`] = digest(await treeManifest(`${dir}/dist`)); }
   return { sources, fixture: await treeManifest("fixtures/harness-novel") };

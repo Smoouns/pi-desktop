@@ -2,7 +2,7 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-本轮授权范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。暂不修改生产写入状态、读取凭证或任务完成合同；不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后获准提交推送首批改动、验证双平台 CI，并进入 B1 生产写入状态修复。B2 读取凭证与 C 任务完成合同仍未实施；不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
@@ -10,8 +10,8 @@
 
 | ID | 状态 | 本轮动作 / 后续计划 | 证据与限制 |
 | --- | --- | --- | --- |
-| AUD-01 | fixed_locally / CI_pending | 新增拒绝原因枚举；仅规范化隔离测试子进程的临时根；补路径正反例与 Windows 短路径回归 | 本机短路径条件下修复前失败、修复后通过；原 CI 的具体拒绝分支及修复提交双平台 CI 仍待确认 |
-| AUD-02 | confirmed / not_fixed | B1：完整扩展 + 原生 write/read，复现历史完成 A → 外部改为 B → 重读刷新 → 再请求 A | 新、旧 toolCallId 两例均错误声称 satisfied；目标仍为 B。本轮生产写入逻辑保持不变 |
+| AUD-01 | fixed / CI_passed | 新增拒绝原因枚举；仅规范化隔离测试子进程的临时根；补路径正反例与 Windows 短路径回归 | `f472e8d` 双平台 CI 全绿；Windows 8.3 用例实际执行，journal=11、unsupported=[]。原失败 CI 未输出具体拒绝分支，仍不冒充已确认其唯一根因 |
+| AUD-02 | fixed_locally / CI_pending | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | 新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放。本批单独提交，远程 CI 待验证；首批 CI 不包含此修复 |
 | AUD-03 | confirmed / not_fixed | B2：固定 SDK 原生 read 的范围、截断、预览与刷新复现 | LF/CRLF、无正文交付、隐藏尾部、无关片段刷新共五例违反合同；生产读取凭证逻辑保持不变 |
 | AUD-04 | deferred | C：工作流绑定稳定 taskId、任务类型、目标产物及完成条件 | 需显式版本化持久化 schema 与旧会话兼容策略 |
 | AUD-05 | deferred | C 中保留必需任务恢复信息，E 中测量压缩质量 | 不将进度摘要当作 Canon |
@@ -24,7 +24,9 @@
 ## 执行记录
 
 - 原始本地基线：`npm run test:pilot` 通过（journal=7；rehearsal=2/2；broker dry-run=pass；真实模型请求=0）。这不是对原 Windows CI 根因的动态确认。
-- 修复提交 / 新 CI：尚未提交、推送或触发远程 CI。
+- 首批修复已提交并推送：`f472e8d36252f527ba6d69774dcc4657ef312d5c`。远程 [CI 35866381033](https://github.com/Smoouns/pi-desktop/actions/runs/35866381033) 的 Windows/Node 24、Ubuntu/Node 22、TypeScript + Rust 三个任务全部通过。
+- Windows 日志确认 `PASS journal.windows-short-temp`，两次 Pilot journal 均为 passed=11、unsupported=[]，后续全部 SDK 检查实际执行。Ubuntu 唯一的平台条件跳过为 Windows 专属短路径步骤；不是必需测试被意外跳过。
+- B1 后续生产修复、回归与本清单更新作为独立批次提交；其固定提交的远程 CI 待验证，不属于上述 CI 的验收范围。
 - 远程验收门槛：固定修复提交上的 Windows/Node 24 与 Ubuntu/Node 22 必需检查实际执行并通过，未经说明的 skipped 不算通过。
 
 后续记录将在实际执行后追加，不预填通过结果。
@@ -35,16 +37,16 @@
 - 修复位置：`scripts/run-pilot-evals.mjs` 在 **test 模式**为隔离子进程设置经过 realpath/lstat 核验的临时根。未更改父进程、用户或系统环境变量；未修改全局 Pi 设置。
 - 生产边界：journal 创建仍要求严格 canonical path，不以转小写或删除检查放行别名 / 链接。新增 `NOT_DIRECTORY`、`LINK`、`NON_CANONICAL_PATH` 枚举；错误码和 journal 文件 schema 不变，诊断不打印原始路径。
 - 直接回归：普通 journal 持久化 / 排他 claim / 预算 / 篡改 / 写入失败测试保留；新增中文空格目录、非目录以及 symlink/junction 叶子和父路径负例。本机 journal=11，unsupported=[]。不支持链接或 8.3 的平台必须明确显示 unsupported，不计作通过。
-- `.github/workflows/ci.yml` 已加入 Windows 短 TEMP 回归；未触发远程运行，不能宣布原 CI 已转绿。
+- `.github/workflows/ci.yml` 已加入 Windows 短 TEMP 回归；已在上述固定提交的远程 Windows runner 上实际通过。
 - 剩余边界：不是任意并发文件系统替换 / reparse point 类型的安全审计；本轮没有扩展 journal 恢复端的原有路径策略。
 
-## B1/B2：独立红灯复现
+## B1/B2：首批独立红灯复现（修复前）
 
 运行：`npm run test:review-repros`。
 
 这不是正常回归套件中的“已知失败算通过”：仍有合同违反时退出 **1**，工装或对照出错时退出 **2**，只有合同全部满足才退出 **0**。下一批修复应使这些合同转绿，并将相应场景纳入常规回归。
 
-本机最新证据：`artifacts/harness/review-repros/review-gKTJNL/summary.json`。共 10 例：7 个确认违反合同，3 个对照通过，工装错误 0。证据保存当前源码 SHA-256、HEAD/dirty、SDK/Node 版本和逐例观察；每次运行新建目录。
+首批证据：`artifacts/harness/review-repros/review-gKTJNL/summary.json`。共 10 例：7 个确认违反合同，3 个对照通过，工装错误 0。证据保存当前源码 SHA-256、HEAD/dirty、SDK/Node 版本和逐例观察；每次运行新建目录。
 
 | 类别 | 实际观察 |
 | --- | --- |
@@ -57,7 +59,7 @@
 
 覆盖边界：完整生产扩展、真实 SDK 原生 read/write、ExtensionRunner 和真实临时文件；session manager 为工装替身。未调用模型、未进行 Desktop 或冷重启组合验收，也未完成 AUD-06 的突变测试。仓库 fixture 的前后哈希一致，真实小说未触碰。
 
-## 本地回归（Windows / Node 24.19.0）
+## 首批本地回归（Windows / Node 24.19.0）
 
 - `npm run check`、`npm run check:harness-tests`：通过。
 - `npm run build:frontend`：通过；保留既有动态/静态混合 import 与 bundle 大小提示。
@@ -71,3 +73,31 @@
 - SDK supervision live tooling / evidence report：分别通过 150 / 199 项检查。
 
 所有上述 `live tooling` 命令均为 **test 模式**，只用合成响应，没有真实模型 / HTTP 派发。历史能力对照矩阵中的预设负例由套件显式核验，不等于生产功能通过；新增审查红灯也不并入常规通过数。
+
+## B1：写入历史与当前状态（后续本地修复）
+
+- `completed` 只保留历史记录；只有当前文件 SHA 与该操作的预期 / 已确认后置指纹一致，才反馈 `currently_satisfied`。不能用已经刷新为 B 的 artifact，替代写入 A 时记录的 post-image。
+- 历史完成但当前不一致返回 `post_state_conflict`；缺少可信后置指纹或当前不可核验返回 `post_state_unverifiable`。两个分支都不派发写入，不删除完成记录，也不改为“执行结果未知”。
+- failed、cancelled、ID 冲突分别反馈，不再复用 satisfied 文案。失败允许修正参数的新调用；已取消的旧 ID 不可复活，确定从未派发的取消可由新调用取代。issued / unknown 且未派发的记录不能靠外部碰巧匹配的文件字节变成完成。
+- Operation Ledger 的迟到成功 / 失败 / 取消回调不能改写终态或已确认 post-image；新 toolCallId 本身不足以自动重放一个已完成但当前冲突的同参数意图。
+- 完成内容冲突会按原 Supervisor 策略暂停本轮，后续工具不会自动继续。测试明确发送新的用户请求后才派发修正后的 C。单纯调用失败走有界参数修正路径，不误判为不可恢复的前置条件。
+- schemaVersion=1 保持不变；没有迁移、清空旧会话或增加自动重放入口。相同内容的“强制重新应用”没有新增专用授权 UI / 合同；需要人工核对并建立独立的新逻辑任务，不能只换 transport ID 绕过。
+
+### 直接证据与边界
+
+- `tests/harness/operations.ts` 与 `tests/harness/checkpoint-runtime.ts`：历史 A / 当前 B、同与新 ID、未知后置指纹、failed/cancelled、终态回调、未派发记录与恢复后的 gate。
+- `tests/harness/write-state-extension.ts`：完整生产扩展、SDK 原生 read/write/edit、真实磁盘 SessionManager；核对模型可见反馈、目标字节、派发计数与持久化操作状态。冲突后仍是 B、只派发一次 A；明确新请求 C 后总派发为 2，原 A 记录仍为 completed。
+- `tests/harness/write-state-worker.ts`：三个新 Node 进程依次写入并丢弃结果回调、重开真实会话对账、再次重开后将 A 外部改为 B 并重读刷新。总计仅一次原生写入，冷恢复不重放，最终 B 不被覆盖。子进程使用空 agent 目录、白名单环境与网络保护。
+- 最新独立复现：`artifacts/harness/review-repros/review-Ijn7E0/summary.json`。AUD-02 两例与三个对照通过；AUD-03 五例继续确认失败，工装错误 0；命令仍退出 1，**不**宣称审查缺陷全部修完。
+- 当前 Harness 最终回归：235 例 × 3，deterministic=true，失败 0，unsupported 0。另已通过应用与测试 TypeScript 检查、长程 Harness、小说领域回归、离线 eval 与前端构建（保留原有 bundle/import 提示）。
+- 未进行 Desktop 人工点击或真实模型验收；这不是通用 exactly-once 承诺，也未覆盖任意外部并发替换或所有文件系统竞态。B2 范围凭证与 C 完成合同不由本修复关闭。
+
+### 历史评测保护
+
+旧 S3 评测曾直接导入生产 checkpoint runtime 并把其 SHA 固定为历史 B3，阻止了正常生产修复。本次新增独立快照 `evals/adapters/snapshots/checkpoint-runtime.ts`，只重定位四个会擦除的类型 import；重建原 import 后仍要求完全匹配原 `9117d598…` SHA 与历史 Git 提交。原 provenance、既有快照、已生成验收批次不改写；构建白名单不再允许导入当前生产 runtime。
+
+- 拆分后 SDK context 103、lifecycle 175、recovery-races 125、supervision 188 项检查通过，真实模型调用 0。
+- `s3-offline-BNwpT8` 的三个生成扩展 SHA 与本轮前的 `s3-offline-Ec6DG2` 完全相同；`s3-lifecycle-vNNqTu` 亦保持旧 lifecycle 生成扩展 SHA。不是把新生产行为冒充旧实验版本。
+- 上述冻结矩阵的能力负例仍按原合同验证，不当作新的生产 B1 验收；生产 B1 的证据来自新增完整扩展与冷恢复回归。
+
+下一步：单独提交并验证 B1 的双平台 CI，再实施 B2 实际读取交付范围 / receipt 修复，随后进入 C 稳定 TaskContract。

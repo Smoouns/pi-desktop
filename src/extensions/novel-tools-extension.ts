@@ -1150,11 +1150,18 @@ export default function (pi) {
 			const checkpointBlock = await checkpoints.writeGate(ctx, run, { target: ledgerTarget, argsDigest: sha(JSON.stringify(args)), toolName: event.toolName, operationId: event.toolCallId });
 			if (!ownsCall()) return { block: true, reason: "[cancelled] 原运行已结束。" };
 			if (checkpointBlock?.startsWith("[reconciled]")) return { block: true, reason: checkpointBlock };
+			if (checkpointBlock?.startsWith("[operation_failed]")) return deny("invalid_input", "WRITE_REPAIR_REQUIRED", checkpointBlock);
+			if (checkpointBlock?.startsWith("[operation_id_collision]")) return deny("invalid_input", "WRITE_OPERATION_ID_COLLISION", checkpointBlock);
+			if (checkpointBlock?.startsWith("[operation_cancelled]")) return deny("invalid_input", "WRITE_OPERATION_CANCELLED", checkpointBlock);
+			if (checkpointBlock?.startsWith("[post_state_conflict]")) return deny("precondition", "WRITE_POST_STATE_CONFLICT", checkpointBlock);
+			if (checkpointBlock?.startsWith("[post_state_unverifiable]")) return deny("precondition", "WRITE_POST_STATE_UNVERIFIABLE", checkpointBlock);
 			if (checkpointBlock) return deny(checkpointBlock.startsWith("[stale_source]") ? "stale_source" : checkpointBlock.startsWith("[unknown_outcome]") ? "unknown_outcome" : "precondition", "CHECKPOINT_BLOCKED", checkpointBlock);
 			const decision = operations.prepare({ scope: run.scope, toolCallId: event.toolCallId, toolName: event.toolName, target: ledgerTarget, preHash: before.hash, expectedPostHash, argsDigest: sha(JSON.stringify(args)) }, before.hash);
 			if (decision.action !== "dispatch") {
-				if (decision.action === "satisfied") return { block: true, reason: "[reconciled] 目标内容已满足 (satisfied)，未重复执行写入。请继续下一步。" };
+				if (decision.action === "satisfied") return { block: true, reason: "[reconciled] 当前目标内容已核验满足 (currently_satisfied)，未重复执行写入。请继续下一步。" };
 				if (decision.reason === "repair-required") return deny("invalid_input", "WRITE_REPAIR_REQUIRED", "[invalid_input] 上次调用已明确失败；请修正参数后重试，不要重复相同输入。");
+				if (decision.reason === "completed-state-no-longer-observed") return deny("precondition", "WRITE_POST_STATE_CONFLICT", "[post_state_conflict] 历史操作已完成，但当前文件已变化；禁止自动重放，请核对差异后建立新的明确写入意图。");
+				if (decision.reason === "operation-cancelled") return deny("invalid_input", "WRITE_OPERATION_CANCELLED", "[operation_cancelled] 该调用已取消，旧操作不能再次派发。");
 				return deny("unknown_outcome", "WRITE_OUTCOME_UNKNOWN", "[unknown_outcome] 写入结果尚未解决，禁止重放：" + decision.reason);
 			}
 			try {

@@ -6,7 +6,7 @@ import { createContextBudget } from "../adapters/snapshots/context-budget.js";
 import { createCheckpointStore } from "../adapters/snapshots/checkpoint-store.js";
 import { createSourceVersioning } from "../adapters/snapshots/source-version.js";
 import { createCheckpointInvalidation } from "../adapters/snapshots/invalidation.js";
-import { createCheckpointRuntime } from "../../src/extensions/checkpoint-runtime.js";
+import { createCheckpointRuntime } from "../adapters/snapshots/checkpoint-runtime.js";
 import historical from "../adapters/provenance.json";
 import { sdkExtensionSource, expectedSdkInventory, validateSdkProvenance } from "../sdk-ablation/extensions.js";
 import { createBaselineSafety } from "../sdk-ablation/safety.js";
@@ -92,7 +92,12 @@ export async function validateContextProvenance() {
 		const original = spawnSync("git", ["show", `${historical.profiles[profile].phaseCommit}:${source.path}`], { windowsHide: true, maxBuffer: 2_000_000 });
 		assert.equal(original.status, 0); assert.equal(sha256(original.stdout), source.sha256);
 	}
-	assert.equal(sha256(await readFile("src/extensions/checkpoint-runtime.ts")), B3_RUNTIME_SHA);
+	// Historical B3 is independent of today's production runtime. The only
+	// relocation is in its four erased type imports; reconstruct the original
+	// bytes and continue checking the same historical SHA and Git commit.
+	const frozen = await readFile("evals/adapters/snapshots/checkpoint-runtime.ts", "utf8");
+	const originalImports = frozen.replaceAll('from "./', 'from "../harness/');
+	assert.equal(sha256(originalImports), B3_RUNTIME_SHA);
 	const original = spawnSync("git", ["show", `${historical.profiles["historical-b3"].phaseCommit}:src/extensions/checkpoint-runtime.ts`], { windowsHide: true });
 	assert.equal(original.status, 0); assert.equal(sha256(original.stdout), B3_RUNTIME_SHA);
 }

@@ -14,7 +14,7 @@ try {
   const bundle = path.join(work, "sdk-supervision.mjs"), inputs = {};
   await build({ entryPoints: [path.join(root, "evals/sdk-supervision/cli.ts")], outfile: bundle, bundle: true, platform: "node", format: "esm", packages: "external", logLevel: "warning", plugins: [{
     name: "s4-pinned-inputs", setup(api) { api.onLoad({ filter: /\.(ts|json)$/ }, async ({ path: filename }) => {
-      const name = path.relative(root, filename).replaceAll("\\", "/"); assert.ok(/^(evals|tests)\//.test(name) || ["src/extensions/checkpoint-runtime.ts", "src/harness/run-supervisor.ts", "src/extensions/supervisor-runtime.ts", "src/extensions/context-maintenance.ts"].includes(name));
+      const name = path.relative(root, filename).replaceAll("\\", "/"); assert.ok(/^(evals|tests)\//.test(name) || ["src/harness/run-supervisor.ts", "src/extensions/supervisor-runtime.ts", "src/extensions/context-maintenance.ts"].includes(name));
       const contents = await readFile(filename); inputs[name] = createHash("sha256").update(contents).digest("hex"); return { contents, loader: filename.endsWith(".json") ? "json" : "ts" };
     }); }
   }] });

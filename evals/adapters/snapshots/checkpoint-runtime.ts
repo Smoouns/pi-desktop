@@ -1,7 +1,7 @@
-import type { CheckpointStore, TaskCheckpoint, PendingCheckpointOperation } from "../harness/checkpoint-store.js";
-import type { SourceVersionRef, SourceVersioning, SourceVersionResolverResult } from "../harness/source-version.js";
-import type { CheckpointInvalidation } from "../harness/invalidation.js";
-import type { RunScope } from "../harness/types.js";
+import type { CheckpointStore, TaskCheckpoint, PendingCheckpointOperation } from "./checkpoint-store.js";
+import type { SourceVersionRef, SourceVersioning, SourceVersionResolverResult } from "./source-version.js";
+import type { CheckpointInvalidation } from "./invalidation.js";
+import type { RunScope } from "./types.js";
 
 /** Injected host boundary: this factory is embedded in the managed Pi extension. */
 export function createCheckpointRuntime(deps: {
@@ -87,7 +87,7 @@ export function createCheckpointRuntime(deps: {
 		const current = ensure(ctx, run); if (current.error) return;
 		const operations = new Map([...current.operations].map(([id, op]) => [id, cloneOperation(op)])); const artifacts = new Map(current.artifacts); let changed = false; const cache = new Map<string, any>();
 		for (const operation of operations.values()) {
-			if (["completed", "cancelled", "failed"].includes(operation.state) || !operation.dispatched || !operation.expectedPostHash) continue;
+			if (["completed", "cancelled", "failed"].includes(operation.state) || !operation.expectedPostHash) continue;
 			const value = await deps.resolve({ path: operation.target, sha256: operation.expectedPostHash }, ctx, run, cache); assertOwned(current, run);
 			if (value.sha256 !== operation.expectedPostHash) continue;
 			operation.state = "completed"; const ref = { path: operation.target, sha256: operation.expectedPostHash, authority: "reference", temporal: "unspecified" }; artifacts.set(sourceKey(ref), ref); changed = true;
@@ -123,27 +123,7 @@ export function createCheckpointRuntime(deps: {
 		async writeGate(ctx: any, run: any, intent?: { target: string; argsDigest: string; toolName: string; operationId: string }) {
 			const current = ensure(ctx, run); if (current.error) return "[checkpoint_persistence] 检查点持久化失败，禁止写入。"; try { await reconcile(ctx, run); } catch { return "[checkpoint_persistence] 检查点持久化失败，禁止写入。"; }
 			const status = await inspect(ctx, run); if (status.status === "blocked" || status.status === "needs_revalidation") { if (current.stale.size && !current.error) try { persist(ctx, run, "refresh"); } catch { return "[checkpoint_persistence] 检查点持久化失败，禁止写入。"; } return "[" + (status.blockedOperationIds.length ? "unknown_outcome" : "stale_source") + "] 检查点需要核验，禁止写入；重读来源并 refresh_task_checkpoint。"; }
-			if (intent) {
-				const matches = (operation: PendingCheckpointOperation) => operation.target === intent.target && operation.argsDigest === intent.argsDigest && operation.toolName === intent.toolName;
-				const existing = current.operations.get(intent.operationId);
-				if (existing && !matches(existing)) return "[operation_id_collision] 调用 ID 已绑定其他写入意图，禁止复用。";
-				if (existing?.state === "cancelled") return "[operation_cancelled] 该调用已取消，旧操作不能再次派发。";
-				const related = existing ? [existing] : [...current.operations.values()].filter(matches);
-				if (related.some((operation) => operation.state === "failed")) return "[operation_failed] 该写入意图已明确失败；请修正参数并使用新调用，不要重复原输入。";
-				const completed = related.filter((operation) => operation.state === "completed");
-				if (completed.length) {
-					// Artifact refresh may have accepted B after this operation wrote A.
-					// History stays completed; current satisfaction needs the operation's
-					// own post-image, not today's artifact ref or a matching tool-call ID.
-					const postImages = completed.filter((operation) => operation.expectedPostHash !== null).map((operation) => ({ path: operation.target, sha256: operation.expectedPostHash! }));
-					if (!postImages.length) return "[post_state_unverifiable] 历史操作已完成，但缺少可核验的后置指纹；不能确认当前内容，禁止自动重放。";
-					const cache = new Map<string, any>();
-					const check = await deps.versions.revalidate(postImages, (ref) => deps.resolve(ref, ctx, run, cache), run.controller.signal); assertOwned(current, run);
-					if (check.checks.some((item) => item.status === "valid")) return "[reconciled] 当前文件已核验满足该意图 (currently_satisfied)，未重复执行写入。";
-					if (check.checks.some((item) => item.status === "unavailable" || item.status === "ineligible")) return "[post_state_unverifiable] 无法核验历史操作的当前后置状态，禁止自动重放。";
-					return "[post_state_conflict] 该意图曾执行完成，但当前文件已不匹配原后置内容；历史记录保留，禁止自动重放。请核对差异后建立新的明确写入意图，不能仅更换调用 ID 重试。";
-				}
-			}
+			if (intent) for (const operation of current.operations.values()) if (operation.operationId === intent.operationId || (operation.state === "completed" && operation.target === intent.target && operation.argsDigest === intent.argsDigest && operation.toolName === intent.toolName)) return "[reconciled] 已记录该写入意图 (satisfied)，禁止重复执行。";
 			return null;
 		},
 		operation(ctx: any, run: any, raw: PendingCheckpointOperation, postHash?: string | null) {

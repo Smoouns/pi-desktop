@@ -165,4 +165,49 @@ export async function runCheckpointRuntimeCases(runCase: RunCase): Promise<void>
 		const f = fixture(); f.runtime.observe(f.ctx, f.run, [ref()]); f.runtime.capture(f.ctx, f.run); f.deactivate();
 		await assert.rejects(f.runtime.inspect(f.ctx, f.run), /stale run/);
 	});
+
+	await runCase("checkpoint-runtime-completed-history-rechecks-current-post-image", async () => {
+		for (const restored of [false, true]) for (const reuseId of [false, true]) {
+			const f = fixture(), op = operation();
+			f.runtime.operation(f.ctx, f.run, op);
+			f.runtime.operation(f.ctx, f.run, { ...op, state: "completed", dispatched: true }, hash("post"));
+			const intent = { ...op, operationId: reuseId ? op.operationId : "new-id" };
+			assert.match((await f.runtime.writeGate(f.ctx, f.run, intent)) ?? "", /satisfied/);
+			f.current.set(op.target, { sha256: hash("external"), authority: "reference", temporal: "unspecified" });
+			assert.equal((await f.runtime.inspect(f.ctx, f.run)).status, "needs_revalidation");
+			f.runtime.observe(f.ctx, f.run, [{ path: op.target, sha256: hash("external"), authority: "reference", temporal: "unspecified" }]);
+			assert.equal((await f.runtime.refresh(f.ctx, f.run)).status, "ready");
+			if (restored) f.runtime.restore(f.ctx, f.run);
+			const result = await f.runtime.writeGate(f.ctx, f.run, intent);
+			assert.match(result ?? "", /post_state_conflict/); assert.doesNotMatch(result ?? "", /satisfied|已满足/);
+			const cp = f.runtime.capture(f.ctx, f.run);
+			assert.equal(cp.pendingOperations.length, 1); assert.equal(cp.pendingOperations[0]!.state, "completed");
+			assert.equal(cp.pendingOperations[0]!.expectedPostHash, hash("post"));
+			assert.equal(cp.artifacts[0]!.sha256, hash("external"));
+			assert.equal(await f.runtime.writeGate(f.ctx, f.run, { ...intent, operationId: "corrected", argsDigest: hash("new-intent") }), null);
+		}
+	});
+
+	await runCase("checkpoint-runtime-terminal-or-unverifiable-is-not-satisfied", async () => {
+		for (const state of ["cancelled", "failed", "completed"] as const) {
+			const f = fixture(), op = operation({ expectedPostHash: state === "completed" ? null : hash("post") });
+			f.runtime.operation(f.ctx, f.run, op);
+			f.runtime.operation(f.ctx, f.run, { ...op, state, dispatched: state !== "cancelled" });
+			f.runtime.restore(f.ctx, f.run);
+			const reason = await f.runtime.writeGate(f.ctx, f.run, op);
+			assert.match(reason ?? "", state === "completed" ? /post_state_unverifiable/ : new RegExp(`operation_${state}`));
+			assert.doesNotMatch(reason ?? "", /satisfied|已满足/);
+			assert.equal(f.runtime.capture(f.ctx, f.run).pendingOperations[0]!.state, state);
+			if (state === "failed") assert.match((await f.runtime.writeGate(f.ctx, f.run, { ...op, operationId: "retry" })) ?? "", /operation_failed/);
+		}
+	});
+
+	await runCase("checkpoint-runtime-id-collision-and-undispatched-intent-stay-blocked", async () => {
+		const f = fixture(), op = operation();
+		f.runtime.operation(f.ctx, f.run, op);
+		assert.match((await f.runtime.writeGate(f.ctx, f.run, op)) ?? "", /unknown_outcome/);
+		assert.equal(f.runtime.capture(f.ctx, f.run).pendingOperations[0]!.state, "issued");
+		f.runtime.operation(f.ctx, f.run, { ...op, state: "completed", dispatched: true }, hash("post"));
+		assert.match((await f.runtime.writeGate(f.ctx, f.run, { ...op, argsDigest: hash("collision") })) ?? "", /operation_id_collision/);
+	});
 }

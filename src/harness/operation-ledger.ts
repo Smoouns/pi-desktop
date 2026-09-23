@@ -86,6 +86,17 @@ export function createOperationLedger(options: { maxEntries?: number } = {}): Op
 	]);
 	const intendedPost = (record: InternalRecord): string | null => record.expectedPostHash ?? record.acknowledgedPostHash;
 	const decision = (record: InternalRecord, action: OperationDecision["action"], reason?: string): OperationDecision => ({ action, operationId: record.operationId, state: record.state, ...(reason ? { reason } : {}) });
+	// Terminal execution history is immutable. "satisfied" is a separate verdict
+	// about bytes observed now, never a synonym for having completed in the past.
+	const terminalDecision = (record: InternalRecord, observed?: string | null): OperationDecision | null => {
+		if (record.state === "failed") return decision(record, "blocked", "repair-required");
+		if (record.state === "cancelled") return decision(record, "blocked", "operation-cancelled");
+		if (record.state !== "completed") return null;
+		if (observed === undefined) return decision(record, "blocked", "operation-already-completed");
+		const post = intendedPost(record);
+		return post !== null && observed === post ? decision(record, "satisfied", "expected-post-state-observed")
+			: decision(record, "blocked", post === null ? "post-state-not-reconcilable" : "completed-state-no-longer-observed");
+	};
 	const requireRecord = (id: string): InternalRecord => { const record = entries.get(clean(id, "operationId")); if (!record) throw new Error(`Unknown operation: ${id}`); return record; };
 	// Entries double as bounded tombstones. Never evict an operation ID inside a
 	// process: eviction would allow an old ID to be accepted as a fresh dispatch.
@@ -97,16 +108,10 @@ export function createOperationLedger(options: { maxEntries?: number } = {}): Op
 			const existing = entries.get(item.toolCallId);
 			if (existing) {
 				if (existing.signature !== signature(item)) return decision(existing, "blocked", "operation-id-collision");
-				if (existing.state === "failed") return decision(existing, "blocked", "repair-required");
-				if (existing.state === "cancelled" && !existing.dispatched) {
-					if (currentFingerprint !== item.preHash) { existing.state = "unknown"; return decision(existing, "blocked", "pre-state-conflict"); }
-					existing.state = "issued";
-					return decision(existing, "dispatch", "cancelled-before-dispatch");
-				}
-				if (existing.state === "issued" && !existing.dispatched) return decision(existing, "blocked", "operation-in-flight");
+				const terminal = terminalDecision(existing, currentFingerprint); if (terminal) return terminal;
+				if (!existing.dispatched) return decision(existing, "blocked", existing.state === "issued" ? "operation-in-flight" : "operation-not-dispatched");
 				const post = intendedPost(existing);
 				if (post !== null && currentFingerprint === post) { existing.state = "completed"; return decision(existing, "satisfied", "expected-post-state-observed"); }
-				if (existing.state === "completed") { existing.state = "unknown"; return decision(existing, "blocked", "completed-state-no-longer-observed"); }
 				existing.state = "unknown";
 				return decision(existing, "blocked", post === null ? "post-state-not-reconcilable" : "post-state-conflict");
 			}
@@ -114,6 +119,12 @@ export function createOperationLedger(options: { maxEntries?: number } = {}): Op
 			// A model can retry the same intent under a new toolCallId (and a new run).
 			// Resolve all earlier writes to this target before admitting another write.
 			const related = [...entries.values()].filter((record) => targetScope(record) === targetScope(item));
+			// Do not let an older success hide a later unresolved operation. Also do
+			// not infer completion for an intent that was certainly never dispatched.
+			for (const prior of related) if ((prior.state === "issued" || prior.state === "unknown") &&
+				(!prior.dispatched || intendedPost(prior) === null || currentFingerprint !== intendedPost(prior))) {
+				return { action: "blocked", operationId: item.toolCallId, state: "unknown", reason: "prior-target-operation-unresolved" };
+			}
 			for (const prior of related) {
 				if (prior.state === "cancelled" && !prior.dispatched) continue;
 				if (prior.state === "failed") {
@@ -123,6 +134,9 @@ export function createOperationLedger(options: { maxEntries?: number } = {}): Op
 					continue;
 				}
 				const priorPost = intendedPost(prior);
+				if (prior.state === "completed" && prior.toolName === item.toolName && prior.argsDigest === item.argsDigest && (priorPost === null || currentFingerprint !== priorPost)) {
+					return { ...terminalDecision(prior, currentFingerprint)!, operationId: item.toolCallId };
+				}
 				if (priorPost !== null && currentFingerprint === priorPost) {
 					prior.state = "completed";
 					if (prior.toolName === item.toolName && prior.argsDigest === item.argsDigest && prior.expectedPostHash === item.expectedPostHash) {
@@ -152,6 +166,7 @@ export function createOperationLedger(options: { maxEntries?: number } = {}): Op
 		},
 		complete(operationId, postHash) {
 			const record = requireRecord(operationId);
+			const terminal = terminalDecision(record, postHash); if (terminal) return terminal;
 			if (!record.dispatched) return decision(record, "blocked", "operation-not-dispatched");
 			if (record.expectedPostHash === null || postHash !== record.expectedPostHash) { record.state = "unknown"; return decision(record, "blocked", "completion-fingerprint-mismatch"); }
 			record.state = "completed";
@@ -159,6 +174,7 @@ export function createOperationLedger(options: { maxEntries?: number } = {}): Op
 		},
 		completeAcknowledged(operationId, observedPostHash) {
 			const record = requireRecord(operationId);
+			const terminal = terminalDecision(record, observedPostHash); if (terminal) return terminal;
 			if (!record.dispatched) return decision(record, "blocked", "operation-not-dispatched");
 			const observed = clean(observedPostHash, "observedPostHash");
 			if (record.expectedPostHash !== null && observed !== record.expectedPostHash) { record.state = "unknown"; return decision(record, "blocked", "completion-fingerprint-mismatch"); }
@@ -168,6 +184,7 @@ export function createOperationLedger(options: { maxEntries?: number } = {}): Op
 		},
 		completeFailed(operationId, observedFingerprint) {
 			const record = requireRecord(operationId);
+			const terminal = terminalDecision(record, observedFingerprint); if (terminal) return terminal;
 			if (!record.dispatched) return decision(record, "blocked", "operation-not-dispatched");
 			const post = intendedPost(record);
 			if (post !== null && observedFingerprint === post) {
@@ -183,6 +200,7 @@ export function createOperationLedger(options: { maxEntries?: number } = {}): Op
 		},
 		cancel(operationId) {
 			const record = requireRecord(operationId);
+			const terminal = terminalDecision(record); if (terminal) return terminal;
 			record.state = record.dispatched ? "unknown" : "cancelled";
 			return decision(record, "blocked", record.dispatched ? "cancelled-after-dispatch" : "cancelled-before-dispatch");
 		},

@@ -15,6 +15,7 @@ import { runToolPolicyCases } from "./tool-policy.js";
 import { runOperationCases } from "./operations.js";
 import { runToolPathPolicyCases } from "./tool-path-policy.js";
 import { runBuiltinWriteCases } from "./builtin-writes.js";
+import { runWriteStateExtensionCases } from "./write-state-extension.js";
 import { runWorkflowUiCases } from "./workflow-ui.js";
 import { runSessionRestoreCases } from "./session-restore.js";
 import { runSessionRefreshCases } from "./session-refresh.js";
@@ -94,6 +95,7 @@ for (let repetition = 1; repetition <= 3; repetition++) {
 	await runToolPathPolicyCases(runCase);
 	await runExtensionRuntimeCases(runCase);
 	await runBuiltinWriteCases(runCase);
+	await runWriteStateExtensionCases(runCase);
 	await runWorkflowUiCases(runCase);
 	await runSessionRestoreCases(runCase);
 	await runSessionRefreshCases(runCase);
