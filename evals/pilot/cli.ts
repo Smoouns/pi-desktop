@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import { assertInside } from "../core/io.js";
+import { PilotJournalError } from "../core/request-journal.js";
 import { runModelProjectionTests } from "../../tests/pilot/model.js";
 import { runPilotTransportTests } from "../../tests/pilot/transport.js";
 import { runPilotUsageTests } from "../../tests/pilot/usage.js";
@@ -90,5 +91,6 @@ try {
 	const candidate = error instanceof Error ? error.message.split("\n")[0].trim() : "";
 	const reason = /^[A-Z][A-Z0-9_]{2,79}$/.test(candidate) ? candidate : "PILOT_REJECTED";
 	console.error(`Pilot rejected: ${reason}`);
+	if (error instanceof PilotJournalError && error.directoryReason) console.error(`Pilot journal directory reason: ${error.directoryReason}`);
 	process.exitCode = 1;
 }

@@ -11,7 +11,7 @@ const outputParent = path.join(root, "artifacts/harness");
 await mkdir(outputParent, { recursive: true });
 const work = await mkdtemp(path.join(outputParent, ".build-"));
 const mode = process.argv[2];
-assert.ok(["harness", "regression", "long-horizon"].includes(mode), "Usage: run-public-tests.mjs harness|regression|long-horizon");
+assert.ok(["harness", "regression", "long-horizon", "review-repros"].includes(mode), "Usage: run-public-tests.mjs harness|regression|long-horizon|review-repros");
 
 // Always use the installed, pinned loader. Bundled tests still resolve runtime packages
 // from this checkout, not a user's global Pi installation or home extensions.
@@ -43,7 +43,8 @@ function execute(filename) {
 		env: environment,
 	});
 	if (result.error) throw result.error;
-	assert.equal(result.status, 0, `${path.basename(filename)} failed (${result.signal ?? result.status})`);
+	if (mode === "review-repros" && [0, 1, 2].includes(result.status) && !result.signal) process.exitCode = result.status;
+	else assert.equal(result.status, 0, `${path.basename(filename)} failed (${result.signal ?? result.status})`);
 }
 
 async function fixtureBytes() {
@@ -60,7 +61,9 @@ async function fixtureBytes() {
 }
 
 try {
-	if (mode === "harness" || mode === "long-horizon") {
+	if (mode === "review-repros") {
+		execute(await bundle("tests/harness/review-repros-run.ts", aliases));
+	} else if (mode === "harness" || mode === "long-horizon") {
 		execute(await bundle(mode === "harness" ? "tests/harness/run.ts" : "tests/harness/long-horizon-run.ts", aliases));
 	} else {
 		const before = await fixtureBytes();
@@ -85,6 +88,10 @@ try {
 			}
 		}
 	}
+} catch (error) {
+	if (mode !== "review-repros") throw error;
+	console.error("REVIEW_REPRO_RUNNER_FAILED");
+	process.exitCode = 2;
 } finally {
 	const relative = path.relative(outputParent, work);
 	assert.ok(relative.startsWith(".build-") && !relative.includes(path.sep), "Unsafe temporary cleanup target");

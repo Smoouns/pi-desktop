@@ -38,6 +38,9 @@ jobs:
       - run: npm run test:novel-domain
       - run: npm run test:evals
       - run: npm run test:pilot
+      - name: Pilot Windows short TEMP regression
+        if: runner.os == 'Windows'
+        run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-pilot-journal-windows.ps1
       - run: npm run test:sdk-ablation
       - run: npm run test:sdk-live
       - run: npm run test:sdk-context

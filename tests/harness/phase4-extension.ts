@@ -26,7 +26,7 @@ async function toolResult(tool: any, id: string, params: Record<string, unknown>
 	}
 }
 
-async function withRunner<T>(root: string, minified: boolean, body: (state: {
+export async function withRunner<T>(root: string, minified: boolean, body: (state: {
 	extension: any; runner: ExtensionRunner; entries: Entry[]; branch: () => Entry[];
 	setBranch: (entries: Entry[]) => void; setAppendFailure: (value: boolean) => void;
 	aborts: () => number; ctx: () => any;

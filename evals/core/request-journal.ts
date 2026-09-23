@@ -4,10 +4,22 @@ import path from "node:path";
 import { freezeRequestPolicy, type RequestPolicy } from "./request-policy.js";
 import type { ProviderUsage } from "../pilot/usage.js";
 
+export type JournalDirectoryReason = "NOT_DIRECTORY" | "LINK" | "NON_CANONICAL_PATH";
 export class PilotJournalError extends Error {
-	constructor(public readonly code: string) { super(code); this.name = "PilotJournalError"; }
+	constructor(public readonly code: string, public readonly directoryReason: JournalDirectoryReason | null = null) { super(code); this.name = "PilotJournalError"; }
 }
-const fail = (code: string): never => { throw new PilotJournalError(code); };
+const fail = (code: string, directoryReason: JournalDirectoryReason | null = null): never => { throw new PilotJournalError(code, directoryReason); };
+
+/** Enum-only diagnostics: never put user paths or filesystem errors into the journal. */
+async function checkDirectoryType(directory: string, allowMissing = false): Promise<void> {
+	const info = await lstat(directory).catch((error: NodeJS.ErrnoException) => {
+		if (allowMissing && error.code === "ENOENT") return null;
+		throw error;
+	});
+	if (!info) return;
+	if (info.isSymbolicLink()) fail("JOURNAL_DIRECTORY_UNSAFE", "LINK");
+	if (!info.isDirectory()) fail("JOURNAL_DIRECTORY_UNSAFE", "NOT_DIRECTORY");
+}
 const hash = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 const json = (value: unknown): string => JSON.stringify(value, null, 2) + "\n";
 const isHash = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
@@ -101,7 +113,7 @@ function summarize(claim: Claim, events: Event<TaskId>[], index: PilotJournalInd
 
 async function load(directory: string, expectedManifest: string): Promise<{ claim: Claim; claimText: string; events: Event<TaskId>[]; eventTexts: string[]; index: PilotJournalIndex | null }> {
 	if (!isHash(expectedManifest)) fail("JOURNAL_MANIFEST_SHA");
-	const rootInfo = await lstat(directory); if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) fail("JOURNAL_DIRECTORY_UNSAFE");
+	await checkDirectoryType(directory);
 	const names = (await readdir(directory)).sort(); if (!names.includes("claim.json") || names.some((name) => name !== "claim.json" && name !== "index.json" && !/^event-\d{6}\.json$/.test(name))) fail("JOURNAL_FILES");
 	const claimText = await bounded(path.join(directory, "claim.json")); const claim = validateClaim(JSON.parse(claimText), expectedManifest);
 	const eventNames = names.filter((name) => name.startsWith("event-")); const events: Event<TaskId>[] = [], eventTexts: string[] = []; let prev = hash(claimText);
@@ -117,7 +129,14 @@ async function recoverPilotJournal(directory: string, manifestSha256: string): P
 
 async function createPilotJournal(directory: string, manifestSha256: string, mode: PilotJournalMode) {
 	if (!isHash(manifestSha256) || (mode !== "live" && mode !== "dry-run")) fail("JOURNAL_CREATE");
-	await mkdir(directory, { recursive: true }); const resolved = await realpath(directory); if (resolved !== path.resolve(directory) || (await lstat(resolved)).isSymbolicLink()) fail("JOURNAL_DIRECTORY_UNSAFE");
+	await checkDirectoryType(directory, true);
+	await mkdir(directory, { recursive: true });
+	await checkDirectoryType(directory);
+	const resolved = await realpath(directory);
+	// Keep the strict production policy. Normalize the trusted TEST temp root at
+	// the caller instead of admitting arbitrary case/8.3 aliases or linked parents.
+	if (resolved !== path.resolve(directory)) fail("JOURNAL_DIRECTORY_UNSAFE", "NON_CANONICAL_PATH");
+	await checkDirectoryType(resolved); // retain the final lstat guard on the resolved target
 	const initialNames = await readdir(resolved); if (initialNames.includes("claim.json")) fail("JOURNAL_ALREADY_CLAIMED"); if (initialNames.length !== 0) fail("JOURNAL_DIRECTORY_NOT_EMPTY");
 	const claim: Claim = { schemaVersion: 1, kind: `${policy.namespace}-journal-claim`, manifestSha256, mode }; const claimText = json(claim);
 	try { await writeExclusive(path.join(resolved, "claim.json"), claimText); } catch (error) { return fail((error as NodeJS.ErrnoException).code === "EEXIST" ? "JOURNAL_ALREADY_CLAIMED" : "JOURNAL_CLAIM_WRITE_FAILED"); }

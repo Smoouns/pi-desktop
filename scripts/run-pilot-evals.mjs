@@ -1,8 +1,9 @@
 /** Explicit live authorization is separate from offline tests and preparation. */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
@@ -44,6 +45,15 @@ try {
 	await writeFile(buildInputs, JSON.stringify(inputs), { flag: "wx" });
 	const env = {};
 	for (const [key, value] of Object.entries(process.env)) if (/^(PATH|SYSTEMROOT|WINDIR|COMSPEC|PATHEXT|TEMP|TMP|LANG|LC_ALL|npm_config_user_agent)$/i.test(key)) env[key] = value;
+	if (mode === "test") {
+		// Hosted Windows runners may expose TEMP via an 8.3 alias. The journal's
+		// production policy remains strict; only this isolated test child's trusted
+		// temporary root is canonicalized. Never modify the parent's/global env.
+		const tempRoot = await realpath(os.tmpdir()), info = await lstat(tempRoot);
+		assert.ok(info.isDirectory() && !info.isSymbolicLink(), "PILOT_TEST_TEMP_ROOT_UNSAFE");
+		for (const key of Object.keys(env)) if (/^(TEMP|TMP|TMPDIR)$/i.test(key)) delete env[key];
+		env.TEMP = tempRoot; env.TMP = tempRoot; env.TMPDIR = tempRoot;
+	}
 	env.PI_CODING_AGENT_DIR = path.join(work, "agent");
 	env.PI_PILOT_BUILD_INPUTS = buildInputs;
 	env.PI_PILOT_WORK_ROOT = work;

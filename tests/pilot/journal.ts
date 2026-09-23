@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createPilotJournal, PilotJournalError, recoverPilotJournal, type PilotReserveSnapshot } from "../../evals/pilot/journal.js";
@@ -15,7 +15,51 @@ async function cleanup(directory: string): Promise<void> {
 }
 
 export async function runPilotJournalTests(): Promise<number> {
-	let count = 0; const test = async (_name: string, action: () => Promise<void>): Promise<void> => { await action(); count++; };
+	const unsupported: Array<{ test: string; reason: string }> = [];
+	let count = 0; const test = async (_name: string, action: () => Promise<void | false>): Promise<void> => { if (await action() !== false) count++; };
+	const unsafe = (reason: string) => (error: unknown): boolean => {
+		assert.ok(error instanceof PilotJournalError);
+		assert.equal(error.code, "JOURNAL_DIRECTORY_UNSAFE"); assert.equal(error.directoryReason, reason);
+		assert.equal(error.message, "JOURNAL_DIRECTORY_UNSAFE");
+		assert.doesNotMatch(JSON.stringify(error), /pilot-journal-|PRIVATE_PATH_SENTINEL/);
+		return true;
+	};
+	await test("space and Chinese paths remain valid", async () => {
+		const directory = await mkdtemp(path.join(os.tmpdir(), "pilot-journal-"));
+		try {
+			const target = path.join(directory, "中文 空格", "journal");
+			const journal = await createPilotJournal(target, manifestSha256, "dry-run");
+			await journal.finalize("complete"); assert.equal((await recoverPilotJournal(target, manifestSha256)).canPass, true);
+		} finally { await cleanup(directory); }
+	});
+	await test("non-directory gets a sanitized reason without overwriting", async () => {
+		const directory = await mkdtemp(path.join(os.tmpdir(), "pilot-journal-"));
+		try {
+			const target = path.join(directory, "PRIVATE_PATH_SENTINEL"); await writeFile(target, "untouched");
+			await assert.rejects(() => createPilotJournal(target, manifestSha256, "dry-run"), unsafe("NOT_DIRECTORY"));
+			await assert.rejects(() => recoverPilotJournal(target, manifestSha256), unsafe("NOT_DIRECTORY"));
+			assert.equal(await readFile(target, "utf8"), "untouched");
+		} finally { await cleanup(directory); }
+	});
+	for (const type of process.platform === "win32" ? ["dir", "junction"] as const : ["dir"] as const) {
+		await test(`${type} leaf and parent remain rejected`, async () => {
+			const directory = await mkdtemp(path.join(os.tmpdir(), "pilot-journal-"));
+			try {
+				const target = path.join(directory, "target"), link = path.join(directory, "PRIVATE_PATH_SENTINEL");
+				await mkdir(path.join(target, "child"), { recursive: true });
+				try { await symlink(target, link, type); } catch (error) {
+					const code = (error as NodeJS.ErrnoException).code;
+					if (process.platform !== "win32" || !["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) throw error;
+					unsupported.push({ test: `journal.${type}`, reason: code! }); return false;
+				}
+				await assert.rejects(() => createPilotJournal(link, manifestSha256, "dry-run"), unsafe("LINK"));
+				await assert.rejects(() => recoverPilotJournal(link, manifestSha256), unsafe("LINK"));
+				await assert.rejects(() => createPilotJournal(path.join(link, "child"), manifestSha256, "dry-run"), unsafe("NON_CANONICAL_PATH"));
+				assert.deepEqual(await readdir(path.join(target, "child")), [], "rejected path must not acquire a claim");
+				await rm(link); // unlink, never recursively delete through a test link
+			} finally { await cleanup(directory); }
+		});
+	}
 	await test("reserve is durable before return and complete journal rebuilds", async () => {
 		const directory = await mkdtemp(path.join(os.tmpdir(), "pilot-journal-"));
 		try { const journal = await createPilotJournal(directory, manifestSha256, "dry-run"); const event = await journal.reserve(reserve(1)); const disk = JSON.parse(await readFile(path.join(directory, "event-000001.json"), "utf8")); assert.equal(disk.ordinal, event.ordinal);
@@ -56,5 +100,6 @@ export async function runPilotJournalTests(): Promise<number> {
 			await assert.rejects(() => journal.settle({ ordinal: 1, taskId: PILOT_TASK_IDS[0], invocationId: 1, dispatchAttempted: true, status: "complete", reasonCode: null, usage: { ...usage, promptTokens: null } }), errorCode("JOURNAL_SETTLE_STATE")); }
 		finally { await cleanup(directory); }
 	});
+	console.log(`Pilot journal cases: ${JSON.stringify({ passed: count, unsupported })}`);
 	return count;
 }
