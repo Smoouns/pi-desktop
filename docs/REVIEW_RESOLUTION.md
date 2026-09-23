@@ -2,7 +2,7 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 当前为本地改动，尚未提交推送；不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 已提交推送；首轮 Windows CI 触及工装总时限，正在以最小工装修正重新验收。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
@@ -13,7 +13,7 @@
 | AUD-01 | fixed / CI_passed | 新增拒绝原因枚举；仅规范化隔离测试子进程的临时根；补路径正反例与 Windows 短路径回归 | `f472e8d` 双平台 CI 全绿；Windows 8.3 用例实际执行，journal=11、unsupported=[]。原失败 CI 未输出具体拒绝分支，仍不冒充已确认其唯一根因 |
 | AUD-02 | fixed / CI_passed | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | `c67467e` 双平台 CI 全绿；新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放 |
 | AUD-03 | fixed / CI_passed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | `f1b19df` 双平台 CI 全绿；263 例 × 3 实际执行。没有本批 Desktop 验收 |
-| AUD-04 | fixed_locally / not_committed | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | 旧会话为 unbound，不推断交付合同；有界 schema、完整扩展和真实磁盘会话重开回归。没有本批远程 CI / Desktop 验收 |
+| AUD-04 | fixed_locally / CI_pending | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | `d622b59` 已推送；首轮 Windows CI 被工装 240 秒总时限中止，不能算通过。完整双平台 CI / Desktop 验收仍待补齐 |
 | AUD-05 | partially_addressed | C 保留任务目标、约束、产物与验证凭证，E 再测量压缩质量 | 这是必需恢复信息，不是通用规划器或语义进度摘要；不将其当作 Canon |
 | AUD-06 | in_progress | D 随 B/C 补完整生产接线与定向突变回归 | C 已覆盖完整扩展、固定 SDK、真实会话重开及强制错误完成的突变检测；不声称完成 Desktop 或 C 的独立 OS 进程冷恢复验收 |
 | AUD-07 | deferred | E：分层计量预算估算、provider usage 和 HTTP 派发 | 不把 eval 单请求限制复制到生产重试策略 |
@@ -127,7 +127,7 @@
 - 最终应用 / 测试 TypeScript 检查、前端构建、长程 Harness、小说领域回归、离线 eval 通过；构建仅保留原有 bundle/import 提示。v16 标记已同步到安装冒烟断言，没有跳过测试。冻结 SDK context / lifecycle 分别通过 103 / 175 项检查，保留声明过的历史能力负例；不当作当前生产 B2 的直接验收。
 - 未做真实模型调用、Desktop 人工点击或任意并发文件系统替换审计。工具结果边界的交付不证明 provider 实际消费 / 模型理解，B2 不关闭 C 的任务完成合同。
 
-## C：稳定任务目标与完成合同（本地实现）
+## C：稳定任务目标与完成合同（已提交，等待完整 CI）
 
 ### 任务身份与输入边界
 
@@ -162,4 +162,10 @@
 - 冻结 SDK supervision / supervision-live tooling 分别通过 188 / 150 项检查，真实模型调用 0。后者运行的是 **test 模式**，并非新的真实模型实验；冻结矩阵原有负例继续按原合同验证，不计作 C 生产能力通过。
 - `s4-offline-FMMsLw` 的三个生成扩展 SHA 与改造前 `s4-offline-JbTn8j` 完全相同（control `6c16573f…`、supervisor `97869300…`、supervisor-maintenance `ef66d25b…`），未将 C 的新完成合同混入冻结矩阵。
 
-下一步：单独提交 C，验证固定提交的双平台 CI；再补 D 剩余生命周期 / Desktop 接线证据，E 的压缩质量、预算计量及读取成本优化另行推进。
+### C 提交与 CI 工装时间修正（2026-09-24）
+
+- C 已提交推送：`d622b5978ab5f14e1ccf96511cd091f5e758a56d`。[首次 CI 35893378425](https://github.com/Smoouns/pi-desktop/actions/runs/35893378425) 的 TypeScript + Rust 任务通过；Windows Harness 失败，未执行后续步骤，因此本次不能算双平台验收通过。
+- Windows 固定提交日志：17:07:47 启动 Harness，前两轮分别约 83 秒和 89 秒，第三轮仍有正常 PASS 输出，17:11:47 被 `spawnSync ... ETIMEDOUT` 中止。没有用例断言失败，20 项 C 用例均实际执行三轮，但整套回归没有跑完。
+- `scripts/run-public-tests.mjs` 仅将完整三轮 Harness 子进程总时限从 240 秒改为 360 秒，为按上述单轮耗时估计的约 260 秒提供有界余量；其他测试模式仍为 180 秒，产品工具期限、上下文预算、断言和负例均未改动。原超时日志保留，不以未执行步骤冒充通过。修正后的固定提交仍须重新验证。
+
+下一步：完成 C 工装修正后的固定提交双平台 CI；再补 D 剩余生命周期 / Desktop 接线证据，E 的压缩质量、预算计量及读取成本优化另行推进。

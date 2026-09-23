@@ -39,9 +39,10 @@ function execute(filename) {
 	// Test inputs are synthetic. Do not pass provider credentials to the test process.
 	for (const key of Object.keys(environment)) if (/(?:API_KEY|AUTH_TOKEN|ACCESS_TOKEN|SECRET_ACCESS_KEY)$/.test(key)) delete environment[key];
 	const result = spawnSync(process.execPath, ["--experimental-strip-types", filename], {
-		// B1's Windows CI already took about 166 s. The delivery contracts add
-		// ~9 s per repetition locally; retain a bounded margin for all 3 repeats.
-		cwd: root, stdio: "inherit", timeout: mode === "harness" ? 240_000 : 180_000,
+		// C's fixed-commit Windows CI took 83/89 s for its first two repetitions;
+		// the old 240 s suite deadline killed the third without an assertion failure.
+		// Keep a bounded 360 s suite margin; per-tool deadlines/assertions are unchanged.
+		cwd: root, stdio: "inherit", timeout: mode === "harness" ? 360_000 : 180_000,
 		env: environment,
 	});
 	if (result.error) throw result.error;
