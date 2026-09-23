@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Model } from "@mariozechner/pi-ai";
 import { AuthStorage, ModelRegistry, createAgentSession, createReadTool, createWriteTool, convertToLlm, SessionManager, SettingsManager, type ResourceLoader } from "@mariozechner/pi-coding-agent";
-import { createRunSupervisor } from "../../src/harness/run-supervisor.js";
+import { createRunSupervisor } from "../adapters/snapshots/run-supervisor.js";
 import { createContextMaintenance } from "../../src/extensions/context-maintenance.js";
 import { digest, sha256, treeManifest } from "../core/io.js";
 import { loadSdkExtension, type SdkPrepared } from "../sdk-ablation/session.js";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createRunSupervisor } from "../../src/harness/run-supervisor.js";
-import { createSupervisorRuntime } from "../../src/extensions/supervisor-runtime.js";
+import { createRunSupervisor } from "../adapters/snapshots/run-supervisor.js";
+import { createSupervisorRuntime } from "../adapters/snapshots/supervisor-runtime.js";
 import { createContextMaintenance } from "../../src/extensions/context-maintenance.js";
 import { lifecycleExtensionSource } from "../sdk-context/lifecycle-extension.js";
 import { expectedInventory } from "../sdk-context/extension.js";

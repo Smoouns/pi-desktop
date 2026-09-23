@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import { createRunSupervisor } from "../../src/harness/run-supervisor.js";
+import { createRunSupervisor } from "../adapters/snapshots/run-supervisor.js";
 import { digest, readBounded, sha256, treeManifest } from "../core/io.js";
 import { exact, count, hash } from "../sdk-context/records.js";
 import { FEATURES, LIMITS, MODEL, PROFILES, PROMPTS, SETTINGS, SUPERVISOR_LIMITS, VALID, INVALID, emptyMetrics, expectedStatus, plan, type Run } from "./policy.js";

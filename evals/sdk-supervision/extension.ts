@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { createRunSupervisor } from "../../src/harness/run-supervisor.js";
-import { createSupervisorRuntime } from "../../src/extensions/supervisor-runtime.js";
+import { createRunSupervisor } from "../adapters/snapshots/run-supervisor.js";
+import { createSupervisorRuntime } from "../adapters/snapshots/supervisor-runtime.js";
 import { createContextMaintenance } from "../../src/extensions/context-maintenance.js";
 import { lifecycleExtensionSource } from "../sdk-context/lifecycle-extension.js";
 import { expectedInventory as baseInventory, validateContextProvenance } from "../sdk-context/extension.js";
@@ -11,7 +11,7 @@ import { digest, sha256 } from "../core/io.js";
 import { FEATURES, FAULT, KEY, LIMITS, MODEL, PROFILES, SUPERVISOR_LIMITS, TARGET, VALID, VERIFY, emptyMetrics, type Profile } from "./policy.js";
 import provenance from "./provenance.json";
 
-/** Eval-only wiring. Factories are production code; the small public verifier
+/** Eval-only wiring. Factories are the provenance-pinned production snapshots; the small public verifier
  * and lifecycle adapter are NOT the full production novel extension. */
 export function installLayer(pi: any, deps: any, features: { supervisor: boolean; maintenance: boolean }, metrics: ReturnType<typeof emptyMetrics>) {
   const { path, readFile, createHash, Type, target, valid, verify, key, controlKey, faultKey, limits, modelId, supervisorLimits } = deps;
@@ -135,7 +135,12 @@ export function installLayer(pi: any, deps: any, features: { supervisor: boolean
 export async function validateProvenance() {
   await validateContextProvenance();
   for (const [file, expected] of Object.entries(provenance.files)) {
-    assert.equal(sha256(await readFile(file)), expected, "S4_FACTORY_DRIFT");
+    const snapshot = file === "src/harness/run-supervisor.ts" ? "evals/adapters/snapshots/run-supervisor.ts"
+      : file === "src/extensions/supervisor-runtime.ts" ? "evals/adapters/snapshots/supervisor-runtime.ts" : file;
+    let content = (await readFile(snapshot, "utf8")).replaceAll("\r\n", "\n");
+    if (file === "src/harness/run-supervisor.ts") content = content.replaceAll('"../../../src/harness/', '"./');
+    if (file === "src/extensions/supervisor-runtime.ts") content = content.replaceAll('"../../../src/harness/', '"../harness/').replace('"./run-supervisor.js"', '"../harness/run-supervisor.js"');
+    assert.equal(sha256(content), expected, "S4_FACTORY_DRIFT");
     const old = spawnSync("git", ["show", provenance.commit + ":" + file], { windowsHide: true, maxBuffer: 2_000_000 });
     assert.equal(old.status, 0); assert.equal(sha256(old.stdout), expected, "S4_GIT_FACTORY_DRIFT");
   }

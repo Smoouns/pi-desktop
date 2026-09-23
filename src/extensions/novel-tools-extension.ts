@@ -14,9 +14,11 @@ import { createRunSupervisor } from "../harness/run-supervisor.ts";
 import { createSupervisorRuntime } from "./supervisor-runtime.ts";
 import { createBudgetDiagnostics } from "./budget-diagnostics.ts";
 import { createContextMaintenance } from "./context-maintenance.ts";
+import { createTaskContracts } from "../harness/task-contract.ts";
+import { createTaskSubmission } from "../novel/task-submission.ts";
 
 const NOVEL_TOOLS_EXTENSION_FILE = "pi-desktop-novel-tools.ts";
-const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v16";
+const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v17";
 const NOVEL_TOOLS_EXTENSION_MARKER_PREFIX = "pi-desktop-novel-tools-extension/";
 
 export const NOVEL_TOOLS_EXTENSION_CONTENT = `/**
@@ -68,6 +70,9 @@ const FILE_BYTES = 1_600_000;
 const requestLedgers = new Map();
 const budgetDiagnostics = (${createBudgetDiagnostics.toString()})();
 const maintenance = (${createContextMaintenance.toString()})();
+const tasks = (${createTaskContracts.toString()})({ digest: sha, pathKey: (value) => process.platform === "win32" ? value.toLowerCase() : value });
+const taskSubmission = (${createTaskSubmission.toString()})();
+const taskPersistenceFailures = new Set();
 let contextGeneration = 0;
 let maintenanceBusy = false;
 let pressureTrim = false;
@@ -89,6 +94,23 @@ function supervisorBaseScope(ctx) {
 	const root = path.resolve(projectRoot(ctx));
 	return { projectId: sha(process.platform === "win32" ? root.toLowerCase() : root), sessionId: ctx?.sessionManager?.getSessionId?.() || processSession, role: currentNovelRole(ctx) };
 }
+function taskRecord(ctx) {
+	const scope = supervisorBaseScope(ctx);
+	if (taskPersistenceFailures.has(JSON.stringify(scope))) throw new Error("任务合同持久化失败；不能继续宣告交付。");
+	return tasks.latest(ctx.sessionManager?.getBranch?.() ?? [], scope);
+}
+function persistTask(ctx, task) {
+	try { piTaskAppend(task); }
+	catch (error) { taskPersistenceFailures.add(JSON.stringify(supervisorBaseScope(ctx))); throw error; }
+}
+let piTaskAppend;
+function taskProgress(run, change) {
+	assertRun(run);
+	const task = taskRecord(run.ctx);
+	if (!task || task.taskId !== run.taskId) return;
+	const next = change(task);
+	if (next.id !== task.id) persistTask(run.ctx, next);
+}
 function statusText(snapshot) {
 	if (!snapshot) return "当前没有受监管的运行。提交一条新请求后开始。";
 	const labels = { RUNNING: "运行中", BLOCKED_USER: "等待用户处理", BLOCKED_PREREQUISITE: "前置条件不足", NO_PROGRESS: "无有效进展，已停止", CANCELLED: "已取消", FAILED: "运行失败", COMPLETED_CANDIDATE: "候选任务已完成" };
@@ -98,7 +120,8 @@ function statusText(snapshot) {
 		: snapshot.reasonCode === "CONTEXT_BUDGET" ? "旧记录没有保存具体预算失败原因；请更新扩展后重试一次以获取诊断，不能据此判断为历史过长。"
 		: budgetDiagnostics.sanitize({ version: 1, stage: "context-preflight", reason: snapshot.reasonCode?.toLowerCase() });
 	const detail = typeof budgetGuidance === "string" ? budgetGuidance : budgetGuidance ? budgetDiagnostics.format(budgetGuidance) : null;
-	return (labels[snapshot.state] || snapshot.state) + (snapshot.reasonCode ? "（" + snapshot.reasonCode + "）" : "") + "。" + (detail || guidance[snapshot.reasonCode] || (snapshot.state === "COMPLETED_CANDIDATE" ? "这不是用户验收或 Canon 晋升。" : snapshot.state === "RUNNING" ? "监管器正在检查预算、来源版本和验证进展。" : "提交新的明确请求可开始新一轮；不会自动恢复写入。"))
+	const replyOnly = snapshot.reasonCode === "UNBOUND_REPLY" || snapshot.reasonCode === "REPLY_ONLY" || snapshot.reasonCode === "INSPECTION_COMPLETE";
+	return (replyOnly ? "回复已结束" : labels[snapshot.state] || snapshot.state) + (snapshot.reasonCode ? "（" + snapshot.reasonCode + "）" : "") + "。" + (snapshot.reasonCode === "UNBOUND_REPLY" ? "此任务未绑定交付合同，仅表示本轮回复结束，不表示指定文件已经交付。可从工作流按钮重新声明任务。" : detail || guidance[snapshot.reasonCode] || (snapshot.state === "COMPLETED_CANDIDATE" ? "这不是用户验收或 Canon 晋升。" : snapshot.state === "RUNNING" ? "监管器正在检查预算、来源版本和验证进展。" : "提交新的明确请求可开始新一轮；不会自动恢复写入。"))
 		+ (snapshot.scope.role === null ? " 此旧会话尚未绑定职能；如需机械验证，请先执行 /novel-write，再检查并发送任务。" : "");
 }
 function showSupervisorStatus(ctx, snapshot, notify = false) {
@@ -729,6 +752,7 @@ async function verifierReceipt(root, reportTarget, callId, run) {
 	run.pendingVerifications.push({ ...receipt, sources: sources.map((item) => ({ path: process.platform === "win32" ? item.path.toLowerCase() : item.path, sha256: item.sha256.toLowerCase() })) });
 	run.verificationSources ??= new Map();
 	run.verificationSources.set(subjectPath, sources.map((item) => ({ path: process.platform === "win32" ? item.path.toLowerCase() : item.path, sha256: item.sha256.toLowerCase() })));
+	taskProgress(run, (task) => tasks.verification(task, subjectPath, { chapter: field("chapter"), passed, full: mode === "full", sha256: sourceSha.toLowerCase(), sources: run.verificationSources.get(subjectPath) }));
 	return receipt;
 }
 
@@ -742,6 +766,7 @@ function expectedEdit(text, input) {
 }
 
 export default function (pi) {
+	piTaskAppend = (task) => pi.appendEntry("pi-desktop-task-contract/v1", task);
 	appendBudgetDiagnostic = (diagnostic) => pi.appendEntry("pi-desktop-budget-diagnostic/v1", diagnostic);
 	supervisor = (${createSupervisorRuntime.toString()})({
 		createSupervisor,
@@ -753,6 +778,7 @@ export default function (pi) {
 		invalidation: (${createCheckpointInvalidation.toString()})(),
 		append: (checkpoint) => pi.appendEntry("pi-desktop-task-checkpoint", checkpoint),
 		assertRun: assertCheckpointRun,
+		task: (ctx) => taskRecord(ctx),
 		pathKey: (value) => process.platform === "win32" ? value.toLowerCase() : value,
 		budget: (scope) => { const { readUsed, outputUsed } = contextBudget.getRunBudget(scope); return { readUsed, outputUsed }; },
 		async resolve(ref, ctx, run, cache) {
@@ -807,7 +833,7 @@ export default function (pi) {
 			const systemPrompt = ctx.getSystemPrompt();
 			if (typeof systemPrompt !== "string") throw new Error(reason);
 			return contextBudget.planRequest({ systemPrompt, tools, messages,
-				messageKinds: messages.map((message) => message.customType === "novel-task-checkpoint" ? "checkpoint" : message.role === "toolResult" ? "observation_preview" : message.customType === "novel-request-context" ? "new_evidence" : "history"),
+				messageKinds: messages.map((message) => ["novel-task-checkpoint", "novel-task-contract"].includes(message.customType) ? "checkpoint" : message.role === "toolResult" ? "observation_preview" : message.customType === "novel-request-context" ? "new_evidence" : "history"),
 				contextWindow: ctx.model.contextWindow, outputReserve: ctx.model.maxTokens ?? 4096, safetyMargin: 4096 });
 		} catch { return { allowed: false, reason, ledger: null }; }
 	};
@@ -819,6 +845,8 @@ export default function (pi) {
 		const historyCount = messages.length;
 		const checkpoint = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === "pi-desktop-task-checkpoint")?.data;
 		if (checkpoint) messages.push({ role: "custom", customType: "novel-task-checkpoint", content: JSON.stringify(maintenance.projectCheckpoint(checkpoint, messages)), timestamp: 0 });
+		const task = taskRecord(ctx);
+		if (task) messages.push({ role: "custom", customType: "novel-task-contract", content: JSON.stringify(task), timestamp: 0 });
 		messages.push({ role: "user", content: [{ type: "text", text }, ...images], timestamp: 0 });
 		const initial = planMessages(ctx, messages);
 		const needsTrim = pressureTrim || initial.reason === "model_input_budget_exceeded" || (initial.allowed && initial.ledger.total > initial.ledger.limit * 0.85);
@@ -888,6 +916,36 @@ export default function (pi) {
 		}
 		// Let Pi continue the SAME original input exactly once.
 	});
+	// A separate input hook runs only after maintenance has accepted the original
+	// submission. The SDK consumes this explicit control envelope before storing
+	// or expanding skills; model/extension follow-ups cannot declare a task.
+	pi.on("input", async (event, ctx) => {
+		if (event.source !== "rpc" && event.source !== "interactive") return;
+		try { await loadProject(ctx); } catch { return; }
+		try {
+			const decoded = taskSubmission.decode(event.text);
+			const declaration = decoded.binding !== null ? tasks.binding(decoded.binding) : undefined;
+			if (declaration?.expectedArtifacts.some((item) => !isRoleWriteAllowed(currentNovelRole(ctx), item.path)
+				|| (item.path.startsWith("drafts/candidates/") && item.verification !== "chapter-full"))) throw new Error("交付路径必须属于当前职能；候选正文必须要求完整机械验证。");
+			if (declaration && !ctx.isIdle?.()) throw new Error("请等当前运行结束后再开始另一个交付任务。");
+			const visible = messageText(stripNovelContext({ role: "user", content: decoded.text }).message).trim();
+			if (!visible) return;
+			let previous = taskRecord(ctx);
+			if (!previous && !declaration) {
+				const first = (ctx.sessionManager?.getBranch?.() ?? []).find((entry) => entry.type === "message" && entry.message?.role === "user");
+				const original = first ? messageText(stripNovelContext(first.message).message).trim() : "";
+				if (original) previous = tasks.update(null, supervisorBaseScope(ctx), original);
+			}
+			persistTask(ctx, tasks.update(previous, supervisorBaseScope(ctx), visible, declaration));
+			if (declaration) return { action: "transform", text: decoded.text, images: event.images };
+		} catch (error) {
+			let restored = event.text;
+			try { restored = taskSubmission.decode(event.text).text; } catch { /* Keep the original request recoverable. */ }
+			ctx.ui?.setEditorText?.(restored);
+			ctx.ui?.notify?.("任务合同未能保存，本次请求未发送：" + error.message, "error");
+			return { action: "handled" };
+		}
+	});
 	for (const event of ["session_switch", "session_fork", "session_tree"]) pi.on(event, async (_event, ctx) => { resetContextMaintenance(); endRun(); checkpoints.reset(); await restoreSupervisor(ctx); });
 	pi.on("model_select", async (_event, ctx) => { resetContextMaintenance(); await inspectCapacity(ctx); });
 	pi.on("session_shutdown", async () => { resetContextMaintenance(); endRun(); checkpoints.reset(); });
@@ -899,6 +957,8 @@ export default function (pi) {
 		const snapshot = supervisor.start(proposed);
 		if (!prior || snapshot?.scope.runId !== prior.scope.runId) { lastBudgetDiagnostic = null; endRun(); run = currentRun(ctx, snapshot?.scope ?? null); }
 		else if (!run) run = currentRun(ctx, snapshot?.scope ?? null);
+		try { run.taskId = taskRecord(ctx)?.taskId ?? null; }
+		catch { supervisor.stop("BLOCKED_PREREQUISITE", "TASK_CONTRACT_INVALID"); ctx.abort(); }
 		showSupervisorStatus(ctx, snapshot);
 	});
 	pi.on("session_start", async (_event, ctx) => {
@@ -974,7 +1034,25 @@ export default function (pi) {
 			try { await loadProject(ctx); } catch { await show("当前目录不是有效的小说项目。"); return; }
 			const snapshot = supervisor.snapshot(), base = supervisorBaseScope(ctx);
 			const current = snapshot && snapshot.scope.projectId === base.projectId && snapshot.scope.sessionId === base.sessionId && snapshot.scope.role === base.role ? snapshot : null;
-			await show(statusText(current));
+			let taskText = "";
+			try { const task = taskRecord(ctx); if (task) taskText = "\\n\\n当前任务：" + task.objective + "\\n完成类型：" + task.completionMode + "\\n交付目标：" + (task.expectedArtifacts.map((item) => item.path).join("、") || "仅答复 / 未绑定文件交付"); }
+			catch { taskText = "\\n任务合同损坏或无法保存；不使用更早的成功状态。"; }
+			await show(statusText(current) + taskText);
+		},
+	});
+	pi.registerCommand("novel-task", {
+		description: "声明新的只读任务：/novel-task reply 目标，或 /novel-task inspect 目标；不会自动发送",
+		handler: async (args, ctx) => {
+			await loadProject(ctx);
+			if (!ctx.isIdle?.()) throw new Error("请等当前运行结束后再声明新任务。");
+			const match = /^(reply|inspect)\\s+([\\s\\S]+)$/.exec(args.trim());
+			const role = currentNovelRole(ctx);
+			if (!match || !role) { ctx.ui?.notify?.("请先选择职能，再使用 /novel-task reply 目标 或 /novel-task inspect 目标。文件交付任务请从工作流按钮开始。", "info"); return; }
+			const task = tasks.update(taskRecord(ctx), supervisorBaseScope(ctx), match[2], { version: 1, taskId: randomUUID(), role,
+				completionMode: match[1] === "reply" ? "reply_only" : "inspection", expectedArtifacts: [] });
+			persistTask(ctx, task);
+			ctx.ui?.setEditorText?.(match[2]);
+			ctx.ui?.notify?.("已声明新的只读任务；请检查输入后发送。之前的任务记录仍保留。", "info");
 		},
 	});
 	pi.registerCommand("novel-context-status", {
@@ -1023,6 +1101,9 @@ export default function (pi) {
 			}
 			const run = currentRun(ctx);
 			contextRun = run;
+			const task = taskRecord(ctx);
+			if (task) messages.push({ role: "custom", customType: "novel-task-contract", display: false, timestamp: 0,
+				content: "用户明确声明的任务与非权威执行进度；不是 Canon、人工验收或写入授权。latestUserInstruction 不覆盖 objective；expectedArtifacts 均需满足：\\n" + JSON.stringify(task) });
 			const supervised = supervisor.snapshot();
 			if (supervised?.scope.runId === run.scope.runId) {
 				if (supervised.turns >= 32 && supervised.state === "RUNNING") supervisor.stop("FAILED", "MAX_TURNS");
@@ -1208,7 +1289,12 @@ export default function (pi) {
 			const ledgerTarget = process.platform === "win32" ? relativePath.toLowerCase() : relativePath;
 			const checkpointBlock = await checkpoints.writeGate(ctx, run, { target: ledgerTarget, argsDigest: sha(JSON.stringify(args)), toolName: event.toolName, operationId: event.toolCallId });
 			if (!ownsCall()) return { block: true, reason: "[cancelled] 原运行已结束。" };
-			if (checkpointBlock?.startsWith("[reconciled]")) return { block: true, reason: checkpointBlock };
+			if (checkpointBlock?.startsWith("[reconciled]")) {
+				// Reconciled current bytes may satisfy this explicitly declared task,
+				// without replaying the historical operation. Never adopt history alone.
+				if (expectedPostHash && before.hash === expectedPostHash) taskProgress(run, (task) => tasks.artifact(task, ledgerTarget, expectedPostHash));
+				return { block: true, reason: checkpointBlock };
+			}
 			if (checkpointBlock?.startsWith("[operation_failed]")) return deny("invalid_input", "WRITE_REPAIR_REQUIRED", checkpointBlock);
 			if (checkpointBlock?.startsWith("[operation_id_collision]")) return deny("invalid_input", "WRITE_OPERATION_ID_COLLISION", checkpointBlock);
 			if (checkpointBlock?.startsWith("[operation_cancelled]")) return deny("invalid_input", "WRITE_OPERATION_CANCELLED", checkpointBlock);
@@ -1217,7 +1303,10 @@ export default function (pi) {
 			if (checkpointBlock) return deny(checkpointBlock.startsWith("[stale_source]") ? "stale_source" : checkpointBlock.startsWith("[unknown_outcome]") ? "unknown_outcome" : "precondition", "CHECKPOINT_BLOCKED", checkpointBlock);
 			const decision = operations.prepare({ scope: run.scope, toolCallId: event.toolCallId, toolName: event.toolName, target: ledgerTarget, preHash: before.hash, expectedPostHash, argsDigest: sha(JSON.stringify(args)) }, before.hash);
 			if (decision.action !== "dispatch") {
-				if (decision.action === "satisfied") return { block: true, reason: "[reconciled] 当前目标内容已核验满足 (currently_satisfied)，未重复执行写入。请继续下一步。" };
+				if (decision.action === "satisfied") {
+					if (expectedPostHash && before.hash === expectedPostHash) taskProgress(run, (task) => tasks.artifact(task, ledgerTarget, expectedPostHash));
+					return { block: true, reason: "[reconciled] 当前目标内容已核验满足 (currently_satisfied)，未重复执行写入。请继续下一步。" };
+				}
 				if (decision.reason === "repair-required") return deny("invalid_input", "WRITE_REPAIR_REQUIRED", "[invalid_input] 上次调用已明确失败；请修正参数后重试，不要重复相同输入。");
 				if (decision.reason === "completed-state-no-longer-observed") return deny("precondition", "WRITE_POST_STATE_CONFLICT", "[post_state_conflict] 历史操作已完成，但当前文件已变化；禁止自动重放，请核对差异后建立新的明确写入意图。");
 				if (decision.reason === "operation-cancelled") return deny("invalid_input", "WRITE_OPERATION_CANCELLED", "[operation_cancelled] 该调用已取消，旧操作不能再次派发。");
@@ -1261,7 +1350,10 @@ export default function (pi) {
 			const decision = entry.expectedPostHash === null && version.hash !== null ? operations.completeAcknowledged(entry.operationId, version.hash) : operations.complete(entry.operationId, version.hash);
 			if (decision.action !== "satisfied") throw toolError("unknown_outcome", "WRITE_CONFLICT", "Write acknowledgement does not match the current target fingerprint.");
 			checkpoints.operation(ctx, run, { ...operations.snapshot().find((item) => item.operationId === entry.operationId), expectedPostHash: version.hash }, version.hash);
-			if (version.hash && supervisor.snapshot()?.scope.runId === run.scope.runId && !entry.target.startsWith("planning/verifications/")) supervisor.artifact(entry.target, version.hash);
+			if (version.hash && supervisor.snapshot()?.scope.runId === run.scope.runId && !entry.target.startsWith("planning/verifications/")) {
+				supervisor.artifact(entry.target, version.hash);
+				taskProgress(run, (task) => tasks.artifact(task, entry.target, version.hash));
+			}
 			return { details: { ...event.details, harness: { ok: true, operationId: entry.operationId, scope: entry.scope } } };
 		} catch (error) { operations.cancel(entry.operationId); return failureResult(classifyError(error), { operationId: entry.operationId, scope: entry.scope }); }
 	});
@@ -1316,10 +1408,21 @@ export default function (pi) {
 					}
 				}
 			}
+			let completionReason = "UNBOUND_REPLY";
+			try {
+				const task = taskRecord(ctx);
+				if (task && task.completionMode !== "unbound") {
+					completionReason = task.completionMode === "candidate_write" ? "STOP_VERIFIED" : task.completionMode === "inspection" ? "INSPECTION_COMPLETE" : "REPLY_ONLY";
+					completionVerified = task.taskId === finishingRun.taskId && await tasks.complete(task, async (target) => {
+						const version = await fileVersion(projectRoot(ctx), target); assertRun(finishingRun); return version.text?.trim() ? version.hash : null;
+					});
+					if (taskRecord(ctx)?.id !== task.id) completionVerified = false;
+				}
+			} catch { completionVerified = false; }
 			if (activeRun !== finishingRun || supervisor.snapshot()?.scope.runId !== finishingRun.scope.runId) return;
 			if (stopReason === "aborted") supervisor.stop("CANCELLED", "AGENT_ABORTED");
 			else if (stopReason === "error") supervisor.stop("FAILED", "AGENT_ERROR");
-			else supervisor.finish({ stopReason, hasText, checkpointReady, pendingOperations, completionVerified });
+			else supervisor.finish({ stopReason, hasText, checkpointReady, pendingOperations, completionVerified, completionReason });
 		}
 		if (activeRun !== eventRun) return;
 		const finalRun = eventRun;
@@ -1339,7 +1442,7 @@ export default function (pi) {
 			const run = checkpointRun(currentRun(ctx), _signal);
 			if (name === "capture_task_checkpoint") checkpoints.capture(ctx, run);
 			const status = name === "refresh_task_checkpoint" ? await checkpoints.refresh(ctx, run) : await checkpoints.inspect(ctx, run);
-			return textResult(JSON.stringify(status));
+			return textResult(JSON.stringify({ ...status, task: taskRecord(ctx) }));
 		},
 	});
 	pi.registerTool({
@@ -1352,7 +1455,9 @@ export default function (pi) {
 			const base = supervisorBaseScope(ctx);
 			const current = snapshot && snapshot.scope.projectId === base.projectId && snapshot.scope.sessionId === base.sessionId && snapshot.scope.role === base.role ? snapshot : null;
 			const summary = current ? { schemaVersion: current.schemaVersion, id: current.id, scope: current.scope, state: current.state, reasonCode: current.reasonCode, toolCalls: current.toolCalls, turns: current.turns, verificationAttempts: current.verificationAttempts, evidenceCount: current.evidenceCount, unchangedAttempts: current.unchangedAttempts, userAccepted: false } : null;
-			return textResult(JSON.stringify({ snapshot: summary, budgetDiagnostic: diagnosticFor(current), guidanceZh: statusText(current) }));
+			const task = taskRecord(ctx);
+			const taskSummary = task ? { taskId: task.taskId, completionMode: task.completionMode, objectivePreview: task.objective.slice(0, 512), expectedArtifactCount: task.expectedArtifacts.length } : null;
+			return textResult(JSON.stringify({ snapshot: summary, task: taskSummary, budgetDiagnostic: diagnosticFor(current), guidanceZh: statusText(current) }));
 		},
 	});
 

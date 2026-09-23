@@ -1036,7 +1036,7 @@ export class Sidebar {
 					${requiresWriterVerification(record) ? html`
 						<button class="sidebar-primary-action" @click=${() => this.onNovelAgentTask?.(active, {
 							role: "write",
-							kind: "write-chapter",
+							kind: "verify-chapter",
 							chapter: record.chapter,
 							contextPaths: [...contextPaths, record.cardPath, record.candidatePath, record.proposalPath, record.verificationPath].filter((path, index, paths): path is string => Boolean(path) && paths.indexOf(path) === index),
 							instruction: "章节卡合同现已满足，但候选正文尚无当前 PASS 验证。请重读章节卡和候选正文，按需修订正文与 Continuity Proposal，然后调用 verify_chapter。验证通过后停下等待用户人工验收。",

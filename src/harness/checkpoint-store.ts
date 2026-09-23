@@ -12,6 +12,8 @@ export interface CheckpointInput {
 	/** Absent in legacy checkpoints; those references are not delivery receipts. */
 	evidenceFormat?: "delivered-v1";
 	objective: string;
+	latestUserInstruction?: string;
+	taskRef?: { taskId: string; revision: number; contractId: string };
 	hardConstraints: string[];
 	evidence: SourceVersionRef[];
 	observationIds: string[];
@@ -112,14 +114,22 @@ export function createCheckpointStore(options: { digest: (text: string) => strin
 	};
 	const normalizeInput = (value: unknown, parsing: boolean): CheckpointInput => {
 		const raw = object(value, "checkpoint");
-		const base = ["scope", "objective", "hardConstraints", "evidence", "observationIds", "artifacts", "unresolvedIssues", "allowedNextActions", "pendingOperations", "budget", "cause", "parentId", "evidenceFormat"];
+		const base = ["scope", "objective", "hardConstraints", "evidence", "observationIds", "artifacts", "unresolvedIssues", "allowedNextActions", "pendingOperations", "budget", "cause", "parentId", "evidenceFormat", "latestUserInstruction", "taskRef"];
 		exact(raw, parsing ? ["schemaVersion", "id", ...base] : base, "checkpoint");
 		if (raw.evidenceFormat !== undefined && raw.evidenceFormat !== "delivered-v1") throw new TypeError("checkpoint.evidenceFormat is invalid");
 		const cause = raw.cause;
 		if (cause !== "manual" && cause !== "before_compact" && cause !== "after_compact" && cause !== "write_intent" && cause !== "write_result" && cause !== "refresh") throw new TypeError("checkpoint.cause is invalid");
 		const budget = object(raw.budget, "budget"); exact(budget, ["readUsed", "outputUsed", "requestEstimate"], "budget");
+		let taskRef: CheckpointInput["taskRef"];
+		if (raw.taskRef !== undefined) {
+			const task = object(raw.taskRef, "taskRef"); exact(task, ["taskId", "revision", "contractId"], "taskRef");
+			taskRef = { taskId: text(task.taskId, "taskRef.taskId", 256), revision: integer(task.revision, "taskRef.revision"), contractId: text(task.contractId, "taskRef.contractId", 256) };
+			if (taskRef.revision < 1 || raw.latestUserInstruction === undefined) throw new TypeError("taskRef requires a revision and latest instruction");
+		}
 		return {
 			scope: normalizeScope(raw.scope), objective: text(raw.objective, "objective", 16_384, true),
+			...(raw.latestUserInstruction === undefined ? {} : { latestUserInstruction: text(raw.latestUserInstruction, "latestUserInstruction", 32768) }),
+			...(taskRef ? { taskRef } : {}),
 			hardConstraints: list(raw.hardConstraints, "hardConstraints", 256, (item, index) => text(item, `hardConstraints[${index}]`, 32_768)),
 			evidence: list(raw.evidence, "evidence", 128, (item, index) => normalizeRef(item, index, "evidence")),
 			observationIds: list(raw.observationIds, "observationIds", 128, (item, index) => text(item, `observationIds[${index}]`, 4096)),

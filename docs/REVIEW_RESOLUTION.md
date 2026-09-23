@@ -2,7 +2,7 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1 并验证双平台 CI，再进入 B2 读取交付凭证修复。B2 当前为本地改动，C 任务完成合同仍未实施；不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 当前为本地改动，尚未提交推送；不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
@@ -12,10 +12,10 @@
 | --- | --- | --- | --- |
 | AUD-01 | fixed / CI_passed | 新增拒绝原因枚举；仅规范化隔离测试子进程的临时根；补路径正反例与 Windows 短路径回归 | `f472e8d` 双平台 CI 全绿；Windows 8.3 用例实际执行，journal=11、unsupported=[]。原失败 CI 未输出具体拒绝分支，仍不冒充已确认其唯一根因 |
 | AUD-02 | fixed / CI_passed | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | `c67467e` 双平台 CI 全绿；新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放 |
-| AUD-03 | fixed_locally / not_committed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | 原 5 个 B2 红灯全部转绿，独立审查合同 10/10；新增局部页、旧会话、预算拒绝、ABA 改版等回归。尚无本批远程 CI / Desktop 验收 |
-| AUD-04 | deferred | C：工作流绑定稳定 taskId、任务类型、目标产物及完成条件 | 需显式版本化持久化 schema 与旧会话兼容策略 |
-| AUD-05 | deferred | C 中保留必需任务恢复信息，E 中测量压缩质量 | 不将进度摘要当作 Canon |
-| AUD-06 | in_progress | D 随 B/C 补完整生产接线回归 | 复现优先复用完整扩展、固定 SDK 与隔离 fixture；不声称已有完整 Desktop/冷恢复验收 |
+| AUD-03 | fixed / CI_passed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | `f1b19df` 双平台 CI 全绿；263 例 × 3 实际执行。没有本批 Desktop 验收 |
+| AUD-04 | fixed_locally / not_committed | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | 旧会话为 unbound，不推断交付合同；有界 schema、完整扩展和真实磁盘会话重开回归。没有本批远程 CI / Desktop 验收 |
+| AUD-05 | partially_addressed | C 保留任务目标、约束、产物与验证凭证，E 再测量压缩质量 | 这是必需恢复信息，不是通用规划器或语义进度摘要；不将其当作 Canon |
+| AUD-06 | in_progress | D 随 B/C 补完整生产接线与定向突变回归 | C 已覆盖完整扩展、固定 SDK、真实会话重开及强制错误完成的突变检测；不声称完成 Desktop 或 C 的独立 OS 进程冷恢复验收 |
 | AUD-07 | deferred | E：分层计量预算估算、provider usage 和 HTTP 派发 | 不把 eval 单请求限制复制到生产重试策略 |
 | AUD-08 | deferred | E：先测量物理读取和逻辑引用，再考虑请求内缓存 | 最终写入仍须核验版本 |
 | AUD-09 | deferred | 需求出现后再决定是否持久化 Observation | 本轮不加数据库、向量检索或新 agent loop |
@@ -28,6 +28,7 @@
 - Windows 日志确认 `PASS journal.windows-short-temp`，两次 Pilot journal 均为 passed=11、unsupported=[]，后续全部 SDK 检查实际执行。Ubuntu 唯一的平台条件跳过为 Windows 专属短路径步骤；不是必需测试被意外跳过。
 - B1 已独立提交推送：`c67467ec4f812a722df5398033bc2858ad8507bd`。[CI 35871188658](https://github.com/Smoouns/pi-desktop/actions/runs/35871188658) 的 Windows/Node 24、Ubuntu/Node 22、TypeScript + Rust 三个任务全部通过。两平台均实际执行 Harness 235 例 × 3，以及新增三进程冷恢复用例。
 - B1 Windows 日志确认 journal=11、unsupported=[]、真实 8.3 TEMP 用例通过，全部后续 SDK 检查和前端构建实际执行。Ubuntu 仅按条件跳过 Windows 专属短路径步骤。冻结评测中的既定负例 / unsupported 仍不冒充生产通过。
+- B2 已独立提交推送：`f1b19df4005d74ecbad76bb242eff0a98c8a6d17`。[CI 35877882145](https://github.com/Smoouns/pi-desktop/actions/runs/35877882145) 的 Windows/Node 24、Ubuntu/Node 22、TypeScript + Rust 三个任务全部通过。两平台日志均确认 Harness 263 例 × 3、deterministic=true、失败 0，新增 B2 场景实际执行；后续全部 SDK 检查、长程回归及前端构建也实际执行。Windows journal=11、unsupported=[]、8.3 TEMP 用例通过；Ubuntu journal=10、unsupported=[]，仅按条件跳过 Windows 专属短路径步骤。
 - 远程验收门槛：固定修复提交上的 Windows/Node 24 与 Ubuntu/Node 22 必需检查实际执行并通过，未经说明的 skipped 不算通过。
 
 后续记录将在实际执行后追加，不预填通过结果。
@@ -101,7 +102,7 @@
 - `s3-offline-BNwpT8` 的三个生成扩展 SHA 与本轮前的 `s3-offline-Ec6DG2` 完全相同；`s3-lifecycle-vNNqTu` 亦保持旧 lifecycle 生成扩展 SHA。不是把新生产行为冒充旧实验版本。
 - 上述冻结矩阵的能力负例仍按原合同验证，不当作新的生产 B1 验收；生产 B1 的证据来自新增完整扩展与冷恢复回归。
 
-## B2：读取捕获与实际交付（本地修复）
+## B2：读取捕获与实际交付（已提交并通过 CI）
 
 - 管理扩展升级到 v16。原生 `read` 保留原始字节 SHA，但将 `offset`、`limit` 和固定 SDK 的真实 truncation 回执映射到返回正文；返回内容必须与捕获版本逐字相符。仅返回超限提示时没有正文凭证；前后 SHA 一样、实际却读到另一版的 ABA 场景也拒绝交付。
 - `observation.sourceRefs` / `sources` 只表示捕获来源；`readDelivery.schemaVersion=1` 单独记录交付。`deliveredSourceRefs` 是本次完整交付的行，`sourceRefs` 是同一观察、运行及失效代次内累计交付完整的行。二者均不等于“模型理解了内容”。`start/end/totalChars/hasMore` 使用 UTF-16 坐标；`truncated` 保留截断信息。
@@ -126,4 +127,39 @@
 - 最终应用 / 测试 TypeScript 检查、前端构建、长程 Harness、小说领域回归、离线 eval 通过；构建仅保留原有 bundle/import 提示。v16 标记已同步到安装冒烟断言，没有跳过测试。冻结 SDK context / lifecycle 分别通过 103 / 175 项检查，保留声明过的历史能力负例；不当作当前生产 B2 的直接验收。
 - 未做真实模型调用、Desktop 人工点击或任意并发文件系统替换审计。工具结果边界的交付不证明 provider 实际消费 / 模型理解，B2 不关闭 C 的任务完成合同。
 
-下一步：提交 B2 并验证其固定提交的双平台 CI，再进入 C 稳定 TaskContract。
+## C：稳定任务目标与完成合同（本地实现）
+
+### 任务身份与输入边界
+
+- 管理扩展升级到 v17。新增独立 `pi-desktop-task-contract/v1` 会话记录，包含 `schemaVersion=1`、`taskId`、递增 revision、完整性摘要、project/session/role 所有者、原始 objective、latestUserInstruction、按序 constraintRefs、任务类型、预期产物及非权威执行进度。普通“继续”只追加指令；不同 taskId 显式替换当前任务并记录 supersedesTaskId，旧记录不删除。
+- 工作流按钮从用户选择和章节卡的唯一 `file` 字段确定明确目标，不让模型从自然语言猜测完成类型，也不根据提示词授予角色或写入权限。声明只在真正发送时随 RPC input 附带版本化控制元数据；宿主 input hook 在 Pi 保存 / 展开 skill 前移除它。模型或 extension follow-up 不可声明任务；控制元数据不渲染为聊天内容。
+- 新声明不得在当前运行中插入；输入框保留待发送文本。项目 / 会话 runtime 不匹配时不沿用预填绑定；合同路径仍须经过既有角色写入策略。候选正文目标必须要求完整章节验证，其他角色不能借声明跨权限写入。
+- `/novel-task reply 目标`、`/novel-task inspect 目标` 可显式声明新的回复 / 检查任务并预填输入，不自动调用模型。文件交付任务使用工作流入口。普通自由文本和没有新合同的旧会话为 `unbound`；不靠旧 prose summary 或最近一句“继续”反推出文件交付目标。
+
+### 完成条件与恢复
+
+- `candidate_write` 要求所有声明产物同时满足。新建 / 更新产物需有本任务记录的当前 SHA；仅已有同名文件不能充当写入凭证。B1 的当前 post-image 对账可在确实满足同一写入意图时记为已满足，但不能借历史完成状态或重放写入。
+- 候选正文还必须有真实 `verify_chapter` 返回的同章、full、PASS / PASS_WITH_WARNINGS 凭证，并在结束时复核正文与所有验证依赖 SHA。错章共用路径、局部场景验证、写错文件、缺文件、验证后外部修改均不能完成；调用模型生成“已完成”文本无效。
+- 普通规划任务绑定章节卡的生成 / 更新，章节架构作为须非空存在的前置文件；这不宣称已经机械验证架构登记与章节卡的语义一致性。世界观变更只绑定提案，不写 Canon；写作同时绑定正文和连续性提案，单独“重新验证”只绑定正文验证。
+- 回复 / 检查的结束码为 `REPLY_ONLY` / `INSPECTION_COMPLETE`，旧会话为 `UNBOUND_REPLY`，界面显示“回复已结束”；不冒充文件交付、人工验收或 Canon 晋升。运行状态 schemaVersion=1 保留；旧终态、取消、错误、pending operation 和失效检查点仍会阻断成功。
+- TaskCheckpoint schemaVersion=1 新增可选且严格校验的 `taskRef` 与 `latestUserInstruction`，旧字段缺省时原摘要仍可解析，不自动迁移成有权威的任务声明。旧程序不能理解新增 checkpoint 字段时拒绝该记录；没有清空历史或增加自动重放。
+- TaskContract 最多 16 个目标、256 条指令、每条验证 128 个来源、单记录 128 KiB、最多 10,000 条分支记录；超限或最新记录损坏时拒绝，不回退借用更早成功。append 失败后该所有者在当前扩展实例中禁止继续宣告交付。Observation 仍不跨进程保存；恢复的产物 / 验证凭证要重新检查当前文件。
+
+### 直接回归与边界
+
+- 最初 AUD-04 复现中，原实现将“继续”作为 objective，且缺少声明目标的候选任务也能完成；显式只读对照可正常结束。修复后的相同生产接线断言已纳入常规套件。
+- `npm run test:task-contract`：20 例通过，真实模型调用 0。包含严格 schema / 路径 / 容量、追加指令与新任务、UI 提交元数据、source / minified 完整扩展、真实机械验证、局部验证与错章负例、相关文件改版失效、角色 / 分支隔离、旧会话、损坏与持久化失败。
+- 真实 SessionManager 写盘、重新加载完整扩展并重开会话后，taskId、原目标及当前验证凭证保留；新一轮重新核验，不重放写入。此项为同一 Node 进程内重开和 compaction 事件接线测试，**不是** C 的独立 OS 进程冷启动 / 真实模型压缩验收。
+- 定向突变仅改临时生成扩展副本，将完成检查强制返回 true；相同“缺目标产物不能完成”断言确实失败。生产源码未被突变修改。它证明该回归能抓住这一错误，不能外推为所有 guard 都有突变覆盖。
+- 本地完整 Harness：283 例 × 3，deterministic=true、失败 0、unsupported 0；应用 / 测试 TypeScript 检查、长程 Harness（1 例 × 3）、小说领域回归、离线 eval、前端构建、evidence-report 199 项检查通过。领域冒烟首次发现新增 `/novel-task` 尚未加入精确命令清单；补齐清单后重跑通过，没有删除断言。构建仅保留原有 bundle/import 提示。
+- 最终完整重跑耗时 186.6 秒；仍保留 240 秒工装硬上限，不据本机通过推断本批远程 CI 已通过。`artifacts/harness/summary.json` 记录 HEAD=`f1b19df`、dirty=true 和本次实现源码 SHA，运行后逐文件复核无漂移。
+- 不调用真实模型，不进行 Desktop 人工点击，不修改真实小说或全局 Pi 配置。人工接受与 Canon 晋升逻辑未改；机械满足不等于内容质量或用户满意。
+
+### 冻结评测保护
+
+旧 S4 曾直接导入生产 Supervisor 并冻结其 SHA。本次新增 `evals/adapters/snapshots/run-supervisor.ts` 与 `supervisor-runtime.ts`，只重定位类型 import；恢复原 import 后仍核验原 SHA（`cc1f9078…` / `2f698122…`）及原 Git 提交。S4 / S4 live tooling 改为使用这些快照，原 provenance、历史报告、历史实验结果不改写。
+
+- 冻结 SDK supervision / supervision-live tooling 分别通过 188 / 150 项检查，真实模型调用 0。后者运行的是 **test 模式**，并非新的真实模型实验；冻结矩阵原有负例继续按原合同验证，不计作 C 生产能力通过。
+- `s4-offline-FMMsLw` 的三个生成扩展 SHA 与改造前 `s4-offline-JbTn8j` 完全相同（control `6c16573f…`、supervisor `97869300…`、supervisor-maintenance `ef66d25b…`），未将 C 的新完成合同混入冻结矩阵。
+
+下一步：单独提交 C，验证固定提交的双平台 CI；再补 D 剩余生命周期 / Desktop 接线证据，E 的压缩质量、预算计量及读取成本优化另行推进。

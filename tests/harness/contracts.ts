@@ -34,7 +34,7 @@ const document = (relativePath: string, estimatedTokens: number, authority: Nove
 	classification: { authority, contentType, reason: "test" }, estimatedTokens, text: relativePath,
 });
 
-export async function withLoadedExtension<T>(project: string, minified: boolean, body: (extension: Loaded, runtime: Awaited<ReturnType<typeof loadExtensions>>["runtime"]) => Promise<T>): Promise<T> {
+export async function withLoadedExtension<T>(project: string, minified: boolean, body: (extension: Loaded, runtime: Awaited<ReturnType<typeof loadExtensions>>["runtime"]) => Promise<T>, transformSource?: (source: string) => string): Promise<T> {
 	const temp = await mkdtemp(path.join(tmpdir(), "pi-harness-extension-"));
 	try {
 		const extensionPath = path.join(temp, "novel-tools.ts");
@@ -45,7 +45,7 @@ export async function withLoadedExtension<T>(project: string, minified: boolean,
 			const builtFactory = await import(`${pathToFileURL(factoryModule).href}?case=${Date.now()}`) as { NOVEL_TOOLS_EXTENSION_CONTENT: string };
 			source = builtFactory.NOVEL_TOOLS_EXTENSION_CONTENT;
 		}
-		await writeFile(extensionPath, source, "utf8");
+		await writeFile(extensionPath, transformSource ? transformSource(source) : source, "utf8");
 		const loaded = await loadExtensions([extensionPath], project);
 		assert.deepEqual(loaded.errors, []);
 		assert.equal(loaded.extensions.length, 1);

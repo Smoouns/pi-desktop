@@ -1,4 +1,6 @@
 import { rpcBridge, type RpcImageInput, type RpcSessionState } from "../../rpc/bridge.js";
+import type { TaskBinding } from "../../harness/task-contract.js";
+import { createTaskSubmission } from "../../novel/task-submission.js";
 
 type NoticeKind = "info" | "success" | "error";
 
@@ -27,6 +29,7 @@ interface SendMessageFlowParams<ImageItem> {
 	toRpcImages: (images: ImageItem[]) => RpcImageInput[];
 	removeComposerQueueMessage: (id: string) => void;
 	onPromptSubmitted?: () => void;
+	taskBinding?: TaskBinding | null;
 }
 
 export async function sendMessageFlow<ImageItem>({
@@ -52,6 +55,7 @@ export async function sendMessageFlow<ImageItem>({
 	toRpcImages,
 	removeComposerQueueMessage,
 	onPromptSubmitted,
+	taskBinding,
 }: SendMessageFlowParams<ImageItem>): Promise<void> {
 	if (isComposerInteractionLocked()) {
 		pushNotice(bindingStatusText || "Session is still loading. Try again in a moment.", "info");
@@ -92,6 +96,10 @@ export async function sendMessageFlow<ImageItem>({
 	if (!streaming) {
 		actualMode = "prompt";
 	}
+	if (taskBinding && streaming) {
+		pushNotice("请等当前运行结束后再发送新的交付任务；输入已保留。", "info");
+		return;
+	}
 
 	let queuedMessageId: string | null = null;
 	if (actualMode === "followUp") {
@@ -107,7 +115,7 @@ export async function sendMessageFlow<ImageItem>({
 	try {
 		const rpcImages = toRpcImages(images);
 		if (actualMode === "prompt") {
-			await rpcBridge.prompt(text, { images: rpcImages });
+			await rpcBridge.prompt(taskBinding ? createTaskSubmission().encode(text, taskBinding) : text, { images: rpcImages });
 		} else if (actualMode === "steer") {
 			await rpcBridge.steer(text, rpcImages);
 		} else {

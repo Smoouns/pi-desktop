@@ -21,6 +21,7 @@ export async function withWriteSession<T>(root: string, sessionFile: string | nu
 	manager: SessionManager; call: (tool: "write" | "edit" | "read", id: string, input: any, dropResult?: boolean) => Promise<any>;
 	checkpoint: (name?: "get" | "refresh") => Promise<any>; writes: () => number;
 	persisted: () => TaskCheckpoint; restart: (request: string) => Promise<void>;
+	runner: ExtensionRunner; extension: any; ctx: () => any;
 }) => Promise<T>): Promise<T> {
 	return withLoadedExtension(root, false, async (extension, runtime) => {
 		const sessionDir = path.join(root, "test-sessions");
@@ -37,8 +38,9 @@ export async function withWriteSession<T>(root: string, sessionFile: string | nu
 				isIdle: () => true, abort: noop, hasPendingMessages: () => false, shutdown: noop, getContextUsage: () => undefined, compact: noop, getSystemPrompt: () => "" } as never);
 		await runner.emit({ type: "session_start" } as never);
 		const restart = async (request: string) => {
-			manager.appendMessage({ role: "user", content: request, timestamp: 0 });
-			await runner.emitInput(request, undefined, "interactive");
+			const result = await runner.emitInput(request, undefined, "interactive");
+			assert.notEqual(result.action, "handled");
+			manager.appendMessage({ role: "user", content: result.action === "transform" ? result.text : request, timestamp: 0 });
 			await runner.emit({ type: "agent_start" } as never);
 		};
 		await restart("在当前候选目录内测试写入合同");
@@ -63,7 +65,7 @@ export async function withWriteSession<T>(root: string, sessionFile: string | nu
 			const entry = manager.getBranch().slice().reverse().find((item: any) => item.type === "custom" && item.customType === "pi-desktop-task-checkpoint") as any;
 			assert.ok(entry); return createCheckpointStore({ digest: sha256 }).parse(entry.data);
 		};
-		return body({ manager, call, checkpoint, writes: () => writes, persisted, restart });
+		return body({ manager, call, checkpoint, writes: () => writes, persisted, restart, runner, extension, ctx: () => runner.createContext() });
 	});
 }
 

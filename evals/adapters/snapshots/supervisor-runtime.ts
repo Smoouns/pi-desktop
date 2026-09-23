@@ -1,6 +1,6 @@
-import type { RunScope } from "../harness/types.js";
-import type { ToolErrorKind } from "../harness/tool-policy.js";
-import type { RunSupervisor, RunSupervisorSnapshot, RunSupervisorState } from "../harness/run-supervisor.js";
+import type { RunScope } from "../../../src/harness/types.js";
+import type { ToolErrorKind } from "../../../src/harness/tool-policy.js";
+import type { RunSupervisor, RunSupervisorSnapshot, RunSupervisorState } from "./run-supervisor.js";
 
 export const RUN_STATUS_ENTRY = "pi-desktop-run-status/v1";
 
@@ -17,7 +17,7 @@ export interface SupervisorRuntime {
 	verification(value: { callId: string; subject: string; artifactSha256: string | null; errorDigest: string | null; passed: boolean; full: boolean }): RunSupervisorSnapshot | null;
 	failure(value: { kind: ToolErrorKind; code: string; signature?: string }): RunSupervisorSnapshot | null;
 	stop(state: Exclude<RunSupervisorState, "RUNNING">, reasonCode: string): RunSupervisorSnapshot | null;
-	finish(value: { stopReason: string; hasText: boolean; checkpointReady: boolean; pendingOperations: boolean; completionVerified: boolean; completionReason?: "STOP_VERIFIED" | "REPLY_ONLY" | "INSPECTION_COMPLETE" | "UNBOUND_REPLY" }): RunSupervisorSnapshot | null;
+	finish(value: { stopReason: string; hasText: boolean; checkpointReady: boolean; pendingOperations: boolean; completionVerified: boolean }): RunSupervisorSnapshot | null;
 }
 
 /** Small Pi lifecycle adapter; dependency-free so it can be embedded in the managed extension. */

@@ -18,6 +18,8 @@ import { runBuiltinWriteCases } from "./builtin-writes.js";
 import { runWriteStateExtensionCases } from "./write-state-extension.js";
 import { runReadDeliveryCases } from "./read-delivery.js";
 import { runReadDeliveryExtensionCases } from "./read-delivery-extension.js";
+import { runTaskContractCases } from "./task-contract.js";
+import { runTaskContractExtensionCases } from "./task-contract-extension.js";
 import { runReviewRepros } from "./review-repros.js";
 import { runWorkflowUiCases } from "./workflow-ui.js";
 import { runSessionRestoreCases } from "./session-restore.js";
@@ -102,6 +104,8 @@ for (let repetition = 1; repetition <= 3; repetition++) {
 	await runReadDeliveryCases(runCase);
 	await runReviewRepros(runCase);
 	await runReadDeliveryExtensionCases(runCase);
+	await runTaskContractCases(runCase);
+	await runTaskContractExtensionCases(runCase);
 	await runWorkflowUiCases(runCase);
 	await runSessionRestoreCases(runCase);
 	await runSessionRefreshCases(runCase);
@@ -144,6 +148,7 @@ const packageVersion = async (name: string): Promise<string> => JSON.parse(await
 const implementationFiles: Record<string, string> = {};
 for (const name of [
 	"src/extensions/novel-tools-extension.ts", "src/extensions/checkpoint-runtime.ts", "src/novel/context.ts", "src/novel/context-attachment.ts",
+	"src/novel/agents.ts", "src/novel/task-submission.ts", "src/components/chat-view/send-message-flow.ts", "src/components/chat-view/backend-message-mapper.ts",
 	"src/extensions/supervisor-runtime.ts",
 	"src/extensions/budget-diagnostics.ts",
 	"src/extensions/context-maintenance.ts",

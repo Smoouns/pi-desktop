@@ -110,6 +110,7 @@ import {
 	computeSessionStatsFromRaw,
 } from "./chat-view/session-stats-refresh.js";
 import { sendMessageFlow } from "./chat-view/send-message-flow.js";
+import type { TaskBinding } from "../harness/task-contract.js";
 import { deriveLatestAssistantContextTokens as deriveLatestAssistantContextTokensFromMessages } from "./chat-view/session-stats-utils.js";
 import {
 	renderAssistantMessageRow,
@@ -616,6 +617,7 @@ export class ChatView {
 	private projectPath: string | null = null;
 	private novelContextProvider: ((prompt: string) => Promise<string>) | null = null;
 	private novelContextAttachedForSession = false;
+	private pendingTaskBinding: { value: TaskBinding; runtime: string } | null = null;
 	private extensionStatus: ExtensionStatusView | null = null;
 	private bindingStatusText: string | null = null;
 	private gitKnownBranchesByProject = new Map<string, string[]>();
@@ -967,8 +969,9 @@ export class ChatView {
 	}
 
 	/** Refreshes the one-time novel context attachment for a new routed Agent task. */
-	prepareNovelAgentTask(): void {
+	prepareNovelAgentTask(binding: TaskBinding | null = null): void {
 		this.novelContextAttachedForSession = false;
+		this.pendingTaskBinding = binding ? { value: binding, runtime: rpcBridge.getRuntimeIdentity() } : null;
 	}
 
 	private normalizeSkillSlashCommandText(commandText: string): string {
@@ -3523,6 +3526,7 @@ export class ChatView {
 	}
 
 	private clearComposer(options: { preserveSkillDraft?: boolean } = {}): void {
+		this.pendingTaskBinding = null;
 		const preservedSkillDraft = options.preserveSkillDraft ? this.selectedSkillDraft : null;
 		this.inputText = "";
 		this.pendingImages = [];
@@ -3535,6 +3539,7 @@ export class ChatView {
 	}
 
 	async sendMessage(mode: DeliveryMode = this.pendingDeliveryMode): Promise<void> {
+		const taskBinding = this.pendingTaskBinding?.runtime === rpcBridge.getRuntimeIdentity() ? this.pendingTaskBinding.value : null;
 		const rawInputText = this.composedPromptText(this.inputText);
 		const isSlashCommand = !this.selectedSkillDraft && rawInputText.trim().startsWith("/");
 		const attachNovelContext = shouldAttachNovelContext({
@@ -3546,6 +3551,7 @@ export class ChatView {
 		const inputText = novelContext ? `${rawInputText}\n\n<novel-context>\n${novelContext}\n</novel-context>` : rawInputText;
 		await sendMessageFlow({
 			mode,
+			taskBinding,
 			bindingStatusText: this.bindingStatusText,
 			isComposerInteractionLocked: this.isComposerInteractionLocked.bind(this),
 			inputText,

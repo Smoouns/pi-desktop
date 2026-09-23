@@ -10,6 +10,7 @@ export function createCheckpointRuntime(deps: {
 	resolve: (ref: SourceVersionRef, ctx: any, run: any, cache: Map<string, any>) => Promise<SourceVersionResolverResult>;
 	assertRun: (run: any) => void; budget: (scope: RunScope) => { readUsed: number; outputUsed: number };
 	pathKey?: (path: string) => string;
+	task?: (ctx: any, run: any) => { taskId: string; revision: number; id: string; objective: string; latestUserInstruction: string } | null;
 }) {
 	type Receipt = { ref: SourceVersionRef; sequence: number };
 	type State = { owner: string; checkpoint: TaskCheckpoint | null; error: string | null; sequence: number; receipts: Map<string, Receipt>; legacy: Map<string, SourceVersionRef>; deliveryEpoch: number; observationIds: Set<string>; artifacts: Map<string, SourceVersionRef>; operations: Map<string, PendingCheckpointOperation>; stale: Set<string> };
@@ -66,8 +67,11 @@ export function createCheckpointRuntime(deps: {
 		const previous = current.checkpoint; const branchConstraints: string[] = [];
 		for (const entry of ctx.sessionManager?.getBranch?.() ?? []) if (entry.type === "message" && entry.message?.role === "user") { const value = text(entry.message); if (value) branchConstraints.push(value); }
 		const constraints = branchConstraints.length ? branchConstraints : [...(previous?.hardConstraints ?? [])];
-		const objective = branchConstraints.at(-1) ?? previous?.objective ?? "";
-		return deps.store.build({ scope: { ...run.scope }, evidenceFormat: "delivered-v1", objective, hardConstraints: constraints, evidence: currentEvidence(current), observationIds: [...current.observationIds].slice(-128), artifacts: [...current.artifacts.values()], unresolvedIssues: [...(previous?.unresolvedIssues ?? []).filter((issue) => issue.code !== "STALE_SOURCE"), ...[...current.stale].map((path) => ({ code: "STALE_SOURCE", message: path }))], allowedNextActions: ["核验来源；失效时重新读取并 refresh_task_checkpoint；只在现有角色权限内继续；人工验收与 Canon 晋升仍由用户决定"], pendingOperations: [...current.operations.values()].map(cloneOperation), budget: { ...deps.budget(run.scope), requestEstimate: null }, cause, ...supplied });
+		const task = deps.task?.(ctx, run);
+		const objective = task?.objective ?? previous?.objective ?? branchConstraints[0] ?? "";
+		return deps.store.build({ scope: { ...run.scope }, evidenceFormat: "delivered-v1", objective,
+			...(task ? { latestUserInstruction: task.latestUserInstruction, taskRef: { taskId: task.taskId, revision: task.revision, contractId: task.id } } : {}),
+			hardConstraints: constraints, evidence: currentEvidence(current), observationIds: [...current.observationIds].slice(-128), artifacts: [...current.artifacts.values()], unresolvedIssues: [...(previous?.unresolvedIssues ?? []).filter((issue) => issue.code !== "STALE_SOURCE"), ...[...current.stale].map((path) => ({ code: "STALE_SOURCE", message: path }))], allowedNextActions: ["核验来源；失效时重新读取并 refresh_task_checkpoint；只在现有角色权限内继续；人工验收与 Canon 晋升仍由用户决定"], pendingOperations: [...current.operations.values()].map(cloneOperation), budget: { ...deps.budget(run.scope), requestEstimate: null }, cause, ...supplied });
 	};
 	const poison = (current: State): void => { current.error = "检查点持久化失败；为避免重放或越权，本任务已禁止继续写入。"; };
 	const persist = (ctx: any, run: any, cause: TaskCheckpoint["cause"], supplied?: Partial<TaskCheckpoint>): TaskCheckpoint => {

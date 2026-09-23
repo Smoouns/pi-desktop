@@ -31,7 +31,7 @@ export async function withRunner<T>(root: string, minified: boolean, body: (stat
 	setBranch: (entries: Entry[]) => void; setAppendFailure: (value: boolean) => void;
 	aborts: () => number; ctx: () => any;
 	config: { model: any; activeTools: () => any; allTools: () => any; systemPrompt: () => any };
-}) => Promise<T>): Promise<T> {
+}) => Promise<T>, transformSource?: (source: string) => string): Promise<T> {
 	return withLoadedExtension(root, minified, async (extension, runtime) => {
 		let currentBranch: Entry[] = [{ type: "custom", customType: "pi-desktop-novel-role", data: { role: "write" }, id: "role", parentId: null }];
 		const entries: Entry[] = [...currentBranch];
@@ -60,7 +60,7 @@ export async function withRunner<T>(root: string, minified: boolean, body: (stat
 				shutdown: noop, getContextUsage: () => undefined, compact: noop, getSystemPrompt: () => config.systemPrompt() } as never);
 		return body({ extension, runner, entries, branch: () => currentBranch.slice(), setBranch: (next) => { currentBranch = next.slice(); },
 			setAppendFailure: (value) => { appendFailure = value; }, aborts: () => abortCount, ctx: () => runner.createContext(), config });
-	});
+	}, transformSource);
 }
 
 function latestStatus(entries: Entry[]): any {

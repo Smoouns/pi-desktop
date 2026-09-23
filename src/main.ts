@@ -10,6 +10,7 @@ import { ExtensionUiHandler, normalizeExtensionUiRequest, type NotificationActio
 import { FileViewer } from "./components/file-viewer.js";
 import { ContextInspector } from "./components/context-inspector.js";
 import { NovelWorkflowDialog, type NovelWorkflowAction } from "./components/novel-workflow-dialog.js";
+import { buildNovelTaskBinding } from "./novel/agents.js";
 import { WorldChangeDialog } from "./components/world-change-dialog.js";
 import { loadStoryMemorySnapshot, searchStoryMemory } from "./novel/memory-io.js";
 import { loadWorldChangeHistory, rollbackWorldChange } from "./novel/world-change.js";
@@ -5181,6 +5182,7 @@ function renderApp(): void {
 						activateNovelAgentTask(project, {
 							role: "world",
 							kind: "world-change",
+							expectedArtifacts: [{ path: change.requestPath.replace(/-request\.md$/, "-proposal.md"), verification: "none" }],
 							contextPaths: [change.requestPath, change.targetPath],
 							feedback,
 							instruction: "请根据用户的世界观变更请求创建完整替换提案。完成后停下，等待用户在世界观变更窗口审阅。",
@@ -5194,6 +5196,7 @@ function renderApp(): void {
 						activateNovelAgentTask(project, {
 							role: "world",
 							kind: "world-revision",
+							expectedArtifacts: [{ path: proposal.proposalPath, verification: "none" }],
 							contextPaths: [proposal.proposalPath, proposal.targetPath, ...proposal.affectedPaths],
 							feedback,
 							instruction: "请根据补充意见返工已有世界观提案。完成后停下，等待用户重新审阅；不要修改 Canon。",
@@ -5277,9 +5280,11 @@ function renderApp(): void {
 		return true;
 	});
 
-	const stageNovelAgentTask = (task: NovelAgentTask): void => {
-		const command = buildNovelAgentPrompt(task);
-		chatView?.prepareNovelAgentTask();
+	const stageNovelAgentTask = (task: NovelAgentTask, documents: NovelDocument[]): void => {
+		const binding = buildNovelTaskBinding(task, documents, crypto.randomUUID());
+		const deliverables = binding?.expectedArtifacts.map((item) => `- ${item.path}${item.verification === "chapter-full" ? "（当前版本完整机械验证）" : item.verification === "present" ? "（前置文件须存在，无需重复写入）" : "（本任务生成或更新）"}`).join("\n");
+		const command = buildNovelAgentPrompt(task) + (deliverables ? `\n\n本次交付目标（全部满足后才标记候选完成，仍需人工验收）：\n${deliverables}` : "");
+		chatView?.prepareNovelAgentTask(binding);
 		chatView?.stageComposerCommand(command);
 		clearVisibleActiveSessionAttention();
 	};
@@ -5313,11 +5318,14 @@ function renderApp(): void {
 				await chatView?.refreshFromBackend({ throwOnError: true });
 				assertProjectTaskCurrent(version);
 				await applyWorkspacePane(workspace);
-				stageNovelAgentTask(task);
+				const novel = await loadNovelProject(project.path);
+				const documents = novel ? await scanNovelDocuments(novel) : [];
+				assertProjectTaskCurrent(version);
+				stageNovelAgentTask(task, documents);
 			},
 			(err) => {
 				console.error(`Failed to prepare Novel ${task.role} Agent session:`, err);
-				chatView?.notify(`无法准备${NOVEL_AGENT_LABELS[task.role]}会话，请检查 Pi CLI 是否可用。`, "error");
+				chatView?.notify(err instanceof Error ? err.message : `无法准备${NOVEL_AGENT_LABELS[task.role]}会话，请检查 Pi CLI 是否可用。`, "error");
 			},
 			{ label: `novel-agent-${task.role}-${task.kind}` },
 		);

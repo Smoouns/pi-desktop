@@ -26,6 +26,7 @@
 		"test:harness:long-horizon": "node scripts/run-public-tests.mjs long-horizon",
 		"test:review-repros": "node scripts/run-public-tests.mjs review-repros",
 		"test:read-delivery": "node scripts/run-public-tests.mjs read-delivery",
+		"test:task-contract": "node scripts/run-public-tests.mjs task-contract",
 		"test:harness:baseline": "node scripts/run-harness-baseline.mjs",
 		"test:harness:isolated": "node scripts/test-harness-isolated.mjs",
 		"eval:offline": "node scripts/run-offline-evals.mjs run",

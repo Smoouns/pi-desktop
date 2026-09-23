@@ -45,6 +45,7 @@ interface MapBackendMessagesParams {
 /** Remove desktop-only context envelopes from persisted user messages before rendering. */
 export function stripNovelContextForDisplay(text: string): string {
 	return text
+		.replace(/\s*<pi-desktop-task-v1>[\s\S]*?<\/pi-desktop-task-v1>\s*/g, "\n")
 		.replace(/\s*<novel-context>\s*[\s\S]*?<\/novel-context>\s*/gi, "\n")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
