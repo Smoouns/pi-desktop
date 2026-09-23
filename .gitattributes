@@ -1,1 +1,7 @@
 fixtures/harness-novel/** text eol=lf
+evals/adapters/snapshots/** text eol=lf
+evals/sdk-ablation/baseline/** text eol=lf
+src/extensions/checkpoint-runtime.ts text eol=lf
+src/harness/run-supervisor.ts text eol=lf
+src/extensions/supervisor-runtime.ts text eol=lf
+src/extensions/context-maintenance.ts text eol=lf

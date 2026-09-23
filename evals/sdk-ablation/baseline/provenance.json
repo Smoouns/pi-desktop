@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "commit": "3b5f8b06131d46ee0b4b97dd646ba3d6f6bcd887",
+  "normalization": "UTF-8 LF; raw Git blob identity retained separately",
+  "sources": [
+    {
+      "commit": "3b5f8b06131d46ee0b4b97dd646ba3d6f6bcd887",
+      "repoPath": "src/extensions/novel-tools-extension.ts",
+      "blob": "295ea3b454a4c77ae1f18b05ef1468eafc307991",
+      "rawSha256": "be9628940c7ec86a3b30af70e3953a091d986002319eed6ba378a39f321128c9",
+      "sha256": "be9628940c7ec86a3b30af70e3953a091d986002319eed6ba378a39f321128c9",
+      "localPath": "evals/sdk-ablation/baseline/src/extensions/novel-tools-extension.ts"
+    },
+    {
+      "commit": "3b5f8b06131d46ee0b4b97dd646ba3d6f6bcd887",
+      "repoPath": "src/novel/memory-engine.ts",
+      "blob": "b33039a0a3a19e9f436110f70a13ea727f62369c",
+      "rawSha256": "130f30d696815d284747eb898e36d7fc0792b04569fa67fb87aaff7581a3be26",
+      "sha256": "130f30d696815d284747eb898e36d7fc0792b04569fa67fb87aaff7581a3be26",
+      "localPath": "evals/sdk-ablation/baseline/src/novel/memory-engine.ts"
+    }
+  ]
+}

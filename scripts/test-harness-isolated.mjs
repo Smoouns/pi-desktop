@@ -10,16 +10,36 @@ import { promisify } from "node:util";
 
 const execute = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const output = path.join(root, "artifacts/harness");
+const outputRoot = path.join(root, "artifacts/harness");
 const npmCli = process.env.npm_execpath;
 assert.ok(npmCli && path.isAbsolute(npmCli), "Run this check through npm run test:harness:isolated");
 const temporary = await mkdtemp(path.join(tmpdir(), "pi-harness-isolated-"));
 const checkout = path.join(temporary, "checkout");
-await mkdir(output, { recursive: true });
+await mkdir(outputRoot, { recursive: true });
+// Keep earlier runs, including failures, intact. Legacy root-level isolated-*
+// files are historical evidence and are no longer overwritten by this script.
+const output = await mkdtemp(path.join(outputRoot, "isolated-run-"));
+console.log(`Isolated evidence: ${path.relative(root, output).replaceAll(path.sep, "/")}`);
 
 // Existing tracked files plus an explicit allowlist of uncommitted Harness
 // deliverable. Do not copy arbitrary untracked files or ignored private fixtures.
 const additions = [
+	"evals", "tests/evals", "scripts/run-offline-evals.mjs", "scripts/eval-network-guard.mjs",
+	"tests/pilot", "scripts/run-pilot-evals.mjs", "docs/HARNESS_PHASE5_PILOT_PLAN.md",
+	"scripts/pilot-broker-network.mjs", "scripts/test-pilot-broker-network.mjs",
+	"docs/HARNESS_PHASE5_PILOT_TOOLING.md",
+	"docs/HARNESS_PHASE5_ACCEPTANCE.md", "docs/HARNESS_PHASE5_RESULTS.md",
+	"docs/HARNESS_PHASE5_HANDOFF.md", "docs/HARNESS_PHASE5_ABLATION_PLAN.md",
+	"tests/sdk-ablation", "scripts/run-sdk-ablation.mjs", "docs/HARNESS_PHASE5_SDK_ABLATION.md",
+	"tests/sdk-live", "scripts/run-sdk-live.mjs", "docs/HARNESS_PHASE5_SDK_LIVE.md",
+	"tests/sdk-context", "scripts/run-sdk-context.mjs", "docs/HARNESS_PHASE5_SDK_CONTEXT.md",
+	"docs/HARNESS_PHASE5_SDK_LIFECYCLE.md",
+	"tests/sdk-context-transport", "scripts/run-sdk-context-transport.mjs", "docs/HARNESS_PHASE5_SDK_CONTEXT_TRANSPORT.md",
+	"tests/sdk-context-live", "scripts/run-sdk-context-live.mjs", "docs/HARNESS_PHASE5_SDK_CONTEXT_LIVE.md",
+	"tests/sdk-recovery-races", "scripts/run-sdk-recovery-races.mjs", "docs/HARNESS_PHASE5_SDK_RECOVERY_RACES.md",
+	"tests/report", "scripts/run-evidence-report.mjs", "docs/HARNESS_PHASE5_EVIDENCE_REPORT.md",
+	"tests/sdk-supervision", "scripts/run-sdk-supervision.mjs", "docs/HARNESS_PHASE5_SDK_SUPERVISION.md",
+	"tests/sdk-supervision-live", "scripts/run-sdk-supervision-live.mjs", "docs/HARNESS_PHASE5_SDK_SUPERVISION_LIVE_PLAN.md",
 	"src/extensions/budget-diagnostics.ts",
 	"src/extensions/context-maintenance.ts", "src/components/chat-view/context-usage-view.ts",
 	"scripts/test-context-usage-ui.mjs", "scripts/test-global-pi-context-maintenance.mjs", "docs/CONTEXT_BUDGET_RESEARCH.md",
@@ -65,22 +85,35 @@ try {
 		await cp(path.join(root, relative), destination);
 		manifest[relative] = createHash("sha256").update(await readFile(destination)).digest("hex");
 	}
+	await writeFile(path.join(output, "source-manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { flag: "wx" });
 	const commands = [
 		["ci", "--no-audit", "--no-fund"],
 		["run", "check"], ["run", "check:harness-tests"], ["run", "test:harness"],
 		["run", "test:harness:long-horizon"],
 		["run", "test:novel-domain"], ["run", "build:frontend"],
+		["run", "test:evals"],
+		["run", "test:pilot"],
+		["run", "test:sdk-ablation"],
+		["run", "test:sdk-live"],
+		["run", "test:sdk-context"],
+		["run", "test:sdk-lifecycle"],
+		["run", "test:sdk-context-transport"],
+		["run", "test:sdk-context-live"],
+		["run", "test:sdk-recovery-races"],
+		["run", "test:sdk-supervision"],
+		["run", "test:sdk-supervision-live"],
+		["run", "test:evidence-report"],
 	];
 	const results = [];
 	for (const args of commands) {
 		console.log(`Isolated: npm ${args.join(" ")}`);
 		const label = args[0] === "ci" ? "ci" : args[1].replaceAll(":", "-");
 		try {
-			const result = await execute(process.execPath, [npmCli, ...args], { cwd: checkout, timeout: 300_000, maxBuffer: 4_000_000 });
-			await writeFile(path.join(output, `isolated-${label}.log`), (result.stdout + result.stderr).replaceAll(checkout, "<isolated-checkout>"));
+			const result = await execute(process.execPath, [npmCli, ...args], { cwd: checkout, timeout: args[1] === "test:sdk-supervision-live" ? 900_000 : args[1] === "test:sdk-context-live" ? 600_000 : 300_000, maxBuffer: 4_000_000 });
+			await writeFile(path.join(output, `isolated-${label}.log`), (result.stdout + result.stderr).replaceAll(checkout, "<isolated-checkout>"), { flag: "wx" });
 			results.push({ command: `npm ${args.join(" ")}`, exitCode: 0 });
 		} catch (error) {
-			await writeFile(path.join(output, `isolated-${label}.log`), String(error.stdout ?? "") + String(error.stderr ?? ""));
+			await writeFile(path.join(output, `isolated-${label}.log`), (String(error.stdout ?? "") + String(error.stderr ?? "")).replaceAll(checkout, "<isolated-checkout>"), { flag: "wx" });
 			throw error;
 		}
 	}
@@ -91,7 +124,7 @@ try {
 		fileCount: files.size, dependenciesInstalledFresh: true, ignoredPrivateFilesCopied: false,
 		results, harnessCaseCount: harness.cases.length, deterministic: harness.deterministic,
 		note: "New deliverables are explicitly allowlisted until committed; this is not a remote CI or committed clean-clone claim.",
-	}, null, 2) + "\n");
+	}, null, 2) + "\n", { flag: "wx" });
 	console.log(`Isolated source snapshot: all ${commands.length} commands passed`);
 } finally {
 	const relative = path.relative(path.resolve(tmpdir()), path.resolve(temporary));

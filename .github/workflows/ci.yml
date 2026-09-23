@@ -36,6 +36,18 @@ jobs:
       - run: npm run test:harness
       - run: npm run test:harness:long-horizon
       - run: npm run test:novel-domain
+      - run: npm run test:evals
+      - run: npm run test:pilot
+      - run: npm run test:sdk-ablation
+      - run: npm run test:sdk-live
+      - run: npm run test:sdk-context
+      - run: npm run test:sdk-lifecycle
+      - run: npm run test:sdk-context-transport
+      - run: npm run test:sdk-context-live
+      - run: npm run test:sdk-recovery-races
+      - run: npm run test:sdk-supervision
+      - run: npm run test:sdk-supervision-live
+      - run: npm run test:evidence-report
       - run: npm run test:chat-panel-resize
       - run: npm run build:frontend
       - name: Upload synthetic traces
@@ -43,7 +55,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: harness-${{ matrix.os }}-node${{ matrix.node }}
-          path: artifacts/harness/*.json
+          path: |
+            artifacts/harness/*.json
+            artifacts/harness/evals/**/*.json
+            artifacts/harness/pilot-rehearsals/**/*.json
+            artifacts/harness/live-pilots/dry-run-*/**/*.json
+            artifacts/harness/sdk-ablations/**/*.json
+            artifacts/harness/sdk-live/s2-dry-*/**/*.json
+            artifacts/harness/sdk-context/s3-offline-*/**/*.json
+            artifacts/harness/sdk-context/s3-lifecycle-*/**/*.json
+            artifacts/harness/sdk-context-transport/s3-transport-*/**/*.json
+            artifacts/harness/sdk-context-live/s3-dry-*/**/*.json
+            artifacts/harness/sdk-recovery-races/s3-races-*/**/*.json
+            artifacts/harness/sdk-supervision/**/*.json
+            artifacts/harness/sdk-supervision-live/s4-dry-*/**/*.json
           retention-days: 7
           if-no-files-found: warn
 

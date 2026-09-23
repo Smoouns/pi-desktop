@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "profiles": {
+    "historical-b1": {
+      "phaseCommit": "32131274be2964a61d0180088eeb51709ebdb86f",
+      "capabilities": ["toolReliability"],
+      "sources": [
+        { "path": "src/harness/types.ts", "gitBlob": "cae019634cda2e26aef4b96b3bb26f9ab6545ab5", "sha256": "e3d772a947c150466e3a4f7eb0e3864a3d47ced6ddfa10ff29f6528743fa3b89", "localPath": "evals/adapters/snapshots/types.ts" },
+        { "path": "src/harness/operation-ledger.ts", "gitBlob": "d06cab54e0e416e10bd0aaa2a6e2fec4033c80ad", "sha256": "4f755dda60d5fbab4ae0a72c18cd78b69f245b37f4997ab83694067148f5197e", "localPath": "evals/adapters/snapshots/operation-ledger.ts" },
+        { "path": "src/harness/tool-policy.ts", "gitBlob": "2998f182418c641d50cbe53e4b00060ebb820779", "sha256": "071bb11b16eb9e0606197aeeea20b7780f592dd32b422662797db177a9fb5ad3", "localPath": "evals/adapters/snapshots/tool-policy.ts" }
+      ]
+    },
+    "historical-b2": {
+      "phaseCommit": "f21b2b46a53729ed5722f5b816fe9fd21a447dc9",
+      "capabilities": ["toolReliability", "observations", "contextBudget"],
+      "sources": [
+        { "path": "src/harness/types.ts", "gitBlob": "cae019634cda2e26aef4b96b3bb26f9ab6545ab5", "sha256": "e3d772a947c150466e3a4f7eb0e3864a3d47ced6ddfa10ff29f6528743fa3b89", "localPath": "evals/adapters/snapshots/types.ts" },
+        { "path": "src/harness/operation-ledger.ts", "gitBlob": "d06cab54e0e416e10bd0aaa2a6e2fec4033c80ad", "sha256": "4f755dda60d5fbab4ae0a72c18cd78b69f245b37f4997ab83694067148f5197e", "localPath": "evals/adapters/snapshots/operation-ledger.ts" },
+        { "path": "src/harness/tool-policy.ts", "gitBlob": "2998f182418c641d50cbe53e4b00060ebb820779", "sha256": "071bb11b16eb9e0606197aeeea20b7780f592dd32b422662797db177a9fb5ad3", "localPath": "evals/adapters/snapshots/tool-policy.ts" },
+        { "path": "src/harness/observation-store.ts", "gitBlob": "47545f0a2fc49d15f4fc5c659a2b44c7c9d583a2", "sha256": "73f97367f88849c573079e9a82cea9b6db90632f926f7c37553d33ce3310a4f1", "localPath": "evals/adapters/snapshots/observation-store.ts" },
+        { "path": "src/harness/context-budget.ts", "gitBlob": "ba8d4335b45f41ebd95c3395053941ef8300f8e6", "sha256": "1d9258e5bc24a513b8ae83357a8171279e5aac6038c1196994b43638efb8d9e3", "localPath": "evals/adapters/snapshots/context-budget.ts" }
+      ]
+    },
+    "historical-b3": {
+      "phaseCommit": "828d36d9c0f3140c750616b97e7d7e92287e6444",
+      "capabilities": ["toolReliability", "observations", "contextBudget", "versionedCheckpoint"],
+      "sources": [
+        { "path": "src/harness/types.ts", "gitBlob": "cae019634cda2e26aef4b96b3bb26f9ab6545ab5", "sha256": "e3d772a947c150466e3a4f7eb0e3864a3d47ced6ddfa10ff29f6528743fa3b89", "localPath": "evals/adapters/snapshots/types.ts" },
+        { "path": "src/harness/operation-ledger.ts", "gitBlob": "d06cab54e0e416e10bd0aaa2a6e2fec4033c80ad", "sha256": "4f755dda60d5fbab4ae0a72c18cd78b69f245b37f4997ab83694067148f5197e", "localPath": "evals/adapters/snapshots/operation-ledger.ts" },
+        { "path": "src/harness/tool-policy.ts", "gitBlob": "2998f182418c641d50cbe53e4b00060ebb820779", "sha256": "071bb11b16eb9e0606197aeeea20b7780f592dd32b422662797db177a9fb5ad3", "localPath": "evals/adapters/snapshots/tool-policy.ts" },
+        { "path": "src/harness/observation-store.ts", "gitBlob": "47545f0a2fc49d15f4fc5c659a2b44c7c9d583a2", "sha256": "73f97367f88849c573079e9a82cea9b6db90632f926f7c37553d33ce3310a4f1", "localPath": "evals/adapters/snapshots/observation-store.ts" },
+        { "path": "src/harness/context-budget.ts", "gitBlob": "ba8d4335b45f41ebd95c3395053941ef8300f8e6", "sha256": "1d9258e5bc24a513b8ae83357a8171279e5aac6038c1196994b43638efb8d9e3", "localPath": "evals/adapters/snapshots/context-budget.ts" },
+        { "path": "src/harness/checkpoint-store.ts", "gitBlob": "0e802898a8c7143baa92ac1b26c551106a482652", "sha256": "8d5719ea2cb3c9529785e54f7ac49098a211bc0993b3fe32c1fa649c30a07cdd", "localPath": "evals/adapters/snapshots/checkpoint-store.ts" },
+        { "path": "src/harness/source-version.ts", "gitBlob": "de04ab06221d37d8f049032868c3677ee00d6f63", "sha256": "3935f5061471867462557d6557562b23fce232a96042445f2502214d79f75d14", "localPath": "evals/adapters/snapshots/source-version.ts" },
+        { "path": "src/harness/invalidation.ts", "gitBlob": "b8706a3604b759476c38334dca39c1f29f7cf491", "sha256": "e2e7e5c38c9ecbc32375583fe7a1e757d842b9fe3c60412884eaa61ee758d8c2", "localPath": "evals/adapters/snapshots/invalidation.ts" }
+      ]
+    }
+  }
+}

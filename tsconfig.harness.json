@@ -4,6 +4,7 @@
 		"types": ["node", "vite/client"]
 	},
 	"include": [
+		"evals/**/*.ts",
 		"tests/**/*.ts",
 		"scripts/novel-domain-smoke.ts",
 		"scripts/novel-tools-extension-smoke.ts",

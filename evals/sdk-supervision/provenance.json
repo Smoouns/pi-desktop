@@ -1,0 +1,8 @@
+{
+  "commit": "a50e794e78466d77834c5d5a873e05fe113608ac",
+  "files": {
+    "src/harness/run-supervisor.ts": "cc1f9078fbc1835cdb5be39aaca8732e7cffa570e8cb4cd8b1e6f1fc9910517f",
+    "src/extensions/supervisor-runtime.ts": "2f69812267f26519781604129cb98dc21b9bc37dd65dfd201446f4fd648caf4e",
+    "src/extensions/context-maintenance.ts": "2d3c44d2fbc46cd2a85bb45682b76bbc4d8f917f862b5f7585147ec463597492"
+  }
+}
