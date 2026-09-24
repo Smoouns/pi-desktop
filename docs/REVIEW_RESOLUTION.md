@@ -2,7 +2,7 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 及其两项 CI 工装修正已提交推送，固定代码提交 `e9f7d69` 的双平台 CI 已通过。D 的完整生产 SDK 生命周期、冷恢复与隔离原生 Desktop 接线现已本地通过；本批尚未提交推送或进行远程 CI。E 优化未开展。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 及其两项 CI 工装修正已提交推送，固定代码提交 `e9f7d69` 的双平台 CI 已通过。D 的完整生产 SDK 生命周期、冷恢复与隔离原生 Desktop 接线现已本地通过，并连同 Windows 控制台修复提交推送为 `d66a302`；该固定提交的四个双平台 CI 任务全部通过。E 优化未开展。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
@@ -13,9 +13,9 @@
 | AUD-01 | fixed / CI_passed | 新增拒绝原因枚举；仅规范化隔离测试子进程的临时根；补路径正反例与 Windows 短路径回归 | `f472e8d` 双平台 CI 全绿；Windows 8.3 用例实际执行，journal=11、unsupported=[]。原失败 CI 未输出具体拒绝分支，仍不冒充已确认其唯一根因 |
 | AUD-02 | fixed / CI_passed | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | `c67467e` 双平台 CI 全绿；新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放 |
 | AUD-03 | fixed / CI_passed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | `f1b19df` 双平台 CI 全绿；263 例 × 3 实际执行。没有本批 Desktop 验收 |
-| AUD-04 | fixed / CI_passed | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | `e9f7d69` 双平台 CI 全绿；283 例 × 3 实际执行。D 新增完整 SDK 压缩、冷恢复与隔离原生 Desktop 任务提交已本地通过；D 远程 CI 尚未执行 |
+| AUD-04 | fixed / CI_passed | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | C 的 `e9f7d69` 双平台 CI 全绿；D 的 `d66a302` 又通过完整 SDK 压缩 / 冷恢复及双平台 CI，隔离原生 Desktop 任务提交单独本地验收 |
 | AUD-05 | partially_addressed | C 保留任务目标、约束、产物与验证凭证，E 再测量压缩质量 | 这是必需恢复信息，不是通用规划器或语义进度摘要；不将其当作 Canon |
-| AUD-06 | local_pass / CI_pending | D 补完整生产接线、冷恢复与来源版本定向突变回归；D-07 补隔离原生窗口验收 | SDK 8 组 / 15 进程通过；原生 UI → 当前 Rust RPC → 固定 CLI → 完整扩展链路通过，修复切换会话丢失状态栏。不是安装包、真实模型或远程 CI 验收 |
+| AUD-06 | fixed / CI_passed | D 补完整生产接线、冷恢复与来源版本定向突变回归；D-07 补隔离原生窗口验收 | `d66a302` 双平台实际通过 SDK 8 组 / 15 进程、Harness 285 例 × 3；隔离原生 UI → Rust RPC → 固定 CLI → 完整扩展另经本地验收。不是安装包或真实模型验收 |
 | AUD-07 | deferred | E：分层计量预算估算、provider usage 和 HTTP 派发 | 不把 eval 单请求限制复制到生产重试策略 |
 | AUD-08 | deferred | E：先测量物理读取和逻辑引用，再考虑请求内缓存 | 最终写入仍须核验版本 |
 | AUD-09 | deferred | 需求出现后再决定是否持久化 Observation | 本轮不加数据库、向量检索或新 agent loop |
@@ -187,7 +187,7 @@
 - 独立 TypeScript + Rust 任务通过：前端构建、`cargo check`、RPC generation 3 项、session file safety 1 项、role branch isolation 5 项均实际执行。此 CI 不包含 Desktop 人工点击、C 独立 OS 进程冷恢复或真实模型测试；真实模型调用仍为 0。
 - 此结果在后续纯文档提交中登记，该文档提交跳过重复 CI，未修改任何源码、测试或工作流；CI 通过声明绑定上述固定代码 SHA，不将未执行的检查记为通过。
 
-上述 C 验收未包含 D/E；D 的后续本地证据见下文，远程 CI 仍须绑定新的固定提交。E 的压缩质量、预算计量及读取成本优化另行推进。
+上述 C 验收未包含 D/E；D 的后续本地证据及独立固定提交 CI 见下文。E 的压缩质量、预算计量及读取成本优化另行推进。
 
 ## D：完整生产生命周期验收清单
 
@@ -240,3 +240,13 @@
 - 回归工装首次暴露匿名管道读取顺序导致的 30 秒超时；改为同时读取 stdout / stderr 后出现上述精确产品断言。另确认非标准 `.cmd` 的绝对路径含空格时，原有 `cmd /S /C` 引号处理失败；与 npm 解析成功分支不同，本次未修复。fallback 控制台用例明确使用 cwd 相对入口，不声称覆盖绝对路径引号问题。
 - 没有重写上一节 D-07 的原生截图观察、源码指纹或历史回读报告。此次修复证据是独立的真实进程测试，不称为再次完成整套原生窗口验收。
 - 提交前最终回归：应用 / 测试 TypeScript、前端构建、状态栏浏览器 DOM 检查、Harness **285 例 × 3**（deterministic=true、failures=false）通过；完整生产生命周期 **8 组 / 15 进程** 再次通过，独立报告 `artifacts/harness/production-lifecycle/d-MpVke3/summary.json`。真实模型调用为 0。远程 CI 结果在固定提交实际执行后追加，不预填。
+
+### D 固定提交远程验收（2026-09-24）
+
+- 已提交推送代码：`d66a302aad3ad189ae27805f13fe9a5adfbe4473`。[CI 36001222669](https://github.com/Smoouns/pi-desktop/actions/runs/36001222669) 第 1 次执行整体 `success`。Windows/Node 24 与 Ubuntu/Node 22 的 Public Harness、TypeScript + Rust 共四个任务全部通过；已核对每一步及完整日志。
+- 两平台 Rust 校验任务已完成并逐项核对日志：RPC generation **3** 项、session file safety **1** 项、role branch isolation **5** 项均实际通过；Windows 另实际通过 console regression **2** 项，不是条件跳过。
+- 两平台 Harness 均为 **285 例 × 3**、deterministic=true、failures=false；新增 SESSION-UI-05 / 06 各执行三次。长程回归 **1 例 × 3**。完整生产生命周期 **8 组 / 15 进程** 全部通过，含指定来源突变断言；独立报告为 Ubuntu `d-wCbvDl`、Windows `d-EsxaWx`（上传的 `artifacts/harness/production-lifecycle` 目录）。
+- 两平台应用 / 测试 TypeScript、领域回归、离线 eval、Pilot、前端构建全部实际执行。SDK ablation / S2 / S3 / lifecycle / transport / context live tooling / recovery races / supervision / supervision live tooling 分别为 **101 / 95 / 103 / 175 / 96 / 83 / 125 / 188 / 152** 项检查；evidence-report **199** 项，聊天宽度 **15** 项。所有模型通道均为 test / synthetic，真实模型请求 0。冻结矩阵中的既定负例与 unsupported 仍按原合同验证，不将其改称生产能力通过。
+- Windows 普通及短 TEMP 两轮 journal 均为 **11**、unsupported=[]，真实 `PASS journal.windows-short-temp` 出现在日志中；Ubuntu journal **10**、unsupported=[]。
+- 平台条件跳过仅三处：Ubuntu 的 Windows 短 TEMP、Windows 控制台用例；Windows 的 Linux 系统依赖安装。没有必需检查因失败而未执行。逐步状态与关键日志摘录留存在本机 `artifacts/harness/ci-d66a302-36001222669/verification.json`。
+- 本次远程结果绑定上述固定代码 SHA，后续登记结果的纯文档提交标记 `[skip ci]`，不将未运行的文档提交算作重新验收。原生窗口验收仍以 D-07 的独立本地记录为准，CI 不自动驾驶桌面；E 与真实模型实验未启动。三份原始规划文档保持未跟踪，没有纳入提交。
