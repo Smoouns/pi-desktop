@@ -2,9 +2,41 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { SessionRefreshScope } from "../../src/components/chat-view/session-refresh-scope.js";
 import { SessionBrowser } from "../../src/components/session-browser.js";
+import { RuntimeStatusCache } from "../../src/components/runtime-status-cache.js";
 import type { RunCase } from "./testkit.js";
 
 export async function runSessionRefreshCases(runCase: RunCase): Promise<void> {
+	await runCase("SESSION-UI-05 runtime status survives A B A without replaying actions", () => {
+		const a = new RuntimeStatusCache(), b = new RuntimeStatusCache();
+		const status = (text?: string, key = "novel-supervisor") => ({ type: "extension_ui_request", method: "setStatus", statusKey: key, statusText: text });
+		a.observe(status("已取消（AGENT_ABORTED）"));
+		assert.deepEqual(b.snapshot(), []);
+		b.observe(status("候选任务已完成（STOP_VERIFIED）"));
+		// A can finish in the background while B remains the visible runtime.
+		a.observe(status("已取消（AGENT_ABORTED）"));
+		assert.equal(a.snapshot()[0].statusText, "已取消（AGENT_ABORTED）");
+		assert.equal(b.snapshot()[0].statusText, "候选任务已完成（STOP_VERIFIED）");
+		for (const method of ["confirm", "notify", "set_editor_text"]) a.observe({ ...status("must not replay"), method });
+		a.observe(status("control metadata", "pi-desktop-context-budget"));
+		a.observe(status("control metadata", "pi-desktop-session-title"));
+		assert.equal(a.snapshot().length, 1);
+		const copy = a.snapshot(); copy[0].statusText = "mutated";
+		assert.equal(a.snapshot()[0].statusText, "已取消（AGENT_ABORTED）");
+		a.observe(status()); assert.deepEqual(a.snapshot(), [], "clear event remains cleared after switching");
+		b.clear(); assert.deepEqual(b.snapshot(), [], "new process or session cannot inherit previous status");
+		b.observe(status("cold restored")); assert.equal(b.snapshot()[0].statusText, "cold restored");
+	});
+	await runCase("SESSION-UI-06 status cache is bounded and wired after projection reset", async () => {
+		const cache = new RuntimeStatusCache();
+		for (let i = 0; i < 40; i++) cache.observe({ type: "extension_ui_request", method: "setStatus", statusKey: String(i), statusText: String(i) });
+		assert.equal(cache.snapshot().length, 32); assert.equal(cache.snapshot()[0].statusKey, "8");
+		cache.observe({ type: "extension_ui_request", method: "setStatus", statusKey: "39", statusText: "x".repeat(16_385) });
+		assert.equal(cache.snapshot().length, 31);
+		const main = await readFile("src/main.ts", "utf8");
+		assert.match(main, /runtime\.extensionStatuses\.observe\(event\)/);
+		assert.match(main, /chatView\.prepareForSessionSwitch\([\s\S]*?restoreSessionStatus\(expectedRuntime\?\.extensionStatuses\.snapshot\(\)/);
+		assert.match(main, /if \(!bridge\.isConnected\) \{\s*runtime.phase = "starting";[\s\S]*?runtime\.extensionStatuses\.clear\(\);/);
+	});
 	await runCase("SESSION-UI-01 late responses across A B A", () => {
 		const scope = new SessionRefreshScope();
 		let identity = "runtime-a:1:1";

@@ -18,7 +18,7 @@ import { createTaskContracts } from "../harness/task-contract.ts";
 import { createTaskSubmission } from "../novel/task-submission.ts";
 
 const NOVEL_TOOLS_EXTENSION_FILE = "pi-desktop-novel-tools.ts";
-const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v17";
+const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v18";
 const NOVEL_TOOLS_EXTENSION_MARKER_PREFIX = "pi-desktop-novel-tools-extension/";
 
 export const NOVEL_TOOLS_EXTENSION_CONTENT = `/**
@@ -89,6 +89,9 @@ let activeRun = null;
 let checkpoints;
 let supervisor;
 let supervisorGeneration = 0;
+// The SDK queues lifecycle notifications but transforms context directly.
+// A context read must not retain the pre-agent_start run across its async setup.
+let startingRun = Promise.resolve();
 
 function supervisorBaseScope(ctx) {
 	const root = path.resolve(projectRoot(ctx));
@@ -873,7 +876,15 @@ export default function (pi) {
 		if (maintenanceBusy) { ctx.ui?.notify?.("上下文正在压缩，请完成后再发送。", "info"); return { action: "handled" }; }
 		autoCompactionState = "idle";
 		ctx.ui?.setStatus?.("novel-context-maintenance", undefined);
-		let projected = projectInput(ctx, event.text, event.images);
+		let projected;
+		try { projected = projectInput(ctx, event.text, event.images); }
+		catch (error) {
+			let restored = event.text;
+			try { restored = taskSubmission.decode(event.text).text; } catch { /* Preserve malformed input. */ }
+			ctx.ui?.setEditorText?.(restored);
+			ctx.ui?.notify?.("任务合同无法核验，本次请求未发送：" + error.message, "error");
+			return { action: "handled" };
+		}
 		if (projected.trimmed) pressureTrim = true;
 		publishContextBudget(ctx, projected.plan, projected.trimmed ? "after-tool-trim" : "preflight", projected.trimmed);
 		// Final context hook remains the hard gate (skills expand after input).
@@ -949,17 +960,21 @@ export default function (pi) {
 	for (const event of ["session_switch", "session_fork", "session_tree"]) pi.on(event, async (_event, ctx) => { resetContextMaintenance(); endRun(); checkpoints.reset(); await restoreSupervisor(ctx); });
 	pi.on("model_select", async (_event, ctx) => { resetContextMaintenance(); await inspectCapacity(ctx); });
 	pi.on("session_shutdown", async () => { resetContextMaintenance(); endRun(); checkpoints.reset(); });
-	pi.on("agent_start", async (_event, ctx) => {
-		try { await loadProject(ctx); } catch { supervisor.disable(); endRun(); showSupervisorStatus(ctx, null); return; }
-		const prior = supervisor.snapshot();
-		let run = activeRun;
-		const proposed = { ...supervisorBaseScope(ctx), runId: randomUUID(), generation: ++epoch };
-		const snapshot = supervisor.start(proposed);
-		if (!prior || snapshot?.scope.runId !== prior.scope.runId) { lastBudgetDiagnostic = null; endRun(); run = currentRun(ctx, snapshot?.scope ?? null); }
-		else if (!run) run = currentRun(ctx, snapshot?.scope ?? null);
-		try { run.taskId = taskRecord(ctx)?.taskId ?? null; }
-		catch { supervisor.stop("BLOCKED_PREREQUISITE", "TASK_CONTRACT_INVALID"); ctx.abort(); }
-		showSupervisorStatus(ctx, snapshot);
+	pi.on("agent_start", (_event, ctx) => {
+		const pending = (async () => {
+			try { await loadProject(ctx); } catch { supervisor.disable(); endRun(); showSupervisorStatus(ctx, null); return; }
+			const prior = supervisor.snapshot();
+			let run = activeRun;
+			const proposed = { ...supervisorBaseScope(ctx), runId: randomUUID(), generation: ++epoch };
+			const snapshot = supervisor.start(proposed);
+			if (!prior || snapshot?.scope.runId !== prior.scope.runId) { lastBudgetDiagnostic = null; endRun(); run = currentRun(ctx, snapshot?.scope ?? null); }
+			else if (!run) run = currentRun(ctx, snapshot?.scope ?? null);
+			try { run.taskId = taskRecord(ctx)?.taskId ?? null; }
+			catch { supervisor.stop("BLOCKED_PREREQUISITE", "TASK_CONTRACT_INVALID"); ctx.abort(); }
+			showSupervisorStatus(ctx, snapshot);
+		})();
+		startingRun = pending;
+		return pending;
 	});
 	pi.on("session_start", async (_event, ctx) => {
 		resetContextMaintenance();
@@ -1076,6 +1091,7 @@ export default function (pi) {
 	pi.on("context", async (event, ctx) => {
 		let contextRun;
 		try {
+			await startingRun;
 			let latestContext = null;
 			let latestUserIndex = -1;
 			for (let index = event.messages.length - 1; index >= 0; index -= 1) {

@@ -2,7 +2,7 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 及其两项 CI 工装修正已提交推送，固定代码提交 `e9f7d69` 的双平台 CI 已通过；D 剩余生命周期 / Desktop 验收与 E 优化尚未开展。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 及其两项 CI 工装修正已提交推送，固定代码提交 `e9f7d69` 的双平台 CI 已通过。D 的完整生产 SDK 生命周期、冷恢复与隔离原生 Desktop 接线现已本地通过；本批尚未提交推送或进行远程 CI。E 优化未开展。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
@@ -13,9 +13,9 @@
 | AUD-01 | fixed / CI_passed | 新增拒绝原因枚举；仅规范化隔离测试子进程的临时根；补路径正反例与 Windows 短路径回归 | `f472e8d` 双平台 CI 全绿；Windows 8.3 用例实际执行，journal=11、unsupported=[]。原失败 CI 未输出具体拒绝分支，仍不冒充已确认其唯一根因 |
 | AUD-02 | fixed / CI_passed | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | `c67467e` 双平台 CI 全绿；新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放 |
 | AUD-03 | fixed / CI_passed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | `f1b19df` 双平台 CI 全绿；263 例 × 3 实际执行。没有本批 Desktop 验收 |
-| AUD-04 | fixed / CI_passed | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | `e9f7d69` 双平台 CI 全绿；283 例 × 3 实际执行，20 项 C 用例两平台均各执行三次。Desktop 与 C 的独立 OS 进程冷恢复验收仍待 D 补齐 |
+| AUD-04 | fixed / CI_passed | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | `e9f7d69` 双平台 CI 全绿；283 例 × 3 实际执行。D 新增完整 SDK 压缩、冷恢复与隔离原生 Desktop 任务提交已本地通过；D 远程 CI 尚未执行 |
 | AUD-05 | partially_addressed | C 保留任务目标、约束、产物与验证凭证，E 再测量压缩质量 | 这是必需恢复信息，不是通用规划器或语义进度摘要；不将其当作 Canon |
-| AUD-06 | in_progress | D 随 B/C 补完整生产接线与定向突变回归 | C 已覆盖完整扩展、固定 SDK、真实会话重开及强制错误完成的突变检测；不声称完成 Desktop 或 C 的独立 OS 进程冷恢复验收 |
+| AUD-06 | local_pass / CI_pending | D 补完整生产接线、冷恢复与来源版本定向突变回归；D-07 补隔离原生窗口验收 | SDK 8 组 / 15 进程通过；原生 UI → 当前 Rust RPC → 固定 CLI → 完整扩展链路通过，修复切换会话丢失状态栏。不是安装包、真实模型或远程 CI 验收 |
 | AUD-07 | deferred | E：分层计量预算估算、provider usage 和 HTTP 派发 | 不把 eval 单请求限制复制到生产重试策略 |
 | AUD-08 | deferred | E：先测量物理读取和逻辑引用，再考虑请求内缓存 | 最终写入仍须核验版本 |
 | AUD-09 | deferred | 需求出现后再决定是否持久化 Observation | 本轮不加数据库、向量检索或新 agent loop |
@@ -187,4 +187,56 @@
 - 独立 TypeScript + Rust 任务通过：前端构建、`cargo check`、RPC generation 3 项、session file safety 1 项、role branch isolation 5 项均实际执行。此 CI 不包含 Desktop 人工点击、C 独立 OS 进程冷恢复或真实模型测试；真实模型调用仍为 0。
 - 此结果在后续纯文档提交中登记，该文档提交跳过重复 CI，未修改任何源码、测试或工作流；CI 通过声明绑定上述固定代码 SHA，不将未执行的检查记为通过。
 
-下一步：D 剩余生命周期 / Desktop 接线证据；E 的压缩质量、预算计量及读取成本优化另行推进。本轮没有启动 D/E 实施。
+上述 C 验收未包含 D/E；D 的后续本地证据见下文，远程 CI 仍须绑定新的固定提交。E 的压缩质量、预算计量及读取成本优化另行推进。
+
+## D：完整生产生命周期验收清单
+
+范围：直接加载当前 `NOVEL_TOOLS_EXTENSION_CONTENT`，由固定版本 SDK 的真实 `AgentSession` 驱动 input / context / provider / tool / compaction / agent_end 接线，不手动 emit 产品生命周期。模型响应使用确定性的本地脚本；不调用真实模型，也不复刻另一套任务准入、压缩维护或完成判定逻辑。
+
+| 验收项 | 要求 | 当前状态 |
+| --- | --- | --- |
+| D-01 组合交付 | 原生读取与受控写入、真正的章节验证脚本、缺少产物反例、全部产物满足后才完成；核对实际派发数与当前 SHA | 本地通过 |
+| D-02 原生压缩与冷恢复 | 真实 `session.compact()` 写入 SDK compaction 记录，关闭进程后以另一 PID 重开磁盘会话；保留 taskId / objective / 约束顺序 / 当前凭证，不重放已完成写入 | 本地通过 |
+| D-03 来源失效与精确重读 | 冷恢复后来源改版；无关行重读不能解锁，依赖行完整交付并显式 refresh 后恢复；旧验证不可借用 | 本地通过 |
+| D-04 取消与中断 | 派发前取消无文件副作用；派发后、回执前终止进程，冷恢复只核对 post-image，不自动重放 | 本地通过 |
+| D-05 隔离与损坏 | 同一项目不同会话 / 职能不借用合同，最新损坏记录不回退为旧成功；操作与终态不因恢复复活 | 本地通过 |
+| D-06 定向突变 | 仅在临时生成扩展副本禁用来源 SHA 比对，同一个来源改版拒绝断言必须失败；生产文件和冻结评测不改 | 本地通过：准确检测指定断言失败 |
+| D-07 Desktop | 任务提交、状态展示与实际 UI / Rust / RPC 链路单独验收，不用 SDK 或组件测试冒充 | 本地通过：独立标识的隔离原生包；详见 `REVIEW_D_NATIVE_ACCEPTANCE.md` |
+
+证据与边界：D-01–06 只使用公开 fixture 的临时复制、白名单子进程环境、独立 agent 配置及网络防护；记录源码 SHA、SDK / Node、PID、原生工具派发、验证器执行、SDK compaction 与文件哈希。每次运行创建新证据目录；前后核对仓库 fixture。观察记录仍不跨进程持久化，恢复时按现有协议回源。自动化通过不代表真实模型的语义质量、Desktop 点击验收或远程 CI 通过；D-07 的原生点击及不同隔离边界另行记录。未获得新的真实模型实验授权，不更改真实小说、全局 Pi 配置或历史报告。
+
+### D 首轮红灯（修复前）
+
+- `artifacts/harness/production-lifecycle/d-0wYYHp/summary.json`：六组中两组通过、四组失败，未计作验收通过。真实 SDK 已完成读、写、真实验证与跨进程丢回执对账；继续下一轮时，`context` 在 `agent_start` 异步初始化结束前持有旧 run，后续 `chargeRead` 抛出 `The tool belongs to an ended run.`。SDK 的普通事件走异步事件队列，context transform 可与其并行；此前手工顺序 emit 不会复现此接线竞态。
+- 最新合同损坏负例在真正派发前被后一个 input hook 拦截，但更早的预算预检仍抛出未处理的合同完整性异常；严格工装拒绝将该异常视为正常成功。取消与来源 SHA 定向突变两组通过。失败报告保留，不覆盖或改写。
+
+### D 最小修复与本地验收（2026-09-24）
+
+- 管理扩展升级为 v18。`context` 等待当前 `agent_start` 初始化完成后再获取 run，避免持有被初始化替换的旧 run；未放宽来源核验、预算、写入准入或完成合同。预算预检发现损坏任务记录时，明确拒绝发送、恢复输入并通知用户，不把异常交给 SDK 吞掉后继续。
+- 新增 `npm run test:production-lifecycle`；说明见 `tests/harness/production-lifecycle/README.md`。真实 SDK `AgentSession` 驱动完整当前扩展，不手动 emit 生命周期；仅模型响应、UI 回调与前端→SDK 的传输边界使用替身。原生读写计数在生产 guard 通过后、真正调用 SDK 文件工具的位置；验证器实际启动仓库 TS 脚本，并检查写入前意图已落盘。
+- 最终两次完整新增回归：`artifacts/harness/production-lifecycle/d-vdZ8L3/summary.json`、`artifacts/harness/production-lifecycle/d-VHbAU2/summary.json`，均为 **8 组通过 / 15 个独立进程**。每次汇总均记录源码与工装 SHA、当前 HEAD=`7f4b68f` / dirty=true、Windows / Node 24.19.0 / Pi SDK 0.63.1；真实模型调用 0、网络防护无触发、仓库 fixture 不变。
+- 组合交付：正文写入并通过真正的完整验证，但缺连续性提案时不能完成；补齐后才 `STOP_VERIFIED`，`userAccepted=false`。原生手动 compaction、进程退出与新进程重开后，taskId、objective、约束顺序和凭证保留；零重复写入 / 验证。章节卡改版并重读 refresh 后，旧 PASS 仍不能完成，显式对新版本重新验证才完成。
+- 丢回执：在真实文件写入完成、SDK `tool_result` 之前退出子进程（预期退出码 86），持久化意图仍为 dispatched / issued。另两进程分别对账并检查外部 B 冲突，三进程合计 **一次原生写入**；不会仅换调用 ID 就重放 A。父进程在故意中断时也核对文件边界。
+- 读取与隔离：跨进程恢复只保留已交付的第 8–9 行，改版后读第 1 行不能解锁，分别读 8、9 行并显式 refresh 才 ready；旧 Observation ID 必须回源。真实 SDK A(write)→B(plan)→A 切换保留各自任务，切换期间迟到的 A 响应不派发到 B。独立 `abort()` 的 CANCELLED 冷恢复保持取消；SDK `switchSession()` 会先断开事件订阅再 abort，返回旧会话时以 `BLOCKED_PREREQUISITE / INTERRUPTED_RUN` 封住未结束记录，不自动续跑。
+- 来源版本突变仅发生在临时扩展，禁用 SHA 比对后，同一个 `SOURCE_VERSION_ORACLE` 确实抛出预期 AssertionError；工装只接受这个具体失败且要求前置对照通过，不把任意子进程错误当作突变检测成功。
+- 扩展验收工装期间保留两轮非产品红灯：`d-v2gyJg` 的上下文 fixture 没有采用产品实际的换行封装，且断言辅助函数将显式 undefined 当成默认 true；已按真实封装和空合同断言修正。`d-DnkLpF` 把 SDK 切换中断误期望为显式 abort 的 CANCELLED；核对 SDK 代码后改为严格断言上述 INTERRUPTED_RUN 终态并保留零自动派发断言，没有取消负例。
+- 原有回归：应用 / 测试 TypeScript 检查、Harness **283 例 × 3**（deterministic=true、失败 0）、长程 Harness **1 例 × 3**、小说领域回归、前端构建全部通过。构建仍仅有既有 bundle 大小及动态 / 静态混合 import 提示。冻结 SDK context / lifecycle 分别 **103 / 175** 项检查通过，原声明的历史负例保留，不能算新的生产通过。
+- 已加入双平台 CI 命令与独立 JSON artifact 上传，但**本批尚未提交推送，远程检查未执行**。非可视前端发送测试核对真实发送函数→SDK 输入合同→状态摘要，未覆盖 DOM、Tauri/Rust RPC 或原生 Desktop 点击；按用户要求本轮不使用 computer use，D-07 保持待验收。没有开展 E、真实模型实验或自动压缩质量评测。
+
+### D-07 原生 Desktop 追加验收（2026-09-24）
+
+用户允许恢复 computer use 后，使用独立应用标识、公开 A/B 副本、固定 CLI 和离线合成 provider 完成实际窗口验收，详情见 [原生验收记录](REVIEW_D_NATIVE_ACCEPTANCE.md)。此前暂缓记录保留为历史，不将 SDK 测试改称原生验收。
+
+- 原生读取、停止取消、章节工作流→写作角色→完整机械验证→状态详情、关闭重开、会话 A→B→A 及跨项目切换均已实际观察；总计 8 次合成响应，真实模型调用 0。
+- 发现并修复状态栏切换丢失：每个 runtime 保存有界只读状态快照；后台状态更新归属原 runtime，切回时恢复，不重放通知、弹窗、编辑命令或 RPC 响应。更换进程 / 项目 / 角色 / 会话前清空旧快照。重建测试包后冷恢复与往返切换通过。
+- 本轮新增回归后 Harness **285 例 × 3**，deterministic=true，失败 0；应用 / 测试 TypeScript、窄面板浏览器 DOM 回归、前端构建、隔离原生构建通过。完整 SDK 8 组 / 15 进程再次通过：`artifacts/harness/production-lifecycle/d-DTjD9t/summary.json`。
+- 此次点击时独立记录了偶发空白控制台窗口；随后修复与直接回归见下节。D 本地验收不等于发布包、主题、更新安装或真实模型验收。此条记录时尚未 commit / push / 远程 CI，E 未启动。
+
+### D Windows 控制台修复（2026-09-24）
+
+- Windows npm `.cmd` 成功解析为 Node 入口后，`build_command` 早返回漏掉 `CREATE_NO_WINDOW`。在无控制台父进程下，修复前的实际 Node 子进程报告 `consoleAttached=true`，直接断言失败；仅补上这个分支的标志后，同一断言通过。没有改变参数、环境合并、工作目录、代次或 RPC 协议。
+- 新增 `windows_process_tests`：2 项测试各启动 4 种实际子进程，涵盖 npm path / npm sidecar、相对路径的非标准 batch fallback、DevNode，以及 RPC / 普通 CLI 两类命令。通过进程内 `GetConsoleWindow` 核验无控制台，另外核对 stdin / stdout / stderr、provider / model / session、中文空格参数与工作目录；不加载 Pi 或调用模型。
+- 本地 Rust 11 项测试全部通过，含 RPC generation 3 项、session-file safety 1 项、角色分支隔离 5 项和新控制台 2 项。原有未使用变量 warning 保留。CI Rust 校验扩展到 Windows / Ubuntu，Windows 必须实际运行新控制台回归，Linux 仅跳过该平台专属项。
+- 回归工装首次暴露匿名管道读取顺序导致的 30 秒超时；改为同时读取 stdout / stderr 后出现上述精确产品断言。另确认非标准 `.cmd` 的绝对路径含空格时，原有 `cmd /S /C` 引号处理失败；与 npm 解析成功分支不同，本次未修复。fallback 控制台用例明确使用 cwd 相对入口，不声称覆盖绝对路径引号问题。
+- 没有重写上一节 D-07 的原生截图观察、源码指纹或历史回读报告。此次修复证据是独立的真实进程测试，不称为再次完成整套原生窗口验收。
+- 提交前最终回归：应用 / 测试 TypeScript、前端构建、状态栏浏览器 DOM 检查、Harness **285 例 × 3**（deterministic=true、failures=false）通过；完整生产生命周期 **8 组 / 15 进程** 再次通过，独立报告 `artifacts/harness/production-lifecycle/d-MpVke3/summary.json`。真实模型调用为 0。远程 CI 结果在固定提交实际执行后追加，不预填。

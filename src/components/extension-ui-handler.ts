@@ -247,6 +247,13 @@ export class ExtensionUiHandler {
 		this.renderLatestStatus();
 	}
 
+	/** Restore only display data; no historical RPC actions are replayed. */
+	restoreSessionStatus(entries: ReadonlyArray<{ statusKey: string; statusText: string }>): void {
+		this.statusTexts.clear();
+		for (const entry of entries) this.setStatus({ id: "local-status-restore", method: "setStatus", ...entry });
+		this.renderLatestStatus();
+	}
+
 	private trace(message: string): void {
 		this.onTrace?.(message);
 		console.debug(`[extension-ui] ${message}`);

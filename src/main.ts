@@ -7,6 +7,7 @@ import { ChatView } from "./components/chat-view.js";
 import { CommandPalette } from "./components/command-palette.js";
 import { ContentTabs } from "./components/content-tabs.js";
 import { ExtensionUiHandler, normalizeExtensionUiRequest, type NotificationActionTarget } from "./components/extension-ui-handler.js";
+import { RuntimeStatusCache } from "./components/runtime-status-cache.js";
 import { FileViewer } from "./components/file-viewer.js";
 import { ContextInspector } from "./components/context-inspector.js";
 import { NovelWorkflowDialog, type NovelWorkflowAction } from "./components/novel-workflow-dialog.js";
@@ -102,6 +103,7 @@ interface SessionRuntime {
 	phase: "idle" | "starting" | "switching_session" | "creating_session" | "ready" | "failed";
 	lastError: string | null;
 	eventUnlisten: (() => void) | null;
+	extensionStatuses: RuntimeStatusCache;
 }
 
 const WORKSPACES_STORAGE_KEY = "pi-desktop.workspaces.v1";
@@ -587,14 +589,20 @@ function getOrCreateRuntimeForTab(workspaceId: string, tabId: string, projectPat
 		phase: "idle",
 		lastError: null,
 		eventUnlisten: null,
+		extensionStatuses: new RuntimeStatusCache(),
 	};
 	runtime.eventUnlisten = runtime.bridge.onEvent((event) => {
+		// The owning bridge has already fenced stale transport generations.
+		// Record background updates too, before the active-view listener runs.
+		runtime.extensionStatuses.observe(event);
 		if (isSessionTitleUpdate(event)) {
 			void refreshRuntimeSessionTitle(runtime, event);
 			return;
 		}
 		const type = typeof event.type === "string" ? event.type : "unknown";
 		if (type === "rpc_disconnected") {
+			runtime.extensionStatuses.clear();
+			if (runtime.key === activeSessionRuntimeKey) extensionUiHandler?.clearSessionStatus();
 			runtime.phase = "failed";
 			runtime.lastError ??= "Pi process disconnected";
 			setRuntimeRunning(runtime, false, { suppressNotify: true });
@@ -613,6 +621,7 @@ function setActiveRuntime(runtime: SessionRuntime | null): void {
 	}
 	activeSessionRuntimeKey = runtime?.key ?? null;
 	setActiveRpcBridge(runtime?.bridge ?? null);
+	extensionUiHandler?.restoreSessionStatus(runtime?.extensionStatuses.snapshot() ?? []);
 	syncDebugOverlay();
 }
 
@@ -2681,6 +2690,9 @@ function syncActiveChatRuntimeBinding(
 			projectPath,
 			options.statusText ?? (activeSessionTab.sessionPath ? "Loading session…" : "Starting new session…"),
 		);
+		// prepareForSessionSwitch clears the chat projection. Rehydrate only
+		// the selected runtime, never the status belonging to the previous tab.
+		extensionUiHandler?.restoreSessionStatus(expectedRuntime?.extensionStatuses.snapshot() ?? []);
 	}
 }
 
@@ -2983,6 +2995,7 @@ async function ensureRuntimeForSessionTabImpl(
 	try {
 		if ((projectChanged || novelRoleChanged) && bridge.isConnected) {
 			runtime.phase = "starting";
+			runtime.extensionStatuses.clear();
 			await bridge.stop().catch(() => {
 				/* ignore */
 			});
@@ -2997,6 +3010,9 @@ async function ensureRuntimeForSessionTabImpl(
 
 		if (!bridge.isConnected) {
 			runtime.phase = "starting";
+			// Clear before launch so early session_start status events from the
+			// new process can be retained until its view is bound.
+			runtime.extensionStatuses.clear();
 			recordDebugTrace(`ensureRuntime:start-bridge instance=${runtime.instanceId}`);
 			const novelRoleEnv = {
 				PI_DESKTOP_SESSION_TITLE: "1",
@@ -3027,6 +3043,7 @@ async function ensureRuntimeForSessionTabImpl(
 			const targetSessionPath = sessionTab.sessionPath;
 			if (normalizeSessionPath(targetSessionPath) !== normalizeSessionPath(runtime.lastKnownSessionPath)) {
 				runtime.phase = "switching_session";
+				runtime.extensionStatuses.clear();
 				const switched = await restoreSessionTab(bridge, {
 					sessionPath: targetSessionPath,
 					ephemeral: sessionTab.ephemeral,

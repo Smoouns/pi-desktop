@@ -90,6 +90,19 @@ async function run(){
  check(!document.querySelector('.chat-extension-status'),'runtime clear removes compact status');
  await ui.handleRequest({id:'s5',method:'setStatus',statusKey:'novel-supervisor',statusText:detail}); await pause();
  check(document.querySelector('.chat-extension-status'),'status can reopen after runtime clear');
+ const beforeRestoreResponses=responses.length;
+ ui.clearSessionStatus();
+ ui.restoreSessionStatus([{statusKey:'novel-supervisor',statusText:'已取消（AGENT_ABORTED）。测试 A'}]); await pause();
+ check(document.querySelector('.chat-extension-status').textContent.includes('已取消'),'A status restored after view reset');
+ ui.clearSessionStatus();
+ ui.restoreSessionStatus([{statusKey:'novel-supervisor',statusText:'候选任务已完成（STOP_VERIFIED）。测试 B'}]); await pause();
+ check(document.querySelector('.chat-extension-status').textContent.includes('候选任务已完成'),'B status independent');
+ document.querySelector('.chat-extension-status-details').click(); await pause();
+ check(overlay.querySelector('[role=dialog]').textContent.includes('测试 B'),'restored details belong to B');
+ overlay.querySelector('[role=dialog] button').click(); await pause();
+ check(responses.length===beforeRestoreResponses,'restoration and local details emit no RPC actions');
+ ui.restoreSessionStatus([]); await pause();
+ check(!document.querySelector('.chat-extension-status'),'empty runtime does not inherit previous status');
  pane.style.flex='0 0 360px'; pane.style.width='360px'; await pause();
  document.documentElement.setAttribute('data-result',JSON.stringify({pass:true,width:innerWidth,paneWidths,closes:responses.length,modelRequests:0}));
 }

@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Emitter, Manager};
 mod session_file;
+#[cfg(all(test, target_os = "windows"))]
+mod windows_process_tests;
 
 #[derive(Default)]
 struct RpcProcessHandle {
@@ -832,6 +834,8 @@ fn build_command(pi: &PiProcess, options: &RpcStartOptions) -> Command {
             if let Some(parent) = path.parent() {
                 prepend_bin_dir_to_path(&mut cmd, parent);
             }
+            // This npm-shim branch returns before the shared Windows setup.
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
             return cmd;
         }
     }

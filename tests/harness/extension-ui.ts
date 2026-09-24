@@ -160,6 +160,12 @@ export async function runExtensionUiCases(runCase: RunCase): Promise<void> {
 		assert.equal(statuses.size, 32);
 		handler.clearSessionStatus();
 		assert.equal(statuses.size, 0, "runtime switch must be able to clear all prior-session statuses");
+		handler.restoreSessionStatus([{ statusKey: "novel-supervisor", statusText: "已取消（AGENT_ABORTED）" }]);
+		assert.equal(statuses.get("novel-supervisor"), "已取消（AGENT_ABORTED）");
+		handler.restoreSessionStatus([{ statusKey: "novel-supervisor", statusText: "候选任务已完成（STOP_VERIFIED）" }]);
+		assert.equal(statuses.size, 1);
+		assert.equal(statuses.get("novel-supervisor"), "候选任务已完成（STOP_VERIFIED）");
+		handler.restoreSessionStatus([]); assert.equal(statuses.size, 0, "an empty selected runtime clears stale status");
 	});
 
 	await runCase("UI-EXT-04 status host gets a compact summary with lossless local details", async () => {
