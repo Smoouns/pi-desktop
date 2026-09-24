@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { createBoundedTransport, type RequestStopCode } from "../core/request-transport.js";
+import { createBoundedTransport, type RequestStopCode, type TransportOptions } from "../core/request-transport.js";
 import { createJournalScope } from "../core/request-journal.js";
 import type { RequestPolicy } from "../core/request-policy.js";
 import { durableJson } from "../sdk-live/manifest.js";
@@ -19,9 +19,15 @@ export async function createContextBroker(options: {
 	/** Explicit projection supplied only after the caller's batch authorization. */
 	route?: { endpoint: string; modelId: string; outputField: "max_tokens" | "max_completion_tokens"; mode: "live" | "dry-run" };
 	beforeReserve?: () => Promise<void>;
+	/** Offline phase tests only. Live requests must always use the real deadlines. */
+	testClock?: Required<Pick<TransportOptions, "now" | "setTimer" | "clearTimer">>;
 }) {
 	const scope = createJournalScope(options.policy);
 	const route = options.route ?? { endpoint: ENDPOINT, modelId: MODEL.id, outputField: "max_tokens" as const, mode: "dry-run" as const };
+	if (options.testClock !== undefined) {
+		assert.equal(route.mode, "dry-run", "S3T_TEST_CLOCK_DRY_ONLY");
+		assert.ok([options.testClock.now, options.testClock.setTimer, options.testClock.clearTimer].every(fn => typeof fn === "function"), "S3T_TEST_CLOCK_INVALID");
+	}
 	const journal = await scope.create(path.join(options.directory, "journal"), options.manifestSha256, route.mode);
 	await mkdir(path.join(options.directory, "requests"));
 	let active: Offer | null = null, nextId = 0, queued = 0, highWater = 0, closed = false;
@@ -29,6 +35,7 @@ export async function createContextBroker(options: {
 	const kinds: RequestBinding[] = [];
 	const gate = createBoundedTransport({ endpoint: route.endpoint, modelId: route.modelId, outputField: route.outputField, outputMode: "bounded",
 		fetchImpl: options.fetchImpl, estimateInput: body => body.byteLength,
+		now: options.testClock?.now, setTimer: options.testClock?.setTimer, clearTimer: options.testClock?.clearTimer,
 		beforeDispatch: async request => {
 			assert.ok(active, "S3T_BINDING_REQUIRED");
 			await options.beforeReserve?.();

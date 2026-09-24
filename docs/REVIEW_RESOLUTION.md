@@ -2,7 +2,7 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 已提交推送；首轮 Windows CI 触及工装总时限，正在以最小工装修正重新验收。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 已提交推送；首轮 Windows 工装总时限已修正，后续固定提交 Windows 全绿，但 Ubuntu 暴露 S4 超时测试阶段竞速，正在修正并重新验收。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
@@ -13,7 +13,7 @@
 | AUD-01 | fixed / CI_passed | 新增拒绝原因枚举；仅规范化隔离测试子进程的临时根；补路径正反例与 Windows 短路径回归 | `f472e8d` 双平台 CI 全绿；Windows 8.3 用例实际执行，journal=11、unsupported=[]。原失败 CI 未输出具体拒绝分支，仍不冒充已确认其唯一根因 |
 | AUD-02 | fixed / CI_passed | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | `c67467e` 双平台 CI 全绿；新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放 |
 | AUD-03 | fixed / CI_passed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | `f1b19df` 双平台 CI 全绿；263 例 × 3 实际执行。没有本批 Desktop 验收 |
-| AUD-04 | fixed_locally / CI_pending | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | `d622b59` 已推送；首轮 Windows CI 被工装 240 秒总时限中止，不能算通过。完整双平台 CI / Desktop 验收仍待补齐 |
+| AUD-04 | fixed_locally / CI_pending | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | `d622b59` 已推送；`65b9ffa` 的 Windows 及 TypeScript + Rust 全绿，Ubuntu 的 S4 超时单元用例失败。完整双平台 CI / Desktop 验收仍待补齐 |
 | AUD-05 | partially_addressed | C 保留任务目标、约束、产物与验证凭证，E 再测量压缩质量 | 这是必需恢复信息，不是通用规划器或语义进度摘要；不将其当作 Canon |
 | AUD-06 | in_progress | D 随 B/C 补完整生产接线与定向突变回归 | C 已覆盖完整扩展、固定 SDK、真实会话重开及强制错误完成的突变检测；不声称完成 Desktop 或 C 的独立 OS 进程冷恢复验收 |
 | AUD-07 | deferred | E：分层计量预算估算、provider usage 和 HTTP 派发 | 不把 eval 单请求限制复制到生产重试策略 |
@@ -168,4 +168,13 @@
 - Windows 固定提交日志：17:07:47 启动 Harness，前两轮分别约 83 秒和 89 秒，第三轮仍有正常 PASS 输出，17:11:47 被 `spawnSync ... ETIMEDOUT` 中止。没有用例断言失败，20 项 C 用例均实际执行三轮，但整套回归没有跑完。
 - `scripts/run-public-tests.mjs` 仅将完整三轮 Harness 子进程总时限从 240 秒改为 360 秒，为按上述单轮耗时估计的约 260 秒提供有界余量；其他测试模式仍为 180 秒，产品工具期限、上下文预算、断言和负例均未改动。原超时日志保留，不以未执行步骤冒充通过。修正后的固定提交仍须重新验证。
 
-下一步：完成 C 工装修正后的固定提交双平台 CI；再补 D 剩余生命周期 / Desktop 接线证据，E 的压缩质量、预算计量及读取成本优化另行推进。
+### S4 超时用例阶段隔离（2026-09-24）
+
+- 有界 360 秒工装提交 `65b9ffa8bdd71bd4fb25b40f39dbddb7ca52b5f4` 的 [CI 35894251821](https://github.com/Smoouns/pi-desktop/actions/runs/35894251821)：Windows/Node 24 全部必需步骤通过，含 Harness 283 例 × 3、S4 live tooling 150 项、evidence-report 199 项及真实 8.3 TEMP 回归；TypeScript + Rust 任务也通过。Ubuntu/Node 22 通过 Harness 及此前 SDK 套件后，在 S4 live tooling 的 `timeout, no refund, no second dispatch` 中得到 `JOURNAL_FAILURE` 而非预期 `REQUEST_TIMEOUT`，后续 evidence-report、resize 与构建被跳过。本轮不是双平台通过。
+- 两处超时单元用例把 `requestTimeoutMs` 设为真实 20 毫秒，但该期限同时约束日志落盘阶段与网络阶段。日志预留和请求绑定均真实写盘、fsync；只想断言网络超时的测试可能先触发日志期限。原 CI 未保留底层 I/O 错误细节，因此不将慢写盘冒充已确定的唯一环境根因。
+- 评测 broker 透传底层已有的时钟注入接口，仅允许 `dry-run`；真实请求在任何建目录、journal claim 或派发前拒绝测试时钟。默认真实时钟、产品代码、策略版本、额度和历史 manifest 均未改动。
+- 两处测试等待实际 mock fetch 派发，再手动触发网络阶段的 20 毫秒计时器，不用睡眠或加大期限决定预期错误码。保留真实 journal I/O，并断言前一阶段计时器已清除。新增反例单独卡住日志预留阶段，触发同样的 20 毫秒期限，确认 `JOURNAL_FAILURE`、零派发；另验证 live 模式拒绝测试时钟且没有落盘副作用。
+- 网络超时用例补齐超时前 journal / binding 已存在、一次预留不退还、再次提交不能派发的直接检查。测试辅助器单独使用真实 30 秒 watchdog，只用于让错误接线及时失败，不将该 watchdog 当成产品超时或成功依据。
+- 本地回归：应用 / 测试 TypeScript 检查通过，SDK context transport 96 项及 S4 live tooling 152 项通过；网络保护用例 61 项通过，真实模型调用 0。S3 的默认真实时钟取消 / 网络期限负例保留，未依赖测试时钟放宽它们；新固定提交的远程结果仍须单独核验。
+
+下一步：提交推送本次超时阶段隔离修复并核验固定提交双平台 CI；再补 D 剩余生命周期 / Desktop 接线证据，E 的压缩质量、预算计量及读取成本优化另行推进。

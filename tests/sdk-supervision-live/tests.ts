@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { compact } from "@mariozechner/pi-coding-agent";
 import { createContextMaintenance } from "../../src/extensions/context-maintenance.js";
 import { assertInside, digest, sha256, treeManifest } from "../../evals/core/io.js";
 import { freezeRequestPolicy } from "../../evals/core/request-policy.js";
+import { createJournalScope } from "../../evals/core/request-journal.js";
 import { createContextBroker } from "../../evals/sdk-context-transport/broker.js";
 import { createBoundedTransport } from "../../evals/core/request-transport.js";
 import { ACK, LEGACY_ACK, LEGACY_LIMITS, LEGACY_POLICY, LIMITS, MODEL, POLICY, PRODUCT_LIMITS, RUNS, SCHEMA_VERSION, SIMULATIONS, TARGET, referenceBudget, type Simulation } from "../../evals/sdk-supervision-live/policy.js";
@@ -15,6 +16,7 @@ import { journalScope, recover, seal, validateRecord } from "../../evals/sdk-sup
 import { evidenceRoot, runDry, runLive, syntheticConfig } from "../../evals/sdk-supervision-live/runner.js";
 import { formatDiagnostics } from "../../evals/sdk-supervision-live/diagnostics.js";
 import { asLegacyManifest, diagnosticUnitTests, legacyCopy } from "./diagnostics.js";
+import { createTransportTestClock, expectTimeoutAtPhase, phaseSignal } from "../support/transport-clock.js";
 
 export async function runTests() {
   let count = 0; const temporary = await mkdtemp(path.join(process.env.PI_S4L_WORK_ROOT!, "tests-"));
@@ -52,10 +54,54 @@ export async function runTests() {
     });
     await test("timeout, no refund, no second dispatch", async () => {
       const policy = freezeRequestPolicy({ namespace: "s4-live-timeout-unit-v1", taskIds: POLICY.taskIds, limits: { ...LIMITS, requestTimeoutMs: 20 } });
+      const clock = createTransportTestClock(), dispatched = phaseSignal(); let calls = 0;
       const directory = await mkdtemp(path.join(temporary, "timeout-")), broker = await createContextBroker({ directory, manifestSha256: "a".repeat(64), policy,
-        route: { endpoint, modelId: MODEL.id, outputField: "max_tokens", mode: "dry-run" }, fetchImpl: async () => new Promise<Response>(() => undefined) });
-      await assert.rejects(() => broker.submit({ id: 1, kind: "summary", taskId: RUNS[0].runId, stage: "single", body }));
-      const disk = await broker.close(); assert.equal(disk.reserved, 1); assert.equal(disk.unknown, 1); assert.equal(broker.snapshot().transport.stopCode, "REQUEST_TIMEOUT");
+        route: { endpoint, modelId: MODEL.id, outputField: "max_tokens", mode: "dry-run" }, testClock: clock.timing,
+        fetchImpl: async () => { calls++; dispatched.reached(); return new Promise<Response>(() => undefined); } });
+      const offer = (id: number) => ({ id, kind: "summary" as const, taskId: RUNS[0].runId, stage: "single" as const, body });
+      const pending = broker.submit(offer(1));
+      await expectTimeoutAtPhase(pending, dispatched.promise.then(async () => {
+        const disk = await createJournalScope(policy).recover(path.join(directory, "journal"), "a".repeat(64));
+        assert.equal(disk.reserved, 1); assert.equal(disk.pending, 1);
+        const binding = JSON.parse(await readFile(path.join(directory, "requests/request-000001.json"), "utf8"));
+        assert.equal(binding.offerId, 1); assert.equal(binding.kind, "summary");
+        assert.equal(broker.snapshot().transport.requests[0].dispatchAttempted, true);
+      }), clock, "REQUEST_TIMEOUT", 20);
+      assert.deepEqual(clock.snapshot().delays, [20, 20]);
+      await assert.rejects(() => broker.submit(offer(2)), /S3T_OFFER_REJECTED/);
+      assert.equal(calls, 1); assert.equal(broker.snapshot().offered, 1);
+      const disk = await broker.close(); assert.equal(disk.reserved, 1); assert.equal(disk.unknown, 1); assert.equal(disk.outputReserved, 2048);
+      assert.equal(broker.snapshot().transport.stopCode, "REQUEST_TIMEOUT");
+      assert.equal(broker.snapshot().transport.requestsReserved, 1); assert.equal(broker.snapshot().transport.outputReserved, 2048);
+    });
+    await test("journal deadline prevents dispatch and remains distinct from network timeout", async () => {
+      const policy = freezeRequestPolicy({ namespace: "s4-live-timeout-unit-v1", taskIds: POLICY.taskIds, limits: { ...LIMITS, requestTimeoutMs: 20 } });
+      const clock = createTransportTestClock(), reserving = phaseSignal(), release = phaseSignal(); let calls = 0;
+      const directory = await mkdtemp(path.join(temporary, "journal-timeout-"));
+      const heldReservation = release.promise.then(() => { throw new Error("test reservation cancelled"); });
+      const broker = await createContextBroker({ directory, manifestSha256: "a".repeat(64), policy,
+        route: { endpoint, modelId: MODEL.id, outputField: "max_tokens", mode: "dry-run" }, testClock: clock.timing,
+        beforeReserve: () => { reserving.reached(); return heldReservation; }, fetchImpl: async () => { calls++; return response(); } });
+      try {
+        const pending = broker.submit({ id: 1, kind: "summary", taskId: RUNS[0].runId, stage: "single", body });
+        await expectTimeoutAtPhase(pending, reserving.promise, clock, "JOURNAL_FAILURE", 20);
+        assert.deepEqual(clock.snapshot().delays, [20]); assert.equal(calls, 0);
+        const snapshot = broker.snapshot().transport;
+        assert.equal(snapshot.stopCode, "JOURNAL_FAILURE"); assert.equal(snapshot.requestsReserved, 1); assert.equal(snapshot.outputReserved, 2048);
+        assert.equal(snapshot.requests[0].dispatchAttempted, false); assert.equal(snapshot.requests[0].status, "unknown");
+        await assert.rejects(() => broker.submit({ id: 2, kind: "summary", taskId: RUNS[0].runId, stage: "single", body }));
+        assert.equal(calls, 0); assert.equal(broker.snapshot().transport.requestsReserved, 1);
+      } finally { release.reached(); await assert.rejects(heldReservation, /test reservation cancelled/); }
+      const disk = await broker.close(); assert.equal(disk.reserved, 0);
+      assert.deepEqual(await readdir(path.join(directory, "requests")), []);
+    });
+    await test("test clock cannot change live deadlines or create a live journal", async () => {
+      const directory = path.join(temporary, "live-clock-forbidden"), clock = createTransportTestClock(); let calls = 0;
+      await assert.rejects(() => createContextBroker({ directory, manifestSha256: "a".repeat(64), policy: POLICY,
+        route: { endpoint, modelId: MODEL.id, outputField: "max_tokens", mode: "live" }, testClock: clock.timing,
+        fetchImpl: async () => { calls++; return response(); } }), /S3T_TEST_CLOCK_DRY_ONLY/);
+      await assert.rejects(() => readdir(directory), { code: "ENOENT" }); assert.equal(calls, 0);
+      assert.deepEqual(clock.snapshot().delays, []);
     });
     await test("native split summary uses two bounded SDK payloads", async () => {
       const model = { ...syntheticConfig().runtimeModel, baseUrl: "https://pilot.invalid/v1" }, bridge = installBridge(model, { allowSummary: true, prepareOnly: true, terminal: () => false, onReply: () => undefined });

@@ -8,23 +8,30 @@ import { observeRunTransport, validateTransportDiagnostic } from "../../evals/sd
 import { LEGACY_LIMITS, LEGACY_POLICY, LIMITS, MODEL, POLICY, RUNS, referenceBudget } from "../../evals/sdk-supervision-live/policy.js";
 import { recover, seal } from "../../evals/sdk-supervision-live/records.js";
 import { legacyProfileHashes, type Manifest } from "../../evals/sdk-supervision-live/manifest.js";
+import { createTransportTestClock, expectTimeoutAtPhase, phaseSignal } from "../support/transport-clock.js";
 
 type Test = (name: string, fn: () => void | Promise<void>) => Promise<void>;
 export async function diagnosticUnitTests(test: Test, temporary: string) {
   const endpoint = "https://pilot.invalid/v1/chat/completions", body = JSON.stringify({ model: MODEL.id, max_tokens: 2048, messages: [] });
   for (const mode of ["task-limit", "timeout", "network", "before-dispatch"] as const) await test(`diagnostic ${mode}`, async () => {
     const directory = await mkdtemp(path.join(temporary, "diagnostic-")); let actualCalls = 0;
+    const clock = createTransportTestClock(), dispatched = phaseSignal();
     const policy = mode === "timeout" ? freezeRequestPolicy({ namespace: "s4-diagnostics-unit-v1", taskIds: POLICY.taskIds, limits: { ...LIMITS, requestTimeoutMs: 20 } }) : POLICY;
     const broker = await createContextBroker({ directory, manifestSha256: "a".repeat(64), policy,
       route: { endpoint, modelId: MODEL.id, outputField: "max_tokens", mode: "dry-run" },
+      testClock: mode === "timeout" ? clock.timing : undefined,
       beforeReserve: async () => { if (mode === "before-dispatch") throw new Error("private-canary-not-retained"); },
-      fetchImpl: async () => { actualCalls++; if (mode === "timeout") return new Promise<Response>(() => undefined);
+      fetchImpl: async () => { actualCalls++; dispatched.reached(); if (mode === "timeout") return new Promise<Response>(() => undefined);
         if (mode === "network") throw new Error("private-canary-not-retained");
         return new Response('data: {"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n'); } });
     const observed = observeRunTransport(broker, RUNS[0]);
     const offer = (id: number) => ({ id, kind: "ordinary" as const, taskId: RUNS[0].runId, stage: "single" as const, body });
     if (mode === "task-limit") for (let i = 1; i <= LIMITS.maxTaskHttpRequests; i++) await observed.broker.submit(offer(i));
-    await assert.rejects(() => observed.broker.submit(offer(mode === "task-limit" ? LIMITS.maxTaskHttpRequests + 1 : 1)));
+    const pending = observed.broker.submit(offer(mode === "task-limit" ? LIMITS.maxTaskHttpRequests + 1 : 1));
+    if (mode === "timeout") {
+      await expectTimeoutAtPhase(pending, dispatched.promise, clock, "REQUEST_TIMEOUT", 20);
+      assert.deepEqual(clock.snapshot().delays, [20, 20]);
+    } else await assert.rejects(pending);
     const firstStop = broker.snapshot().transport.stopCode; broker.stop();
     const d = await observed.finish(), last = d.offers.at(-1)!;
     assert.equal(d.stopCode, firstStop); assert.equal(last.stopCode, firstStop); assert.equal(last.returned, false);
