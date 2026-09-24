@@ -2,7 +2,7 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 已提交推送；首轮 Windows 工装总时限已修正，后续固定提交 Windows 全绿，但 Ubuntu 暴露 S4 超时测试阶段竞速，正在修正并重新验收。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 及其两项 CI 工装修正已提交推送，固定代码提交 `e9f7d69` 的双平台 CI 已通过；D 剩余生命周期 / Desktop 验收与 E 优化尚未开展。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
@@ -13,7 +13,7 @@
 | AUD-01 | fixed / CI_passed | 新增拒绝原因枚举；仅规范化隔离测试子进程的临时根；补路径正反例与 Windows 短路径回归 | `f472e8d` 双平台 CI 全绿；Windows 8.3 用例实际执行，journal=11、unsupported=[]。原失败 CI 未输出具体拒绝分支，仍不冒充已确认其唯一根因 |
 | AUD-02 | fixed / CI_passed | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | `c67467e` 双平台 CI 全绿；新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放 |
 | AUD-03 | fixed / CI_passed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | `f1b19df` 双平台 CI 全绿；263 例 × 3 实际执行。没有本批 Desktop 验收 |
-| AUD-04 | fixed_locally / CI_pending | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | `d622b59` 已推送；`65b9ffa` 的 Windows 及 TypeScript + Rust 全绿，Ubuntu 的 S4 超时单元用例失败。完整双平台 CI / Desktop 验收仍待补齐 |
+| AUD-04 | fixed / CI_passed | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | `e9f7d69` 双平台 CI 全绿；283 例 × 3 实际执行，20 项 C 用例两平台均各执行三次。Desktop 与 C 的独立 OS 进程冷恢复验收仍待 D 补齐 |
 | AUD-05 | partially_addressed | C 保留任务目标、约束、产物与验证凭证，E 再测量压缩质量 | 这是必需恢复信息，不是通用规划器或语义进度摘要；不将其当作 Canon |
 | AUD-06 | in_progress | D 随 B/C 补完整生产接线与定向突变回归 | C 已覆盖完整扩展、固定 SDK、真实会话重开及强制错误完成的突变检测；不声称完成 Desktop 或 C 的独立 OS 进程冷恢复验收 |
 | AUD-07 | deferred | E：分层计量预算估算、provider usage 和 HTTP 派发 | 不把 eval 单请求限制复制到生产重试策略 |
@@ -29,6 +29,7 @@
 - B1 已独立提交推送：`c67467ec4f812a722df5398033bc2858ad8507bd`。[CI 35871188658](https://github.com/Smoouns/pi-desktop/actions/runs/35871188658) 的 Windows/Node 24、Ubuntu/Node 22、TypeScript + Rust 三个任务全部通过。两平台均实际执行 Harness 235 例 × 3，以及新增三进程冷恢复用例。
 - B1 Windows 日志确认 journal=11、unsupported=[]、真实 8.3 TEMP 用例通过，全部后续 SDK 检查和前端构建实际执行。Ubuntu 仅按条件跳过 Windows 专属短路径步骤。冻结评测中的既定负例 / unsupported 仍不冒充生产通过。
 - B2 已独立提交推送：`f1b19df4005d74ecbad76bb242eff0a98c8a6d17`。[CI 35877882145](https://github.com/Smoouns/pi-desktop/actions/runs/35877882145) 的 Windows/Node 24、Ubuntu/Node 22、TypeScript + Rust 三个任务全部通过。两平台日志均确认 Harness 263 例 × 3、deterministic=true、失败 0，新增 B2 场景实际执行；后续全部 SDK 检查、长程回归及前端构建也实际执行。Windows journal=11、unsupported=[]、8.3 TEMP 用例通过；Ubuntu journal=10、unsupported=[]，仅按条件跳过 Windows 专属短路径步骤。
+- C 及 CI 工装修正的固定代码提交：`e9f7d69a21ffdbed85087dd31f4f2346a9009cd5`。[CI 35952265937](https://github.com/Smoouns/pi-desktop/actions/runs/35952265937) 的 Windows/Node 24、Ubuntu/Node 22、TypeScript + Rust 三个任务全部通过，详见下方验收记录。之前的两轮失败保留为独立历史，不替换或改写。
 - 远程验收门槛：固定修复提交上的 Windows/Node 24 与 Ubuntu/Node 22 必需检查实际执行并通过，未经说明的 skipped 不算通过。
 
 后续记录将在实际执行后追加，不预填通过结果。
@@ -127,7 +128,7 @@
 - 最终应用 / 测试 TypeScript 检查、前端构建、长程 Harness、小说领域回归、离线 eval 通过；构建仅保留原有 bundle/import 提示。v16 标记已同步到安装冒烟断言，没有跳过测试。冻结 SDK context / lifecycle 分别通过 103 / 175 项检查，保留声明过的历史能力负例；不当作当前生产 B2 的直接验收。
 - 未做真实模型调用、Desktop 人工点击或任意并发文件系统替换审计。工具结果边界的交付不证明 provider 实际消费 / 模型理解，B2 不关闭 C 的任务完成合同。
 
-## C：稳定任务目标与完成合同（已提交，等待完整 CI）
+## C：稳定任务目标与完成合同（已提交，双平台 CI 通过）
 
 ### 任务身份与输入边界
 
@@ -177,4 +178,13 @@
 - 网络超时用例补齐超时前 journal / binding 已存在、一次预留不退还、再次提交不能派发的直接检查。测试辅助器单独使用真实 30 秒 watchdog，只用于让错误接线及时失败，不将该 watchdog 当成产品超时或成功依据。
 - 本地回归：应用 / 测试 TypeScript 检查通过，SDK context transport 96 项及 S4 live tooling 152 项通过；网络保护用例 61 项通过，真实模型调用 0。S3 的默认真实时钟取消 / 网络期限负例保留，未依赖测试时钟放宽它们；新固定提交的远程结果仍须单独核验。
 
-下一步：提交推送本次超时阶段隔离修复并核验固定提交双平台 CI；再补 D 剩余生命周期 / Desktop 接线证据，E 的压缩质量、预算计量及读取成本优化另行推进。
+### C 固定代码提交验收（2026-09-24）
+
+- 被验收提交为 `e9f7d69a21ffdbed85087dd31f4f2346a9009cd5`；[CI 35952265937](https://github.com/Smoouns/pi-desktop/actions/runs/35952265937) 第 1 次执行整体 `success`。已逐步核对任务状态及完整日志，不只读取总状态。
+- Windows/Node 24 与 Ubuntu/Node 22：Harness 均为 283 例 × 3、deterministic=true、failures=false；20 项 C 用例在各平台日志中均有 60 条 PASS。长程 Harness 均为 1 例 × 3、deterministic=true、modelCalls=0。应用 / 测试 TypeScript 检查、领域回归、离线 eval、Pilot 均实际执行并通过。
+- 两平台 SDK ablation / S2 / S3 / lifecycle / transport / context live tooling / recovery races / supervision / supervision live tooling 分别通过 101 / 95 / 103 / 175 / 96 / 83 / 125 / 188 / 152 项检查；evidence-report 均为 199 项，聊天面板回归及前端构建通过。冻结矩阵中按原合同核验的历史负例不是 C 生产能力的通过证据。
+- Windows 普通与短 TEMP 两次 journal 均为 passed=11、unsupported=[]，日志有 `PASS journal.windows-short-temp`；Ubuntu journal=10、unsupported=[]。Ubuntu 仅按条件跳过 Windows 专属短路径步骤，Windows 没有跳过步骤，没有必需检查因前置失败而未执行。
+- 独立 TypeScript + Rust 任务通过：前端构建、`cargo check`、RPC generation 3 项、session file safety 1 项、role branch isolation 5 项均实际执行。此 CI 不包含 Desktop 人工点击、C 独立 OS 进程冷恢复或真实模型测试；真实模型调用仍为 0。
+- 此结果在后续纯文档提交中登记，该文档提交跳过重复 CI，未修改任何源码、测试或工作流；CI 通过声明绑定上述固定代码 SHA，不将未执行的检查记为通过。
+
+下一步：D 剩余生命周期 / Desktop 接线证据；E 的压缩质量、预算计量及读取成本优化另行推进。本轮没有启动 D/E 实施。
