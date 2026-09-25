@@ -18,7 +18,8 @@ export default function (pi: ExtensionAPI) {
 	const log = (data: Record<string, unknown>) => appendFileSync(path.join(work, `rpc-${process.pid}.jsonl`), JSON.stringify({ at: new Date().toISOString(), pid: process.pid, root, ...data }) + "\n");
 	log({ event: "boot", modelCalls: 0, networkAttempts: guard.attempts });
 	let round = 0;
-	pi.on("input", (event, ctx) => { round = 0; log({ event: "input", text: event.text, session: ctx.sessionManager.getSessionId() }); });
+	let inputText: string | undefined;
+	pi.on("input", (event, ctx) => { round = 0; inputText = event.text; log({ event: "input", text: event.text, session: ctx.sessionManager.getSessionId() }); });
 	pi.on("tool_result", event => { log({ event: "tool_result", name: event.toolName, isError: event.isError }); });
 	pi.on("agent_end", (_event, ctx) => {
 		const entries = ctx.sessionManager.getBranch() as any[];
@@ -42,8 +43,15 @@ export default function (pi: ExtensionAPI) {
 				try {
 					assert.equal(model.provider, "desktop-offline"); assert.equal(model.id, "d7-synthetic");
 					assert.equal(options.apiKey, "synthetic-only"); assert.ok(nth <= 8);
-					const last = [...context.messages].reverse().find(m => m.role === "user");
-					const text = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content ?? "");
+					// Pi also maps custom checkpoint/progress projections to user messages.
+					// Select the synthetic script from the actual input event, never from
+					// the final projected user-role message or a historical trigger.
+					assert.equal(typeof inputText, "string", "D7_MISSING_EXPLICIT_INPUT");
+					const text = inputText!;
+					const trigger = text.match(/D7-(READ|CANCEL|VERIFY)/)?.[0];
+					assert.ok(trigger, "D7_UNKNOWN_INPUT");
+					assert.ok(context.messages.some(m => m.role === "user" &&
+						(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).includes(trigger)), "D7_INPUT_MISSING_FROM_CONTEXT");
 					log({ event: "synthetic_request", round: nth, networkAttempts: guard.attempts });
 					await options.onPayload?.({ model: model.id, system: context.systemPrompt, messages: context.messages, tools: context.tools, max_tokens: 4096 }, model);
 					options.signal?.throwIfAborted();
