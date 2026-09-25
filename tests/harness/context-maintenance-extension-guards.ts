@@ -106,6 +106,8 @@ export async function runContextMaintenanceGuardCases(runCase: RunCase): Promise
 	await runCase("CM-GUARD-05 trimming old tool results can avoid model compaction", () => fixture(async ({ extension, branch, ctx }) => {
 		const messages: any[] = [{ role: "user", content: "读取资料", timestamp: 1 }];
 		for (let index = 0; index < 8; index++) messages.push({
+			role: "assistant", content: [{ type: "toolCall", id: `call-${index}`, name: "read", arguments: {} }], timestamp: index + 2,
+		}, {
 			role: "toolResult", toolCallId: `call-${index}`, toolName: "read", isError: false,
 			content: [{ type: "text", text: "a".repeat(20_000) }], timestamp: index + 2,
 		});
@@ -116,7 +118,7 @@ export async function runContextMaintenanceGuardCases(runCase: RunCase): Promise
 		const result = await inputHook(extension)({ type: "input", source: "interactive", text: "继续", images: [] }, ctx);
 		assert.equal(result, undefined, "trimmed projection below pressure threshold must continue the original input");
 		assert.equal(compacts, 0);
-		assert.equal(branch.current.length, 9, "projection trimming must not mutate persisted history");
+		assert.equal(branch.current.length, 17, "projection trimming must not mutate persisted history");
 	}));
 
 	await runCase("CM-GUARD-06 disabled compaction setting is honored", () => fixture(async ({ extension, root, agentDir, ctx, editor }) => {

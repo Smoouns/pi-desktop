@@ -1,7 +1,8 @@
 import type { RunScope } from "../harness/types.js";
 import type { ToolErrorKind } from "../harness/tool-policy.js";
-import type { RunSupervisor, RunSupervisorSnapshot, RunSupervisorState } from "../harness/run-supervisor.js";
+import type { RunSupervisor, RunSupervisorSnapshot, RunSupervisorState, VerificationReceiptInput } from "../harness/run-supervisor.js";
 
+// Stable journal envelope; the sealed snapshot payload supports schema 1 and 2.
 export const RUN_STATUS_ENTRY = "pi-desktop-run-status/v1";
 
 export interface SupervisorRuntime {
@@ -14,7 +15,7 @@ export interface SupervisorRuntime {
 	turn(): RunSupervisorSnapshot | null;
 	evidence(identity: string): RunSupervisorSnapshot | null;
 	artifact(path: string, sha256: string): RunSupervisorSnapshot | null;
-	verification(value: { callId: string; subject: string; artifactSha256: string | null; errorDigest: string | null; passed: boolean; full: boolean }): RunSupervisorSnapshot | null;
+	verification(value: VerificationReceiptInput): RunSupervisorSnapshot | null;
 	failure(value: { kind: ToolErrorKind; code: string; signature?: string }): RunSupervisorSnapshot | null;
 	stop(state: Exclude<RunSupervisorState, "RUNNING">, reasonCode: string): RunSupervisorSnapshot | null;
 	finish(value: { stopReason: string; hasText: boolean; checkpointReady: boolean; pendingOperations: boolean; completionVerified: boolean; completionReason?: "STOP_VERIFIED" | "REPLY_ONLY" | "INSPECTION_COMPLETE" | "UNBOUND_REPLY" }): RunSupervisorSnapshot | null;

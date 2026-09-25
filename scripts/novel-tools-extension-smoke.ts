@@ -26,7 +26,7 @@ const expectedTools = [
 	"search_story",
 	"verify_chapter",
 ].sort();
-const expectedCommands = ["novel-plan", "novel-review", "novel-world", "novel-write", "novel-run-status", "novel-context-status", "novel-task"].sort();
+const expectedCommands = ["novel-plan", "novel-review", "novel-world", "novel-write", "novel-run-status", "novel-context-status", "novel-task", "novel-transport-status"].sort();
 
 function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content.find((part) => part.type === "text")?.text ?? "";
@@ -66,7 +66,7 @@ const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "pi-desktop-novel-t
 const extensionPath = path.join(temporaryDirectory, "pi-desktop-novel-tools.ts");
 
 try {
-	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v18/);
+	assert.match(NOVEL_TOOLS_EXTENSION_CONTENT, /pi-desktop-novel-tools-extension\/v25/);
 	assert.doesNotMatch(NOVEL_TOOLS_EXTENSION_CONTENT, /\b(?:writeFile|writeTextFile|appendFile|rename|unlink|rm)\s*\(/);
 	await writeFile(extensionPath, NOVEL_TOOLS_EXTENSION_CONTENT, "utf8");
 

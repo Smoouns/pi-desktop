@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "kind": "e8-joint-explicit-no-tools-design",
+  "executionProfile": "joint-tool-none",
+  "state": "design-requires-new-prepared-manifest",
+  "executable": false,
+  "realModelCallsThisPreparation": 0,
+  "authorization": {
+    "required": true,
+    "granted": false,
+    "proposedTtlHours": 24,
+    "singleUse": true,
+    "reusesHistoricalAllowance": false
+  },
+  "baseline": {
+    "design": "docs/REVIEW_E_LIVE_VALIDATION_PLAN.json",
+    "designSha256": "0c1250046c9545c1d38ad6fc308d445647ea42f5a9b893327bf04f09f291f925",
+    "piSdk": "0.63.1",
+    "priorResultsRemainImmutable": true,
+    "doesNotEstablishOldFailureRootCause": true
+  },
+  "model": {
+    "provider": "gemini-proxy",
+    "id": "gemini-3.8-flash-high",
+    "api": "openai-completions",
+    "workingWindow": 262144,
+    "configuredMaxTokensObserved": 16384,
+    "requestOutputCeiling": 2048,
+    "thinkingLevel": "off",
+    "credentialResolved": false,
+    "upstreamReasoningDisabledVerified": false
+  },
+  "policy": {
+    "namespace": "review-e-joint-tool-none-v1",
+    "taskIds": ["E8-U", "E8-C", "E8-R"],
+    "limits": {
+      "maxHttpRequests": 24,
+      "maxTaskHttpRequests": 8,
+      "maxInputTokens": 65536,
+      "maxInputBytes": 65536,
+      "maxOutputTokens": 2048,
+      "safetyMargin": 4096,
+      "maxTotalInputTokens": 1572864,
+      "maxTotalOutputTokens": 49152,
+      "requestTimeoutMs": 90000,
+      "taskTimeoutMs": 480000,
+      "batchTimeoutMs": 1500000,
+      "maxResponseBytes": 262144,
+      "maxTaskTools": 12
+    }
+  },
+  "toolPolicy": {
+    "u": {"activeTools": [], "toolChoice": "none", "expectedProbeRequests": 2},
+    "c-control": {"activeTools": [], "toolChoice": "none", "expectedProbeRequests": 1},
+    "c-treatment": {"activeTools": [], "toolChoice": "none", "includesNativeSummaries": true, "maxSummaryRequests": 2, "expectedProbeRequests": 3},
+    "r": {"toolChoice": "omitted-unchanged", "expectedProbeRequests": 8, "activeTools": ["read", "read_story_document", "read_observation", "get_context_budget", "get_task_checkpoint", "refresh_task_checkpoint"]},
+    "boundary": "test-worker native provider onPayload, before ordinary audit and final-body reservation",
+    "onlyPayloadKeyAdded": "tool_choice",
+    "summaryToolsField": "omitted-unchanged",
+    "unexpectedRawToolCallsInNoToolsStages": "stop-entire-batch-no-retry"
+  },
+  "inputs": {
+    "fixtures": "tests/harness/review-e-live/fixtures.ts",
+    "unchangedPromptsSeedOracleAndSourceTransition": true,
+    "nativeIndependentControlAndTreatment": true,
+    "summaryQualityRequiresSeparateHumanReview": true,
+    "dynamicSdkDateCwdAndSessionIdsNotByteIdenticalBetweenProbeAndLive": true
+  },
+  "safety": {
+    "publicSyntheticDataOnly": true,
+    "modelWritePaths": [],
+    "readPaths": ["notes/e8-source.md"],
+    "changesGlobalConfig": false,
+    "changesProductionAgentOrTools": false,
+    "changesProductionBudget": false,
+    "changesFrozenEvalImplementations": false,
+    "automaticCompaction": false,
+    "titleGeneration": false,
+    "modelJudge": false,
+    "automaticRetry": false,
+    "unknownOutcomeReplayAllowed": false,
+    "prepareNetworkAllowed": false
+  },
+  "inputReservationBasis": "serialized-utf8-bytes-not-provider-tokenizer",
+  "referencePriceUsdPerMillion": {"input": 0.75, "output": 3.75, "cachedInput": 0.075},
+  "noCacheReservationReferenceUsd": 1.363968,
+  "actualCostUsd": null,
+  "referenceIsMoneyCap": false,
+  "missingCacheOrPositiveReasoningPolicy": "cost-unknown-not-zero"
+}

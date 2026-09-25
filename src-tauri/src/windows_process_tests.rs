@@ -84,7 +84,7 @@ fn isolated_probe(test_name: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("CONSOLE_PROBE_PASS branches=4"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("CONSOLE_PROBE_PASS branches=7"));
 }
 
 struct Fixture {
@@ -97,7 +97,7 @@ impl Fixture {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "pi-console-{}-{nonce}-中文 space",
+            "pi-console-{}-{nonce}-中文 space & (fixture)",
             std::process::id()
         ));
         fs::create_dir(&root).unwrap();
@@ -137,6 +137,7 @@ if (process.argv.includes('--mode')) {{
             "@echo off\r\nnode node_modules/console-probe.js %*\r\n",
         )
         .unwrap();
+        fs::copy(root.join("fallback.cmd"), root.join("fallback legacy.bat")).unwrap();
         Self { root }
     }
 
@@ -148,10 +149,18 @@ if (process.argv.includes('--mode')) {{
             PiProcess::SidecarBinary {
                 path: self.root.join("pi.cmd"),
             },
-            // The console regression is independent of cmd.exe's absolute
-            // batch-path quoting. Resolve this fallback from current_dir.
+            // Keep relative-cwd lookup as well as the absolute-path regressions.
             PiProcess::PathBinary {
                 path: PathBuf::from("fallback.cmd"),
+            },
+            PiProcess::PathBinary {
+                path: self.root.join("fallback.cmd"),
+            },
+            PiProcess::SidecarBinary {
+                path: self.root.join("fallback.cmd"),
+            },
+            PiProcess::PathBinary {
+                path: self.root.join("fallback legacy.bat"),
             },
             PiProcess::DevNode {
                 script: self
@@ -246,7 +255,7 @@ fn rpc_children_are_console_free_and_keep_pipes() {
             input,
         );
     }
-    println!("CONSOLE_PROBE_PASS branches=4");
+    println!("CONSOLE_PROBE_PASS branches=7");
 }
 
 #[test]
@@ -261,7 +270,15 @@ fn cli_children_are_console_free_and_keep_output() {
         cli_path: None,
         pi_path: None,
         cwd: Some(fixture.root.to_string_lossy().into_owned()),
-        args: vec!["--version".into(), "argument with 中文 space".into()],
+        args: vec![
+            "--version".into(),
+            "argument with 中文 space".into(),
+            "".into(),
+            "literal&operator|<input>".into(),
+            "%PI_DESKTOP_CONSOLE_MARKER%".into(),
+            "!literal!^caret (group)".into(),
+            "trailing space \\".into(),
+        ],
         env: Some(HashMap::from([(
             "PI_DESKTOP_CONSOLE_MARKER".into(),
             "fixture-only".into(),
@@ -271,5 +288,5 @@ fn cli_children_are_console_free_and_keep_output() {
         let output = bounded_output(build_plain_command(&pi, &options), None);
         fixture.check(output, json!(options.args), "");
     }
-    println!("CONSOLE_PROBE_PASS branches=4");
+    println!("CONSOLE_PROBE_PASS branches=7");
 }

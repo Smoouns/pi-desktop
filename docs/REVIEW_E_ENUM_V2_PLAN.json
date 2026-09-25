@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 2,
+  "kind": "e8-enumerated-state-offline-design",
+  "executionProfile": "joint-enum-v2",
+  "liveAllowed": false,
+  "liveBlockedReason": "proxy-total-output-and-thinking-budget-semantics-not-yet-controlled",
+  "authorization": {"required": true, "granted": false, "reusesHistoricalAllowance": false},
+  "responseContract": {
+    "id": "E8-STATE-ENUM-V2",
+    "implementation": "tests/harness/review-e-live/response-contract-v2.ts",
+    "allAlternativesVisible": true,
+    "answerKeyVisible": false,
+    "sameQuestionForIndependentControlAndTreatment": true,
+    "questionAddedOnlyAfterNativeCompaction": true,
+    "unknownEnumsRejected": true,
+    "duplicateKeysRejected": true,
+    "extraOrMissingKeysRejected": true,
+    "typedBooleanRequired": true,
+    "aliasesOrPosthocRegradingAllowed": false,
+    "legacyFixturesAndResultsUnchanged": true
+  },
+  "policy": {
+    "namespace": "review-e-enum-v2-offline",
+    "taskIds": ["E8-U", "E8-C", "E8-R"],
+    "limits": {
+      "maxHttpRequests": 24,
+      "maxTaskHttpRequests": 8,
+      "maxInputTokens": 65536,
+      "maxInputBytes": 65536,
+      "maxOutputTokens": 2048,
+      "safetyMargin": 4096,
+      "maxTotalInputTokens": 1572864,
+      "maxTotalOutputTokens": 49152,
+      "requestTimeoutMs": 90000,
+      "taskTimeoutMs": 480000,
+      "batchTimeoutMs": 1500000,
+      "maxResponseBytes": 262144,
+      "maxTaskTools": 12
+    }
+  },
+  "toolPolicy": "same-as-joint-tool-none",
+  "modelOrGlobalConfigurationChanges": false,
+  "modelRequestsInThisStep": 0,
+  "nextLiveRequiresNewProtocolDesignAndApproval": true
+}

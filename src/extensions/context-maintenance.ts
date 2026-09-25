@@ -117,7 +117,36 @@ export function createContextMaintenance() {
 		const pendingNames = new Set(options.pendingToolNames ?? []);
 		const toolResultIndexes: number[] = [];
 		for (let index = 0; index < input.length; index += 1) if (input[index]?.role === "toolResult") toolResultIndexes.push(index);
-		const protectedIndexes = new Set(toolResultIndexes.slice(-keepRecent));
+		const protectedIndexes = new Set(keepRecent ? toolResultIndexes.slice(-keepRecent) : []);
+		const batches: Array<{ index: number; ids: string[]; results: number[] }> = [];
+		const calls = new Map<string, number[]>();
+		for (let index = 0; index < input.length; index++) {
+			const message = input[index];
+			if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+			const ids = message.content.filter((part: any) => part?.type === "toolCall" && typeof part.id === "string").map((part: any) => part.id as string);
+			if (!ids.length) continue;
+			const batch = batches.length;
+			batches.push({ index, ids, results: [] });
+			for (const id of ids) calls.set(id, [...(calls.get(id) ?? []), batch]);
+		}
+		for (const index of toolResultIndexes) {
+			const match = calls.get(input[index].toolCallId);
+			if (!match?.length) { protectedIndexes.add(index); continue; }
+			for (const batch of match) batches[batch].results.push(index);
+		}
+		// The count is a minimum retention floor, not permission to split the
+		// assistant's parallel batch. Ambiguous/incomplete batches remain intact.
+		for (const batch of batches) {
+			const uncertain = new Set(batch.ids).size !== batch.ids.length || batch.results.length !== batch.ids.length
+				|| batch.ids.some(id => calls.get(id)!.length !== 1 || batch.results.filter(i => input[i].toolCallId === id).length !== 1);
+			const protectedBatch = uncertain || batch.results.some(index => {
+				const message = input[index];
+				return index < batch.index || protectedIndexes.has(index) || message.isError === true
+					|| pendingIds.has(message.toolCallId) || pendingNames.has(message.toolName)
+					|| !Array.isArray(message.content) || message.content.some((part: any) => part?.type !== "text" || typeof part.text !== "string");
+			});
+			if (protectedBatch) for (const index of batch.results) protectedIndexes.add(index);
+		}
 		const encoder = new TextEncoder();
 		const trimmed: TrimmedContext["trimmed"] = [];
 		const messages = input.map((message, index) => {
@@ -129,8 +158,15 @@ export function createContextMaintenance() {
 			const originalBytes = encoder.encode(message.content.map((part: any) => part.text).join("\n")).byteLength;
 			if (originalBytes <= maxInlineBytes) return message;
 			trimmed.push({ toolCallId, toolName, originalBytes });
-			const metadata = JSON.stringify({ trimmed: true, toolCallId, toolName, originalBytes });
-			return { ...message, content: [{ type: "text", text: "[旧工具结果已从本次模型上下文裁剪；需要时请重新读取来源] " + metadata }], details: undefined };
+			// Keep only a bounded reference, never copy hidden result payloads into
+			// the tombstone. The production Context hook still validates this ID;
+			// an old/missing observation must become stale, not silently bypass it.
+			const candidate = message.details?.observation?.id;
+			const observationId = typeof candidate === "string" && /^obs_[a-zA-Z0-9_-]{1,128}$/.test(candidate) ? candidate : null;
+			const metadata = JSON.stringify({ trimmed: true, toolCallId, toolName, originalBytes, resultStatus: "historical_success", observationId });
+			const reference = observationId ? " 仅历史引用；请用 read_observation 读取，失效时回源。" : " 未保存可恢复引用，请回源重读。";
+			return { ...message, content: [{ type: "text", text: "[旧工具结果已从本次模型上下文裁剪；需要时请重新读取来源] " + metadata + reference }],
+				details: observationId ? { observation: { id: observationId }, ...(message.details?.observationPage ? { observationPage: true } : {}) } : undefined };
 		});
 		return { messages, trimmed };
 	};

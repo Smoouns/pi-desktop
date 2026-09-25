@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { withLoadedExtension } from "./contracts.js";
 import { withProject, type RunCase } from "./testkit.js";
+import { createContextMaintenance } from "../../src/extensions/context-maintenance.js";
 
 const context = (cwd: string, sessionId = "p2-session") => ({ cwd, sessionManager: {
 	getSessionId: () => sessionId,
@@ -79,5 +80,19 @@ export async function runPhase2ExtensionCases(runCase: RunCase): Promise<void> {
 		const stale: any = await handler({ type: "context", messages }, ctx as never);
 		assert.match(text(stale.messages[2]), /stale_source/);
 		record("context.evidence", { duplicateCompacted: true, pairingPreserved: true, sourceChangeDetected: true });
+	})));
+	await runCase("P2-TRIM observation tombstones cannot bypass stale source checks", record => withProject(async root => withLoadedExtension(root, true, async extension => {
+		const ctx = context(root);
+		const target = path.join(root, "canon/trim-source.md"); await writeFile(target, "PUBLIC_SOURCE ".repeat(200));
+		const result: any = await extension.tools.get("read_story_document")!.definition.execute("old", { path: "canon/trim-source.md" }, undefined, undefined, ctx as never);
+		const messages = [{ role: "assistant", content: [{ type: "toolCall", id: "old", name: "read_story_document", arguments: {} }], timestamp: 0 },
+			{ role: "toolResult", toolCallId: "old", toolName: "read_story_document", ...result, isError: false, timestamp: 0 }];
+		const trimmed = createContextMaintenance().trimOldToolResults(messages, { maxInlineBytes: 512, keepRecentToolResults: 0 });
+		assert.equal(trimmed.trimmed.length, 1); assert.ok(trimmed.messages[1].details.observation.id);
+		await writeFile(target, "SOURCE_CHANGED");
+		const projected: any = await extension.handlers.get("context")![0]({ type: "context", messages: trimmed.messages }, ctx as never);
+		assert.match(text(projected.messages[1]), /stale_source/); assert.doesNotMatch(text(projected.messages[1]), /PUBLIC_SOURCE/);
+		assert.equal(projected.messages[1].toolCallId, "old");
+		record("trim.validation", { sourceChangeDetected: true, projectionNotAuthority: true, minified: true });
 	})));
 }

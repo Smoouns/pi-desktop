@@ -775,6 +775,22 @@ fn discover_node_executable() -> PathBuf {
     PathBuf::from("node.exe")
 }
 
+#[cfg(target_os = "windows")]
+fn build_batch_fallback(path: &Path, cwd: Option<&str>) -> Command {
+    // Let std apply its batch-specific quoting/escaping (and reject arguments
+    // it cannot safely encode). Passing the path as an ordinary cmd.exe /C
+    // argument loses the outer quotes and treats metacharacters as shell code.
+    // Resolve relative shims against the requested cwd, not the GUI app's cwd.
+    let program = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Some(cwd) = cwd {
+        Path::new(cwd).join(path)
+    } else {
+        path.to_path_buf()
+    };
+    Command::new(program)
+}
+
 fn build_command(pi: &PiProcess, options: &RpcStartOptions) -> Command {
     #[cfg(target_os = "windows")]
     if let PiProcess::SidecarBinary { path } | PiProcess::PathBinary { path } = pi {
@@ -790,8 +806,7 @@ fn build_command(pi: &PiProcess, options: &RpcStartOptions) -> Command {
                 cmd.arg(script);
             } else {
                 // Keep a compatible fallback for non-standard batch shims.
-                let mut fallback = Command::new("cmd.exe");
-                fallback.arg("/D").arg("/S").arg("/C").arg(path);
+                let mut fallback = build_batch_fallback(path, Some(&options.cwd));
                 fallback.arg("--mode").arg("rpc");
                 if let Some(ref provider) = options.provider {
                     fallback.arg("--provider").arg(provider);
@@ -2448,8 +2463,7 @@ fn build_plain_command(pi: &PiProcess, options: &PiCliCommandOptions) -> Command
             if let Some(script) = script {
                 cmd.arg(script);
             } else {
-                let mut fallback = Command::new("cmd.exe");
-                fallback.arg("/D").arg("/S").arg("/C").arg(path);
+                let mut fallback = build_batch_fallback(path, options.cwd.as_deref());
                 fallback.args(&options.args);
                 if let Some(cwd) = &options.cwd {
                     fallback.current_dir(cwd);

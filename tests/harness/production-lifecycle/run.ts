@@ -38,6 +38,11 @@ try {
 		["corrupt-latest", ["corrupt-seed", "corrupt-resume"]],
 		["session-role-isolation", ["isolation"]],
 		["source-mutation", ["mutation"]],
+		["runtime-metrics", ["metrics-seed", "metrics-resume"]],
+		["request-source-cache", ["cache-seed", "cache-resume"]],
+		["task-progress", ["progress-seed", "progress-resume"]],
+		["effective-progress-stop", ["effective-stop-seed", "effective-stop-resume"]],
+		["effective-progress-repair", ["effective-repair-seed"]],
 	] as Array<[string, string[]]>) {
 		const work = await setup(name), receipts: any[] = [];
 		const record: any = { name, pass: false, stages: receipts };
@@ -51,7 +56,7 @@ try {
 				const child = spawnSync(process.execPath, [worker, stage, work], { cwd: process.cwd(), env: environment, encoding: "utf8", timeout: 60_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
 				const projectAfter = await treeManifest(path.join(work, "project"));
 				const allowed = new Set(["drafts/candidates/chapters/002.md", "planning/continuity-proposals/002-lifecycle.md", "planning/verifications/002-verification.md",
-					...(stage === "delivery-changed" ? ["planning/chapter-cards/002.md"] : []), ...(["range-resume", "mutation"].includes(stage) ? ["notes/lifecycle-source.md"] : [])]);
+					...(stage === "delivery-changed" ? ["planning/chapter-cards/002.md"] : []), ...(["range-resume", "mutation", "cache-seed"].includes(stage) ? ["notes/lifecycle-source.md"] : [])]);
 				const changed = [...new Set([...Object.keys(projectBefore), ...Object.keys(projectAfter)])].filter(key => projectBefore[key] !== projectAfter[key]);
 				assert.ok(changed.every(key => allowed.has(key)), "PARENT_PROJECT_BOUNDARY_INCLUDING_CRASH");
 				const expectedExit = stage === "lost-seed" ? 86 : stage === "mutation" ? 1 : 0;
@@ -89,4 +94,4 @@ try {
 	console.log(`Production lifecycle evidence: ${path.relative(process.cwd(), output)}`);
 }
 assert.equal(cases.filter(row => !row.pass).length, 0, "Production lifecycle acceptance failed");
-assert.equal(cases.length, 8);
+assert.equal(cases.length, 13);

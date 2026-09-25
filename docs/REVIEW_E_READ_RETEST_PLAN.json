@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "kind": "e8-read-only-retest-design",
+  "executionProfile": "read-upstream",
+  "liveAllowed": true,
+  "authorization": { "required": true, "granted": false, "singleUse": true, "reusesHistoricalAllowance": false },
+  "scope": "Only R in a new isolated project/session; no U/C repeats, summaries, writes to real novels or global configuration changes.",
+  "requestCountReason": "The previous real R trajectory used eight requests and needed another answer after the last tool result. Allow up to twelve without changing its prompts or tool permissions.",
+  "upstreamBudget": { "maxOutputTokens": 65536, "thinkingBudget": 16384, "outputReservation": 81920 },
+  "productionOutputBytesLimit": 65536,
+  "policy": {
+    "namespace": "review-e-read-retest",
+    "taskIds": ["E8-R"],
+    "limits": {
+      "maxHttpRequests": 12, "maxTaskHttpRequests": 12,
+      "maxInputTokens": 65536, "maxInputBytes": 65536,
+      "maxOutputTokens": 81920, "safetyMargin": 4096,
+      "maxTotalInputTokens": 786432, "maxTotalOutputTokens": 983040,
+      "requestTimeoutMs": 90000, "taskTimeoutMs": 480000, "batchTimeoutMs": 540000,
+      "maxResponseBytes": 262144, "maxTaskTools": 12
+    }
+  },
+  "noCacheReservationReferenceUsd": 4.276224,
+  "referenceIsMoneyCap": false,
+  "unknownCacheOrReasoningBillingKeepsCostUnknown": true
+}

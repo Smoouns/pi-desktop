@@ -16,9 +16,17 @@ import { createBudgetDiagnostics } from "./budget-diagnostics.ts";
 import { createContextMaintenance } from "./context-maintenance.ts";
 import { createTaskContracts } from "../harness/task-contract.ts";
 import { createTaskSubmission } from "../novel/task-submission.ts";
+import { createRuntimeMetrics } from "../harness/runtime-metrics.ts";
+import { createRequestSourceCache } from "../harness/request-source-cache.ts";
+import { createTaskTransportLedger } from "../harness/task-transport-ledger.ts";
+import { createTaskTransportRuntime } from "./task-transport-runtime.ts";
+import { createTaskTransportJournal } from "./task-transport-journal.ts";
+import { createUsageCalibration } from "../harness/usage-calibration.ts";
+import { createTaskProgress } from "../harness/task-progress.ts";
+import { createVerificationProgressEvidence } from "../harness/verification-progress.ts";
 
 const NOVEL_TOOLS_EXTENSION_FILE = "pi-desktop-novel-tools.ts";
-const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v18";
+const NOVEL_TOOLS_EXTENSION_MARKER = "pi-desktop-novel-tools-extension/v25";
 const NOVEL_TOOLS_EXTENSION_MARKER_PREFIX = "pi-desktop-novel-tools-extension/";
 
 export const NOVEL_TOOLS_EXTENSION_CONTENT = `/**
@@ -28,12 +36,14 @@ export const NOVEL_TOOLS_EXTENSION_CONTENT = `/**
  * The runtime starts in the active project directory. Every path is resolved
  * beneath that directory and every tool first requires .novel/project.json.
  */
-import { Type } from "@mariozechner/pi-ai";
+import { Type, getApiProvider } from "@mariozechner/pi-ai";
 import { getAgentDir, SettingsManager } from "@mariozechner/pi-coding-agent";
 import { readFile, readdir, stat, lstat } from "node:fs/promises";
+import * as syncFs from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const MAX_FILES = 400;
 const MAX_RESULTS = 30;
@@ -64,13 +74,31 @@ const readDelivery = (${createReadDelivery.toString()})();
 const contextBudget = (${createContextBudget.toString()})({ defaultReadBudget: 16 * 1024 * 1024, defaultOutputBudget: 64 * 1024 });
 const rangeReader = (${createStoryRangeReader.toString()})();
 const createSupervisor = () => (${createRunSupervisor.toString()})({ digest: sha });
+const verificationProgressEvidence = (${createVerificationProgressEvidence.toString()})({ digest: sha });
 const bytes = (text) => Buffer.byteLength(text, "utf8");
 const INLINE_BYTES = 6_000;
 const FILE_BYTES = 1_600_000;
 const requestLedgers = new Map();
+const createMetrics = (${createRuntimeMetrics.toString()});
+const createSourceCache = (${createRequestSourceCache.toString()});
+const transportLedger = (${createTaskTransportLedger.toString()})({ digest: sha });
+const transportJournal = (${createTaskTransportJournal.toString()})({ fs: syncFs, path, digest: sha });
+const usageCalibration = (${createUsageCalibration.toString()})({ digest: sha,
+	estimate: (payload) => contextBudget.checkPayload(payload, Number.MAX_SAFE_INTEGER, 0, 0).ledger.inputEstimate });
+const transportHostKey = Symbol.for("pi-desktop-task-transport/v1");
+const transportHost = globalThis[transportHostKey] ??= (${createTaskTransportRuntime.toString()})({
+	storage: new AsyncLocalStorage(), getProvider: getApiProvider,
+	getFetch: () => globalThis.fetch, setFetch: (value) => { globalThis.fetch = value; },
+});
+let appendTransport;
+const priorRunMetrics = new Map();
 const budgetDiagnostics = (${createBudgetDiagnostics.toString()})();
 const maintenance = (${createContextMaintenance.toString()})();
 const tasks = (${createTaskContracts.toString()})({ digest: sha, pathKey: (value) => process.platform === "win32" ? value.toLowerCase() : value });
+const progressLog = (${createTaskProgress.toString()})({ digest: sha });
+const progressFailures = new Set();
+let progressDisabled = false;
+let appendProgress;
 const taskSubmission = (${createTaskSubmission.toString()})();
 const taskPersistenceFailures = new Set();
 let contextGeneration = 0;
@@ -102,6 +130,59 @@ function taskRecord(ctx) {
 	if (taskPersistenceFailures.has(JSON.stringify(scope))) throw new Error("任务合同持久化失败；不能继续宣告交付。");
 	return tasks.latest(ctx.sessionManager?.getBranch?.() ?? [], scope);
 }
+function taskTransportOwner(ctx) {
+	const task = taskRecord(ctx);
+	return task ? { ...supervisorBaseScope(ctx), taskId: task.taskId } : null;
+}
+function taskTransportMeter(ctx) {
+	const owner = taskTransportOwner(ctx);
+	if (!owner) return null;
+	const existing = transportLedger.current(owner);
+	if (existing) return existing;
+	const sessionFile = ctx.sessionManager?.getSessionFile?.();
+	const journal = transportJournal.open(sessionFile, owner);
+	const branch = ctx.sessionManager?.getBranch?.() ?? [];
+	if (!journal.record && branch.some((entry) => entry?.type === "custom" && entry.customType === transportLedger.customType && JSON.stringify(entry.data?.owner) === JSON.stringify(owner))) throw new Error("TRANSPORT_SIDECAR_MISSING");
+	// Task totals include requests on abandoned branches of this same task;
+	// navigating a tree must not roll back costs already incurred.
+	return transportLedger.open(owner, journal.record ? [{ type: "custom", customType: transportLedger.customType, data: journal.record }] : [],
+		(type, data) => { journal.append(data); appendTransport(type, data); },
+		() => ctx.sessionManager?.getSessionFile?.() === sessionFile && JSON.stringify(taskTransportOwner(ctx)) === JSON.stringify(owner));
+}
+function taskTransportBinding(ctx, run) {
+	const meter = taskTransportMeter(ctx);
+	if (!meter || !ctx.model) return null;
+	const owner = taskTransportOwner(ctx);
+	const branch = ctx.sessionManager?.getBranch?.() ?? [];
+	const boundary = [...branch].reverse().find((entry) => entry.type === "compaction" || entry.type === "branch_summary")?.id ?? null;
+	const projection = { generation: contextGeneration, pressureTrim, boundary, version: "novel-context-v25" };
+	return { meter, model: { api: ctx.model.api, provider: ctx.model.provider, id: ctx.model.id }, signal: run.controller.signal,
+		assertCurrent: () => { assertRun(run); meter.assertCurrent(); },
+		diagnostics: {
+			request: (body, model, endpoint, kind) => {
+				try { return usageCalibration.start({ owner, model, endpoint, kind, body, projection }); }
+				catch { usageCalibration.invalidate("unsupported_request"); return null; }
+			},
+			response: (ticket, result) => usageCalibration.finish(ticket, result),
+		},
+		audit: (body, model) => {
+			const payload = JSON.parse(body);
+			const output = payload.max_completion_tokens ?? payload.max_tokens ?? payload.generationConfig?.maxOutputTokens ?? model.maxTokens ?? 4096;
+			const check = contextBudget.checkPayload(payload, model.contextWindow, output, 4096);
+			// Extra serialized bytes (e.g. whitespace/escaping added by a client)
+			// are conservatively charged too; do not trust the earlier payload hook.
+			const extra = Math.max(0, bytes(body) - check.ledger.rawInputBytes);
+			return { allowed: check.allowed && check.ledger.total + extra <= check.ledger.limit, reason: check.reason };
+		},
+		blocked: (reason) => {
+			if (activeRun !== run) return;
+			if (reason === "TRANSPORT_INPUT_BUDGET" || reason === "TRANSPORT_REQUEST_BYTES_LIMIT") {
+				ctx.ui?.notify?.("最终发送内容超过预算，本次请求已在发送前阻止（含摘要与重试）。请减少上下文。", "warning");
+				ctx?.abort?.();
+			}
+		},
+	};
+}
 function persistTask(ctx, task) {
 	try { piTaskAppend(task); }
 	catch (error) { taskPersistenceFailures.add(JSON.stringify(supervisorBaseScope(ctx))); throw error; }
@@ -114,10 +195,76 @@ function taskProgress(run, change) {
 	const next = change(task);
 	if (next.id !== task.id) persistTask(run.ctx, next);
 }
+function progressView(ctx, invalidPaths = []) {
+	try {
+		const owner = taskTransportOwner(ctx);
+		if (!owner) return progressLog.view(null);
+		if (progressDisabled || progressFailures.has(sha(JSON.stringify(owner)))) return progressLog.view(null, [], true);
+		return progressLog.view(progressLog.latest(ctx.sessionManager?.getBranch?.() ?? [], owner), invalidPaths);
+	} catch { return progressLog.view(null, [], true); }
+}
+function progressUnavailable(run) {
+	if (activeRun !== run || run.controller.signal.aborted) return;
+	try {
+		const owner = taskTransportOwner(run.ctx);
+		if (owner && owner.taskId === run.taskId) progressFailures.add(sha(JSON.stringify(owner)));
+	} catch { progressDisabled = true; }
+	if (progressFailures.size >= 64) progressDisabled = true;
+}
+function recordProgress(run, id, tool, details) {
+	// Optional navigation receipts must neither resurrect a run nor turn an
+	// older task's late result into the new task's history.
+	if (activeRun !== run || run.controller.signal.aborted || !run.taskId) return;
+	try {
+		const owner = taskTransportOwner(run.ctx);
+		if (!owner || owner.taskId !== run.taskId || owner.projectId !== run.scope.projectId || owner.sessionId !== run.scope.sessionId || owner.role !== run.scope.role) return;
+		if (progressDisabled || progressFailures.has(sha(JSON.stringify(owner)))) return;
+		const previous = progressLog.latest(run.ctx.sessionManager?.getBranch?.() ?? [], owner);
+		const item = { actionId: sha(JSON.stringify([run.scope.runId, id])), tool, attemptHash: sha(JSON.stringify([tool, id])),
+			target: null, artifactSha256: null, sources: [], omittedSources: 0, report: null, observationId: null, full: null, error: null, diagnosticCodes: [], ...details };
+		const next = progressLog.append(previous, owner, item);
+		if (next.id !== previous?.id) appendProgress(next);
+	} catch {
+		// Do not display an older success after an optional record failed to
+		// persist. Core checkpoint, completion and write gates remain untouched.
+		progressUnavailable(run);
+	}
+}
+function recordReadProgress(run, id, tool, params, result) {
+	try {
+		if (tool === "verify_chapter" || tool === "get_context_budget" || tool === "get_run_status" || tool.endsWith("_task_checkpoint")) return;
+		if (!result.details?.observation && !result.details?.readDelivery) return;
+		const refs = result.details?.readDelivery?.schemaVersion === 1 ? result.details.readDelivery.sourceRefs ?? [] : [];
+		const sources = refs.slice(0, 4).map(ref => ({ path: ref.path, sha256: ref.sha256, ...(ref.startLine === undefined ? {} : { startLine: ref.startLine, endLine: ref.endLine }) }));
+		recordProgress(run, id, tool, { kind: "read", outcome: "returned", attemptHash: sha(JSON.stringify(params) ?? "null"), sources,
+			omittedSources: Math.max(0, refs.length - sources.length), target: sources[0]?.path ?? null,
+			observationId: result.details?.observation?.id ?? null });
+	} catch { progressUnavailable(run); }
+}
+function recordFailureProgress(run, id, tool, params, error, outcome = "failed") {
+	try {
+		const kinds = ["transient", "invalid_input", "stale_source", "permission", "precondition", "validation", "cancelled", "unknown_outcome", "fatal"];
+		recordProgress(run, id, tool, { kind: "failure", outcome: error.kind === "unknown_outcome" ? "unknown" : outcome,
+			attemptHash: sha(JSON.stringify(params) ?? "null"), target: progressLog.safeTarget(params?.path),
+			error: { kind: kinds.includes(error.kind) ? error.kind : "fatal", code: /^[A-Z0-9_:-]{1,80}$/.test(error.code) ? error.code : "UNCLASSIFIED",
+				fingerprint: sha(JSON.stringify([error.kind, error.code, error.message ?? ""])) } });
+	} catch { progressUnavailable(run); }
+}
+function progressText(ctx) {
+	const progress = progressView(ctx);
+	if (progress.status === "unavailable") return "\\n\\n历史进展记录不可用；不回退显示旧成功，请以检查点与当前文件为准。";
+	if (!progress.items.length) return "\\n\\n暂无已记录的历史进展（不代表此前没有操作）。";
+	const labels = { returned: "工具返回", written: "曾确认写入", passed: "曾机械通过", failed: "失败", unknown: "结果未知", blocked: "已阻止" };
+	return "\\n\\n最近历史进展（非当前事实，不代表验收；仅部分记录）：\\n" + progress.items.slice(-5).map(item =>
+		labels[item.outcome] + " · " + item.tool + (item.target ? " · " + item.target : "")
+		+ (item.error ? " · " + item.error.code : "") + (item.diagnosticCodes.length ? " · " + item.diagnosticCodes.join("、") : "")
+		+ "\\n" + item.nextCheck).join("\\n")
+		+ (progress.droppedItems ? "\\n容量上限已省略 " + progress.droppedItems + " 条历史记录。" : "");
+}
 function statusText(snapshot) {
 	if (!snapshot) return "当前没有受监管的运行。提交一条新请求后开始。";
 	const labels = { RUNNING: "运行中", BLOCKED_USER: "等待用户处理", BLOCKED_PREREQUISITE: "前置条件不足", NO_PROGRESS: "无有效进展，已停止", CANCELLED: "已取消", FAILED: "运行失败", COMPLETED_CANDIDATE: "候选任务已完成" };
-	const guidance = { CORRUPT_RUN_STATUS: "运行记录损坏；请提交一条明确的新请求开始新一轮。", UNCHANGED_VERIFICATION: "正文、验证错误和新证据连续三次未变化；请人工调整策略后开始新一轮。", REPEATED_REPAIR_FAILURE: "同一修复错误重复出现；请检查参数或前置资料。", COMPLETION_NOT_VERIFIED: "本轮正常结束，但写作产物尚无当前版本的完整机械验证。", PENDING_OPERATIONS: "存在结果未确定的写入；请先读取目标文件核对，不要重放。", CHECKPOINT_NOT_READY: "检查点仍需重新验证；请重读失效来源并刷新检查点。" };
+	const guidance = { CORRUPT_RUN_STATUS: "运行记录损坏；请提交一条明确的新请求开始新一轮。", UNCHANGED_VERIFICATION: "同一验证对象在相同依赖下，同类失败已三次未见机械改善；无关读取或仅改动文件不重置计数。请调整修复策略后明确开始新一轮。", REPEATED_REPAIR_FAILURE: "同一修复错误重复出现；请检查参数或前置资料。", COMPLETION_NOT_VERIFIED: "本轮正常结束，但写作产物尚无当前版本的完整机械验证。", PENDING_OPERATIONS: "存在结果未确定的写入；请先读取目标文件核对，不要重放。", CHECKPOINT_NOT_READY: "检查点仍需重新验证；请重读失效来源并刷新检查点。" };
 	const diagnostic = diagnosticFor(snapshot);
 	const budgetGuidance = diagnostic ? budgetDiagnostics.format(diagnostic)
 		: snapshot.reasonCode === "CONTEXT_BUDGET" ? "旧记录没有保存具体预算失败原因；请更新扩展后重试一次以获取诊断，不能据此判断为历史过长。"
@@ -140,6 +287,7 @@ function sameRunScope(left, right) {
 
 function resetContextMaintenance() {
 	contextGeneration++;
+	usageCalibration.reset();
 	maintenanceBusy = false;
 	pressureTrim = false;
 	autoCompactionState = "idle";
@@ -234,7 +382,14 @@ function classifyError(error) {
 }
 function endRun() {
 	activeRun?.controller.abort();
-	if (activeRun) contextBudget.endRun(activeRun.scope);
+	if (activeRun) {
+		const key = budgetOwner(activeRun.scope);
+		if (!priorRunMetrics.has(key) && priorRunMetrics.size >= 64) priorRunMetrics.delete(priorRunMetrics.keys().next().value);
+		// Retain bounded counters, not the run/controller/payloads. A cancelled
+		// read may close later; attribute its bytes to this old run, never the new one.
+		priorRunMetrics.set(key, { scope: { ...activeRun.scope }, metrics: activeRun.metrics });
+		contextBudget.endRun(activeRun.scope);
+	}
 	activeRun = null;
 	epoch++;
 }
@@ -246,7 +401,7 @@ function currentRun(ctx, desiredScope = null) {
 	if (!activeRun || activeRun.scope.projectId !== projectId || activeRun.scope.sessionId !== sessionId || activeRun.scope.role !== role) {
 		endRun();
 		const scope = desiredScope && desiredScope.projectId === projectId && desiredScope.sessionId === sessionId && desiredScope.role === role ? desiredScope : { projectId, sessionId, runId: randomUUID(), generation: epoch, role };
-		activeRun = { scope, controller: new AbortController(), builtinReads: new Map(), builtinCalls: new Set(), contextOutputs: new Map() };
+		activeRun = { scope, controller: new AbortController(), builtinReads: new Map(), builtinCalls: new Set(), contextOutputs: new Map(), outputReceipts: new Set(), metrics: createMetrics() };
 		contextBudget.beginRun(activeRun.scope);
 	}
 	activeRun.ctx = ctx;
@@ -284,6 +439,7 @@ function registerReliableTool(pi, definition) {
 		if (definition.name === "verify_chapter" && pendingOperation) await pendingOperation;
 		const metadata = { scope: { ...run.scope }, attempts: execution.attempts, actions: execution.actions };
 		if (!execution.result.ok) {
+			recordFailureProgress(run, id, definition.name, params, execution.result.error);
 			if (supervisor.snapshot()?.scope.runId === run.scope.runId && !(definition.name === "verify_chapter" && execution.result.error.kind === "validation")) supervisor.failure(execution.result.error);
 			let result = failureResult(execution.result.error, metadata);
 			if (activeRun === run && !run.controller.signal.aborted && !run.readBudgetFailure) {
@@ -301,6 +457,7 @@ function registerReliableTool(pi, definition) {
 			throw Object.assign(new Error(result.content[0].text + "\\n<tool-error>" + JSON.stringify(result.details.harness) + "</tool-error>"), { toolResult: result });
 		}
 		const value = execution.result.value;
+		recordReadProgress(run, id, definition.name, params, value);
 		return { ...value, details: { ...value.details, harness: { ok: true, ...metadata } } };
 	} });
 }
@@ -315,7 +472,7 @@ function memoryIO(root, run = activeRun) {
 			const info = await lstat(target);
 			if (!info.isFile() || info.size > 1_600_000) throw new Error("文件超过记忆索引读取范围。");
 			if (run) chargeRead(run, info.size);
-			const text = await readFile(target, "utf8");
+			const text = (await measuredRead(target, "memory", run)).toString("utf8");
 			if (run) assertRun(run);
 			if (run && bytes(text) > info.size) chargeRead(run, bytes(text) - info.size);
 			if (bytes(text) > FILE_BYTES) throw new Error("读取期间文件超过记忆索引范围。");
@@ -391,11 +548,53 @@ function chargeRead(run, amount) {
 		throw run.readBudgetFailure;
 	}
 }
+async function measuredRead(target, kind, run) {
+	// File-read API bytes, not OS disk traffic. No extra reads or budget changes.
+	// Capture the owning run across awaits; late IO never increments a new run.
+	const identity = sha(process.platform === "win32" ? target.toLowerCase() : target);
+	try {
+		const raw = await readFile(target);
+		run?.metrics.read(kind, identity, raw.length);
+		return raw;
+	} catch (error) { run?.metrics.read(kind, identity, null); throw error; }
+}
+async function readSourceVersion(root, relative, kind, run, sourceCache) {
+	const budgetRun = run.checkpointParent ?? run;
+	assertCheckpointRun(run);
+	if (budgetRun.readBudgetFailure) throw budgetRun.readBudgetFailure;
+	// Even a cache hit must pass the current path/link/type/size checks. Stat is
+	// only a same-invocation invalidation hint; SHA remains the version authority.
+	const target = await secureStoryPath(root, relative);
+	const info = await stat(target);
+	assertCheckpointRun(run);
+	if (!info.isFile() || info.size > FILE_BYTES) throw toolError("stale_source", kind === "observationValidation" ? "STALE_OBSERVATION" : "SOURCE_TOO_LARGE", "来源大小或类型变化，请重新读取。");
+	const key = sha(process.platform === "win32" ? target.toLowerCase() : target);
+	const stampOf = (value) => sha(JSON.stringify([value.dev, value.ino, value.mode, value.size, value.mtimeMs, value.ctimeMs, value.birthtimeMs]));
+	const stamp = stampOf(info);
+	const cached = sourceCache?.get(key, stamp);
+	if (cached) return cached;
+	chargeRead(budgetRun, info.size);
+	const raw = await measuredRead(target, kind, budgetRun);
+	assertCheckpointRun(run);
+	if (raw.length > info.size) chargeRead(budgetRun, raw.length - info.size);
+	if (raw.length > FILE_BYTES) throw toolError("stale_source", "SOURCE_TOO_LARGE", "读取期间来源超过大小上限，请重新读取。");
+	const version = { sha256: sha(raw), totalLines: raw.toString("utf8").split("\\n").length, sourceBytes: raw.length };
+	if (sourceCache) {
+		const after = await stat(await secureStoryPath(root, relative));
+		assertCheckpointRun(run);
+		if (stampOf(after) !== stamp) throw toolError("stale_source", "SOURCE_CHANGED_DURING_READ", "来源在读取期间变化，请重新读取。");
+		sourceCache.put(key, stamp, version);
+	}
+	return version;
+}
 function observationReference(item, preview = false) {
 	return "[observation " + item.id + "] 工具观察，不等于 Canon。" +
 		" 完整结果未内联；使用 read_observation(id, start, limit) 分页读取，或 read_story_document 按行/section 重读。" +
 		(item.sourceRefs.length ? "\\n来源：" + JSON.stringify(item.sourceRefs) : "\\n无文件版本来源；仅代表该次工具运行。") +
 		(preview ? "\\n预览（不是完整结果）：\\n" + item.preview : "");
+}
+function outputReceiptKey(toolName, toolCallId, content) {
+	return sha(JSON.stringify([toolName, toolCallId, content]));
 }
 function boundToolOutput(value, toolName, toolCallId, run) {
 	assertRun(run);
@@ -418,8 +617,13 @@ function boundToolOutput(value, toolName, toolCallId, run) {
 		result = { ...value, content: offloaded ? textResult(observationReference(observation, true)).content : value.content,
 			details: { ...(offloaded ? { kind: details.kind, paths: details.paths, path: details.path, sources: details.sources, sourceVersion: details.sourceVersion, truncation: details.truncation ? { ...details.truncation, content: undefined } : undefined } : details), observation, observedRun: { ...run.scope }, offloaded } };
 	}
+	const receiptKey = outputReceiptKey(toolName, toolCallId, result.content);
+	if (!run.outputReceipts.has(receiptKey) && run.outputReceipts.size >= 512) throw toolError("precondition", "OUTPUT_CAPACITY", "本轮工具结果过多，请压缩或开启新会话。");
+	// Every actual tool result is charged. Only subsequent context projections
+	// can reuse this host-owned receipt; persisted metadata is never proof.
 	const charged = contextBudget.chargeOutput(run.scope, bytes(JSON.stringify(result.content)));
 	if (!charged.allowed) throw toolError("precondition", "OUTPUT_BUDGET", "本轮工具结果累计预算已用尽；请缩小任务范围。观察记录仍可在后续运行按 ID 重读。");
+	run.outputReceipts.add(receiptKey);
 	if (!value.isError && window) {
 		const generation = JSON.stringify([run.scope.runId, checkpoints.deliveryEpoch(run.ctx, run)]);
 		const receipt = readDelivery.deliver(window.id, generation, window.start, window.end);
@@ -435,23 +639,21 @@ function boundToolOutput(value, toolName, toolCallId, run) {
 }
 function budgetOwner(scope) { return JSON.stringify([scope.projectId, scope.sessionId, scope.role]); }
 function rememberLedger(scope, ledger) {
+	if (activeRun && sameRunScope(activeRun.scope, scope)) {
+		if (ledger.providerAudit) activeRun.metrics.plan("provider-audit", ledger.providerAudit);
+		else activeRun.metrics.plan("context-preflight", ledger);
+	}
 	const key = budgetOwner(scope);
 	if (!requestLedgers.has(key) && requestLedgers.size >= 64) requestLedgers.delete(requestLedgers.keys().next().value);
 	requestLedgers.set(key, { ...ledger, scope: { ...scope } });
 }
-async function validateObservation(id, ctx, run) {
+async function validateObservation(id, ctx, run, sourceCache) {
 	const item = observations.peek({ id, scope: run.scope });
 	let snapshot;
 	for (const source of item.sourceRefs) {
-		const target = await secureStoryPath(projectRoot(ctx), source.path);
-		const info = await stat(target);
-		if (!info.isFile() || info.size > FILE_BYTES) throw toolError("stale_source", "STALE_OBSERVATION", "来源大小或类型变化，请重新读取。");
-		chargeRead(run, info.size);
-		const raw = await readFile(target);
-		assertRun(run);
-		if (raw.length > info.size) chargeRead(run, raw.length - info.size);
-		if (raw.length > FILE_BYTES) throw toolError("stale_source", "STALE_OBSERVATION", "读取期间来源超过大小上限，请重新读取。");
-		if (sha(raw) !== source.sha256) throw toolError("stale_source", "STALE_OBSERVATION", "来源内容已变化，请重新读取，不可引用旧观察。");
+		run.metrics.reference("observationSources");
+		const version = await readSourceVersion(projectRoot(ctx), source.path, "observationValidation", run, sourceCache);
+		if (version.sha256 !== source.sha256) throw toolError("stale_source", "STALE_OBSERVATION", "来源内容已变化，请重新读取，不可引用旧观察。");
 		if (source.memoryId) {
 			snapshot ??= await novelMemory.snapshot(projectRoot(ctx), memoryIO(projectRoot(ctx), run));
 			assertRun(run);
@@ -557,7 +759,7 @@ async function readStoryFile(root, relativePath, selector = {}, run = activeRun)
 	if (!info.isFile()) throw toolError("precondition", "NOT_A_FILE", "The requested story path is not a file.");
 	if (info.size > FILE_BYTES) throw toolError("precondition", "SOURCE_TOO_LARGE", "文件超过 1.6 MB 的读取上限，请先拆分文件。");
 	if (run) chargeRead(run, info.size);
-	const raw = await readFile(target);
+	const raw = await measuredRead(target, "document", run);
 	if (run) assertRun(run);
 	if (run && raw.length > info.size) chargeRead(run, raw.length - info.size);
 	if (raw.length > FILE_BYTES) throw toolError("precondition", "SOURCE_TOO_LARGE", "读取期间文件超过大小上限。");
@@ -700,7 +902,7 @@ async function fileVersion(root, relativePath) {
 		if (run) assertRun(run);
 		if (!info.isFile() || info.size > FILE_BYTES) throw toolError("precondition", "FINGERPRINT_LIMIT", "目标文件超出有界指纹读取范围。");
 		if (run) chargeRead(run, info.size);
-		const raw = await readFile(target);
+		const raw = await measuredRead(target, "fingerprint", run);
 		if (run) assertRun(run);
 		if (raw.length > FILE_BYTES) throw toolError("precondition", "FINGERPRINT_LIMIT", "指纹读取期间目标文件超出范围。");
 		if (run && raw.length > info.size) chargeRead(run, raw.length - info.size);
@@ -717,7 +919,7 @@ async function verifierReceipt(root, reportTarget, callId, run) {
 	assertRun(run);
 	if (!reportInfo.isFile() || reportInfo.size > FILE_BYTES) throw toolError("precondition", "VERIFIER_METADATA_INVALID", "验证报告超过安全读取上限。");
 	chargeRead(run, reportInfo.size);
-	const reportRaw = await readFile(target);
+	const reportRaw = await measuredRead(target, "verifierReceipt", run);
 	assertRun(run);
 	if (reportRaw.length > FILE_BYTES) throw toolError("precondition", "VERIFIER_METADATA_INVALID", "验证报告读取期间超过安全上限。");
 	if (reportRaw.length > reportInfo.size) chargeRead(run, reportRaw.length - reportInfo.size);
@@ -747,7 +949,12 @@ async function verifierReceipt(root, reportTarget, callId, run) {
 	const failureSection = raw.match(/^## 失败原因\\s*$([\\s\\S]*?)(?=^## |(?![\\s\\S]))/m)?.[1] ?? "";
 	const failures = [...failureSection.matchAll(/^- \\[([^\\]]+)\\] (.+)$/gm)].map((match) => "[" + match[1].trim() + "] " + match[2].trim()).sort();
 	const passed = status === "PASS" || status === "PASS_WITH_WARNINGS";
-	const receipt = { callId, subject: subjectPath, artifactSha256: sourceSha.toLowerCase(), errorDigest: failures.length ? sha(JSON.stringify(failures)) : null, passed, full: mode === "full" };
+	if (!["PASS", "PASS_WITH_WARNINGS", "FAIL"].includes(status)) throw toolError("precondition", "VERIFIER_METADATA_INVALID", "验证报告状态无效。");
+	// Only the verified dependency set can open a new progress track. Arbitrary
+	// read delivery, body hash churn and E5 historical receipts cannot do so.
+	const progressEvidence = verificationProgressEvidence({ subject: subjectPath, mode, passed, failures,
+		sources: sources.map(item => ({ path: process.platform === "win32" ? item.path.toLowerCase() : item.path, sha256: item.sha256.toLowerCase() })) });
+	const receipt = { callId, subject: subjectPath, artifactSha256: sourceSha.toLowerCase(), errorDigest: failures.length ? sha(JSON.stringify(failures)) : null, passed, full: mode === "full", ...progressEvidence };
 	supervisor.artifact(subjectPath, sourceSha.toLowerCase());
 	for (const item of sources) { const evidencePath = process.platform === "win32" ? item.path.toLowerCase() : item.path; if (!evidencePath.startsWith("planning/verifications/")) supervisor.evidence(JSON.stringify([evidencePath, item.sha256.toLowerCase(), null, null])); }
 	checkpoints.observe(run.ctx, run, sources.map((item) => ({ path: process.platform === "win32" ? item.path.toLowerCase() : item.path, sha256: item.sha256.toLowerCase(), authority: "reference", temporal: "unspecified" })), "verification:" + callId);
@@ -756,6 +963,10 @@ async function verifierReceipt(root, reportTarget, callId, run) {
 	run.verificationSources ??= new Map();
 	run.verificationSources.set(subjectPath, sources.map((item) => ({ path: process.platform === "win32" ? item.path.toLowerCase() : item.path, sha256: item.sha256.toLowerCase() })));
 	taskProgress(run, (task) => tasks.verification(task, subjectPath, { chapter: field("chapter"), passed, full: mode === "full", sha256: sourceSha.toLowerCase(), sources: run.verificationSources.get(subjectPath) }));
+	const diagnosticCodes = [...new Set(failures.map(item => item.slice(1, item.indexOf("]"))).filter(code => /^[A-Z0-9_:-]{1,80}$/.test(code)))].slice(0, 8);
+	recordProgress(run, callId, "verify_chapter", { kind: "verification", outcome: passed ? "passed" : "failed", target: subjectPath,
+		artifactSha256: sourceSha.toLowerCase(), full: mode === "full", report: { path: reportTarget, sha256: sha(reportRaw) }, diagnosticCodes,
+		sources: run.verificationSources.get(subjectPath).slice(0, 4), omittedSources: Math.max(0, sources.length - 4) });
 	return receipt;
 }
 
@@ -770,6 +981,8 @@ function expectedEdit(text, input) {
 
 export default function (pi) {
 	piTaskAppend = (task) => pi.appendEntry("pi-desktop-task-contract/v1", task);
+	appendProgress = (record) => pi.appendEntry(progressLog.customType, record);
+	appendTransport = (type, data) => pi.appendEntry(type, data);
 	appendBudgetDiagnostic = (diagnostic) => pi.appendEntry("pi-desktop-budget-diagnostic/v1", diagnostic);
 	supervisor = (${createSupervisorRuntime.toString()})({
 		createSupervisor,
@@ -787,22 +1000,20 @@ export default function (pi) {
 		async resolve(ref, ctx, run, cache) {
 			assertCheckpointRun(run);
 			const budgetRun = run.checkpointParent ?? run;
+			budgetRun.metrics.reference("checkpointSources");
 			const root = projectRoot(ctx);
 			const key = "file:" + ref.path;
-			if (!cache.has(key)) {
+			let version;
+			if (run.contextSources) {
+				// Context-only wrapper, never retained by activeRun or used by writeGate.
+				try { version = await readSourceVersion(root, ref.path, "checkpointValidation", run, run.contextSources); }
+				catch (error) { if (error?.code === "ENOENT") version = null; else throw error; }
+			} else if (!cache.has(key)) {
 				try {
-					const target = await secureStoryPath(root, ref.path);
-					const info = await stat(target);
-					if (!info.isFile() || info.size > FILE_BYTES) throw toolError("stale_source", "SOURCE_TOO_LARGE", "检查点来源超过读取范围。");
-					chargeRead(budgetRun, info.size);
-					const raw = await readFile(target);
-					assertCheckpointRun(run);
-					if (raw.length > info.size) chargeRead(budgetRun, raw.length - info.size);
-					if (raw.length > FILE_BYTES) throw new Error("Source grew beyond read limit");
-					cache.set(key, { sha256: sha(raw), totalLines: raw.toString("utf8").split("\\n").length });
+					cache.set(key, await readSourceVersion(root, ref.path, "checkpointValidation", run));
 				} catch (error) { if (error?.code === "ENOENT") cache.set(key, null); else throw error; }
 			}
-			const { sha256 = null, totalLines } = cache.get(key) ?? {};
+			const { sha256 = null, totalLines } = (run.contextSources ? version : cache.get(key)) ?? {};
 			if (ref.memoryId && sha256 === ref.sha256) {
 				if (!cache.has("memory")) cache.set("memory", await novelMemory.snapshot(root, memoryIO(root, budgetRun)));
 				assertCheckpointRun(run);
@@ -836,7 +1047,7 @@ export default function (pi) {
 			const systemPrompt = ctx.getSystemPrompt();
 			if (typeof systemPrompt !== "string") throw new Error(reason);
 			return contextBudget.planRequest({ systemPrompt, tools, messages,
-				messageKinds: messages.map((message) => ["novel-task-checkpoint", "novel-task-contract"].includes(message.customType) ? "checkpoint" : message.role === "toolResult" ? "observation_preview" : message.customType === "novel-request-context" ? "new_evidence" : "history"),
+				messageKinds: messages.map((message) => ["novel-task-checkpoint", "novel-task-contract", "novel-task-progress"].includes(message.customType) ? "checkpoint" : message.role === "toolResult" ? "observation_preview" : message.customType === "novel-request-context" ? "new_evidence" : "history"),
 				contextWindow: ctx.model.contextWindow, outputReserve: ctx.model.maxTokens ?? 4096, safetyMargin: 4096 });
 		} catch { return { allowed: false, reason, ledger: null }; }
 	};
@@ -850,6 +1061,8 @@ export default function (pi) {
 		if (checkpoint) messages.push({ role: "custom", customType: "novel-task-checkpoint", content: JSON.stringify(maintenance.projectCheckpoint(checkpoint, messages)), timestamp: 0 });
 		const task = taskRecord(ctx);
 		if (task) messages.push({ role: "custom", customType: "novel-task-contract", content: JSON.stringify(task), timestamp: 0 });
+		const progress = progressView(ctx);
+		if (progress.status !== "empty") messages.push({ role: "custom", customType: "novel-task-progress", content: JSON.stringify(progress), timestamp: 0 });
 		messages.push({ role: "user", content: [{ type: "text", text }, ...images], timestamp: 0 });
 		const initial = planMessages(ctx, messages);
 		const needsTrim = pressureTrim || initial.reason === "model_input_budget_exceeded" || (initial.allowed && initial.ledger.total > initial.ledger.limit * 0.85);
@@ -957,9 +1170,9 @@ export default function (pi) {
 			return { action: "handled" };
 		}
 	});
-	for (const event of ["session_switch", "session_fork", "session_tree"]) pi.on(event, async (_event, ctx) => { resetContextMaintenance(); endRun(); checkpoints.reset(); await restoreSupervisor(ctx); });
+	for (const event of ["session_switch", "session_fork", "session_tree"]) pi.on(event, async (_event, ctx) => { resetContextMaintenance(); endRun(); checkpoints.reset(); transportLedger.reset(); await restoreSupervisor(ctx); });
 	pi.on("model_select", async (_event, ctx) => { resetContextMaintenance(); await inspectCapacity(ctx); });
-	pi.on("session_shutdown", async () => { resetContextMaintenance(); endRun(); checkpoints.reset(); });
+	pi.on("session_shutdown", async () => { resetContextMaintenance(); endRun(); checkpoints.reset(); transportLedger.reset(); });
 	pi.on("agent_start", (_event, ctx) => {
 		const pending = (async () => {
 			try { await loadProject(ctx); } catch { supervisor.disable(); endRun(); showSupervisorStatus(ctx, null); return; }
@@ -980,6 +1193,7 @@ export default function (pi) {
 		resetContextMaintenance();
 		endRun();
 		checkpoints.reset();
+		transportLedger.reset();
 		await restoreSupervisor(ctx);
 		await inspectCapacity(ctx);
 		const role = process.env.PI_DESKTOP_NOVEL_ROLE;
@@ -996,6 +1210,7 @@ export default function (pi) {
 			if (event.signal?.aborted) return { cancel: true };
 			const checkpoint = checkpoints.capture(ctx, run, "before_compact");
 			if (pendingToolNames(checkpoint).length) throw new Error("存在未确定结果的写入，请先核对产物，不可自动重试。");
+			usageCalibration.invalidate("compaction_started");
 			// Pi owns compaction. Its preparation object is shared with the native
 			// compactor in the pinned SDK: replace only tool payloads, preserving
 			// message order, tool pairs and every user instruction. Do not return a
@@ -1004,10 +1219,25 @@ export default function (pi) {
 				if (!Array.isArray(event.preparation?.[field])) continue;
 				event.preparation[field] = maintenance.trimOldToolResults(event.preparation[field], { maxInlineBytes: 1500 }).messages;
 			}
+			if (ctx.model && event.signal) {
+				transportHost.ensure(ctx.model.api);
+				const binding = taskTransportBinding(ctx, run.checkpointParent ?? run);
+				if (binding) transportHost.bindSummary(binding, event.signal);
+			}
 		} catch (error) { ctx.ui?.notify?.("检查点未能安全保存，已取消压缩：" + error.message, "error"); return { cancel: true }; }
+	});
+	pi.on("session_before_tree", async (event, ctx) => {
+		if (!event.preparation?.userWantsSummary || !ctx.model || !event.signal) return;
+		try {
+			try { await loadProject(ctx); } catch (error) { if (error.code === "NOVEL_PROJECT_MISSING") return; throw error; }
+			transportHost.ensure(ctx.model.api);
+			const binding = taskTransportBinding(ctx, currentRun(ctx));
+			if (binding) transportHost.bindSummary(binding, event.signal, "branchSummary");
+		} catch { ctx.ui?.notify?.("摘要计量归属无法核验，已取消本次导航摘要。", "error"); return { cancel: true }; }
 	});
 	pi.on("session_compact", async (_event, ctx) => {
 		lastContextSnapshot = null;
+		usageCalibration.invalidate("compaction_completed");
 		try {
 			await loadProject(ctx);
 			const run = currentRun(ctx);
@@ -1052,7 +1282,34 @@ export default function (pi) {
 			let taskText = "";
 			try { const task = taskRecord(ctx); if (task) taskText = "\\n\\n当前任务：" + task.objective + "\\n完成类型：" + task.completionMode + "\\n交付目标：" + (task.expectedArtifacts.map((item) => item.path).join("、") || "仅答复 / 未绑定文件交付"); }
 			catch { taskText = "\\n任务合同损坏或无法保存；不使用更早的成功状态。"; }
-			await show(statusText(current) + taskText);
+			await show(statusText(current) + taskText + progressText(ctx));
+		},
+	});
+	pi.registerCommand("novel-transport-status", {
+		description: "查看当前任务的请求、摘要、重试与已知用量；只读，不调用模型（json 可查看诊断快照）",
+		handler: async (args, ctx) => {
+			let text;
+			try {
+				await loadProject(ctx);
+				const value = taskTransportMeter(ctx)?.snapshot();
+				if (!value) text = "当前没有已声明的小说任务。";
+				else if (args.trim() === "json") text = JSON.stringify({ ...value, calibration: usageCalibration.snapshot(taskTransportOwner(ctx)) });
+				else {
+					const c = value.counters, token = value.sdkUsage.totals.totalTokens;
+					const calibration = usageCalibration.snapshot(taskTransportOwner(ctx));
+					const sample = calibration.samples.at(-1);
+					text = "当前任务已观测请求：普通 " + c.ordinary + "，压缩摘要 " + c.summary + "，分支摘要 " + c.branchSummary
+						+ "\\n已观测发送尝试 " + c.dispatchAttempts + "，客户端再次尝试 " + c.redispatches + "，发送前阻止 " + c.blockedBeforeDispatch
+						+ "\\n未覆盖调用 " + c.unsupportedCalls + "，缺少发送层记录 " + c.missingFetchCalls
+						+ "\\nSDK 返回 tokens：" + (token === null ? "未知（已知小计 " + value.sdkUsage.knownSubtotals.totalTokens + "）" : token)
+						+ "\\n未结请求 " + (value.openCalls + value.coldUnsettled) + "；费用未知。"
+						+ "\\n本进程配对诊断 " + calibration.samples.length + " 条；候选锚点 " + calibration.anchorCount + "（下次请求仍需核对兼容性）。"
+						+ (sample ? "\\n最近输入估算 / SDK 输入：" + sample.estimatedInputTokens + " / " + (sample.sdkInputTokens ?? "未知") + "；仅诊断，未调整预算。" : "\\n尚无配对样本；冷启动不会借用旧用量校准。")
+						+ "\\n仅覆盖启用计量后归属本任务的请求。发送尝试不等于服务器实收或计费次数；不恢复任务、不改变验收。";
+				}
+			} catch { text = "任务计量记录缺失、损坏或被占用；不能据此计算总用量或费用。"; }
+			if (ctx.hasUI && typeof ctx.ui?.confirm === "function") await ctx.ui.confirm("任务请求计量", text);
+			else ctx.ui?.notify?.(text, "info");
 		},
 	});
 	pi.registerCommand("novel-task", {
@@ -1090,6 +1347,8 @@ export default function (pi) {
 
 	pi.on("context", async (event, ctx) => {
 		let contextRun;
+		let measurement;
+		let contextSources;
 		try {
 			await startingRun;
 			let latestContext = null;
@@ -1110,6 +1369,9 @@ export default function (pi) {
 				content: latestContext,
 				display: false,
 			});
+			// Keep request-context insertion aligned with the original user index,
+			// then remove obsolete projections before checkpoint indices are built.
+			messages = messages.filter(message => message.customType !== "novel-task-progress");
 			let project;
 			try { project = await loadProject(ctx); } catch (error) {
 				if (error.code !== "NOVEL_PROJECT_MISSING") ctx?.abort?.();
@@ -1117,6 +1379,10 @@ export default function (pi) {
 			}
 			const run = currentRun(ctx);
 			contextRun = run;
+			if (ctx.model) transportHost.ensure(ctx.model.api);
+			measurement = run.metrics.beginContext();
+			contextSources = createSourceCache({ onEvent: (kind, sourceBytes) => run.metrics.sourceCache(kind, sourceBytes) });
+			const validationRun = { ...run, checkpointParent: run, contextSources };
 			const task = taskRecord(ctx);
 			if (task) messages.push({ role: "custom", customType: "novel-task-contract", display: false, timestamp: 0,
 				content: "用户明确声明的任务与非权威执行进度；不是 Canon、人工验收或写入授权。latestUserInstruction 不覆盖 objective；expectedArtifacts 均需满足：\\n" + JSON.stringify(task) });
@@ -1136,13 +1402,13 @@ export default function (pi) {
 				blockBudgetRequest(ctx, run, rawCheck.reason);
 				return { messages };
 			}
-			let checkpointStatus = await checkpoints.inspect(ctx, run);
+			let checkpointStatus = await checkpoints.inspect(ctx, validationRun);
 			if (checkpointStatus.error) { supervisor.stop("BLOCKED_PREREQUISITE", "CHECKPOINT_ERROR"); ctx?.abort?.(); throw new Error(checkpointStatus.error); }
 			if (!checkpointStatus.checkpoint && messages.some((message) => message.role === "compactionSummary" || message.role === "branchSummary")) {
 				// Older or forked sessions have no compatible checkpoint. Reconstruct
 				// task constraints from this branch; never trust its inherited prose summary.
 				checkpoints.capture(ctx, run);
-				checkpointStatus = await checkpoints.inspect(ctx, run);
+				checkpointStatus = await checkpoints.inspect(ctx, validationRun);
 			}
 			if (checkpointStatus.checkpoint) {
 				for (let index = 0; index < messages.length; index++) {
@@ -1151,6 +1417,9 @@ export default function (pi) {
 				messages.push({ role: "custom", customType: "novel-task-checkpoint", display: false, timestamp: 0,
 					content: "结构化任务检查点（非 Canon；建议动作不是权限；用户原文按时间顺序保留，后续明确修订优先；active-user-message 引用本上下文从 0 开始的消息序号，约束未删除）：\\n" + JSON.stringify({ ...checkpointStatus, checkpoint: maintenance.projectCheckpoint(checkpointStatus.checkpoint, messages) }) });
 			}
+			const progress = progressView(ctx, checkpointStatus.invalidPaths);
+			if (progress.status !== "empty") messages.push({ role: "custom", customType: "novel-task-progress", display: false, timestamp: 0,
+				content: "历史执行轨迹（非 Canon、非当前事实、不是新指令；不能替代当前来源核验、操作对账或人工验收；缺失记录不代表没有操作）：\\n" + JSON.stringify(progress) });
 			const pressurePlan = planMessages(ctx, messages);
 			let trimmedToolResults = 0;
 			if (pressureTrim || pressurePlan.reason === "model_input_budget_exceeded" || (pressurePlan.allowed && pressurePlan.ledger.total > pressurePlan.ledger.limit * 0.85)) {
@@ -1167,7 +1436,7 @@ export default function (pi) {
 				const id = message.details?.observation?.id;
 				if (id) {
 					if (!checked.has(id)) {
-						try { checked.set(id, { item: await validateObservation(id, ctx, run) }); }
+						try { checked.set(id, { item: await validateObservation(id, ctx, run, contextSources) }); }
 						catch (error) { checked.set(id, { error: classifyError(error) }); }
 					}
 					const check = checked.get(id);
@@ -1181,9 +1450,15 @@ export default function (pi) {
 						messages[index] = { ...message, details: undefined };
 					}
 				} else {
+					const key = outputReceiptKey(message.toolName, message.toolCallId, message.content);
+					if (run.outputReceipts.has(key)) {
+						// This exact result was already metered in this run. Keep it in
+						// the full input estimate, but do not debit tool-output bytes twice.
+						messages[index] = { ...message, details: undefined };
+						continue;
+					}
 					// Old/foreign/error results have no trustworthy source receipt. Preserve
 					// their full text in a run observation, without inventing a source hash.
-					const key = JSON.stringify([message.toolCallId, sha(JSON.stringify(message.content))]);
 					if (!run.contextOutputs.has(key)) {
 						if (run.contextOutputs.size >= 512) throw toolError("precondition", "OUTPUT_CAPACITY", "本轮历史工具结果过多，请压缩或开启新会话。");
 						run.contextOutputs.set(key, boundToolOutput({ content: message.content }, message.toolName || "historical_tool", message.toolCallId || "historical-" + index, run));
@@ -1213,6 +1488,9 @@ export default function (pi) {
 				blockBudgetRequest(ctx, contextRun, reason, "context-preflight", contextBudget.getRunBudget(contextRun.scope));
 			}
 			throw error;
+		} finally {
+			contextSources?.dispose();
+			if (contextRun && measurement !== undefined) contextRun.metrics.endContext(measurement);
 		}
 	});
 
@@ -1228,12 +1506,28 @@ export default function (pi) {
 		const projectId = sha(process.platform === "win32" ? root.toLowerCase() : root);
 		if (activeRun !== run || run.scope.projectId !== projectId || run.scope.sessionId !== (ctx.sessionManager?.getSessionId?.() || processSession) || run.scope.role !== currentNovelRole(ctx)) return;
 		const previous = requestLedgers.get(budgetOwner(run.scope));
-		if (!previous?.allowed || previous.scope.runId !== run.scope.runId) return;
-		const check = contextBudget.checkPayload(event.payload, ctx.model.contextWindow, ctx.model.maxTokens ?? 4096, 4096);
-		rememberLedger(run.scope, { ...previous, providerAudit: { allowed: check.allowed, reason: check.reason, ledger: check.ledger } });
-		// Final audit is defense in depth, NOT a portable no-HTTP gate: Google may
-		// already dispatch after a late abort. The context preflight above is primary.
-		if (!check.allowed) blockBudgetRequest(ctx, run, check.reason, "provider-audit", check.ledger);
+		if (previous?.allowed && previous.scope.runId === run.scope.runId) {
+			const check = contextBudget.checkPayload(event.payload, ctx.model.contextWindow, ctx.model.maxTokens ?? 4096, 4096);
+			rememberLedger(run.scope, { ...previous, providerAudit: { allowed: check.allowed, reason: check.reason, ledger: check.ledger } });
+			// Retain the original stage-specific budget reason before opening a
+			// journal. A refusal here does not require a transport reservation.
+			if (!check.allowed) {
+				transportHost.denyOrdinary(ctx.model, "TRANSPORT_INPUT_BUDGET");
+				blockBudgetRequest(ctx, run, check.reason, "provider-audit", check.ledger);
+				return event.payload;
+			}
+		}
+		try {
+			const binding = taskTransportBinding(ctx, run);
+			if (binding) transportHost.bindOrdinary(binding);
+		} catch {
+			transportHost.denyOrdinary(ctx.model);
+			ctx.ui?.notify?.("任务计量记录无法安全保存或恢复，本次请求未发送。请检查会话计量文件；不会自动清空旧记录。", "error");
+			ctx?.abort?.(); throw new Error("TRANSPORT_JOURNAL_FAILURE");
+		}
+		// The payload hook alone is NOT a portable no-HTTP gate. Supported bound
+		// OpenAI/Google calls now also check the serialized body at scoped fetch.
+		// Other APIs retain the context preflight and explicitly limited coverage.
 		return event.payload;
 	});
 
@@ -1242,6 +1536,7 @@ export default function (pi) {
 		const ownsCall = () => { const status = supervisor.snapshot(); return !!callRun && activeRun === callRun && (!status || status.scope.runId === callRun.scope.runId); };
 		const deny = (kind, code, reason) => {
 			if (!ownsCall()) return { block: true, reason: "[cancelled] 原运行已结束；忽略迟到的工具阻断结果。" };
+			recordFailureProgress(callRun, event.toolCallId, event.toolName, event.input, { kind, code, message: reason }, "blocked");
 			const status = supervisor.failure({ kind, code, signature: reason });
 			if (status && status.state !== "RUNNING") { showSupervisorStatus(ctx, status, true); ctx.abort(); }
 			return { block: true, reason };
@@ -1360,6 +1655,8 @@ export default function (pi) {
 				// Record only the actual outcome; never pretend the patch reached Pi.
 				operations.completeFailed(entry.operationId, version.hash);
 				checkpoints.operation(ctx, run, operations.snapshot().find((item) => item.operationId === entry.operationId), version.hash);
+				recordProgress(run, event.toolCallId, event.toolName, { kind: "write", outcome: version.hash === entry.preHash ? "failed" : "unknown", target: entry.target, attemptHash: entry.argsDigest,
+					error: { kind: "validation", code: "NATIVE_WRITE_FAILED", fingerprint: sha("NATIVE_WRITE_FAILED") } });
 				if (supervisor.snapshot()?.scope.runId === run.scope.runId) supervisor.failure({ kind: "validation", code: "NATIVE_WRITE_FAILED", signature: JSON.stringify([event.toolName, entry.target]) });
 				return;
 			}
@@ -1370,12 +1667,18 @@ export default function (pi) {
 				supervisor.artifact(entry.target, version.hash);
 				taskProgress(run, (task) => tasks.artifact(task, entry.target, version.hash));
 			}
+			recordProgress(run, event.toolCallId, event.toolName, { kind: "write", outcome: "written", target: entry.target, artifactSha256: version.hash, attemptHash: entry.argsDigest });
 			return { details: { ...event.details, harness: { ok: true, operationId: entry.operationId, scope: entry.scope } } };
-		} catch (error) { operations.cancel(entry.operationId); return failureResult(classifyError(error), { operationId: entry.operationId, scope: entry.scope }); }
+		} catch (error) { operations.cancel(entry.operationId);
+			recordFailureProgress(run, event.toolCallId, event.toolName, { path: entry.target }, { ...classifyError(error), kind: "unknown_outcome" });
+			return failureResult(classifyError(error), { operationId: entry.operationId, scope: entry.scope }); }
 	});
-	pi.on("turn_end", async (_event, ctx) => {
+	pi.on("turn_end", async (event, ctx) => {
 		const run = activeRun;
 		if (!run || supervisor.snapshot()?.scope.runId !== run.scope.runId) return;
+		const base = supervisorBaseScope(ctx);
+		if (base.projectId !== run.scope.projectId || base.sessionId !== run.scope.sessionId || base.role !== run.scope.role) return;
+		run.metrics.usage(event.message);
 		for (const receipt of run.pendingVerifications ?? []) supervisor.verification(receipt);
 		run.pendingVerifications = [];
 		const snapshot = supervisor.turn();
@@ -1458,7 +1761,7 @@ export default function (pi) {
 			const run = checkpointRun(currentRun(ctx), _signal);
 			if (name === "capture_task_checkpoint") checkpoints.capture(ctx, run);
 			const status = name === "refresh_task_checkpoint" ? await checkpoints.refresh(ctx, run) : await checkpoints.inspect(ctx, run);
-			return textResult(JSON.stringify({ ...status, task: taskRecord(ctx) }));
+			return textResult(JSON.stringify({ ...status, task: taskRecord(ctx), progress: progressView(ctx, status.invalidPaths) }));
 		},
 	});
 	pi.registerTool({
@@ -1470,10 +1773,10 @@ export default function (pi) {
 			const snapshot = supervisor.snapshot();
 			const base = supervisorBaseScope(ctx);
 			const current = snapshot && snapshot.scope.projectId === base.projectId && snapshot.scope.sessionId === base.sessionId && snapshot.scope.role === base.role ? snapshot : null;
-			const summary = current ? { schemaVersion: current.schemaVersion, id: current.id, scope: current.scope, state: current.state, reasonCode: current.reasonCode, toolCalls: current.toolCalls, turns: current.turns, verificationAttempts: current.verificationAttempts, evidenceCount: current.evidenceCount, unchangedAttempts: current.unchangedAttempts, userAccepted: false } : null;
+			const summary = current ? { schemaVersion: current.schemaVersion, id: current.id, scope: current.scope, state: current.state, reasonCode: current.reasonCode, toolCalls: current.toolCalls, turns: current.turns, verificationAttempts: current.verificationAttempts, evidenceCount: current.evidenceCount, unchangedAttempts: current.unchangedAttempts, verificationProgress: current.schemaVersion === 2 ? { policy: "subject-mode-dependencies-diagnostics/v1", subject: current.lastVerificationSubject, trackedStates: Object.keys(current.verificationProgress || {}).length, semanticProgressProven: false } : null, userAccepted: false } : null;
 			const task = taskRecord(ctx);
 			const taskSummary = task ? { taskId: task.taskId, completionMode: task.completionMode, objectivePreview: task.objective.slice(0, 512), expectedArtifactCount: task.expectedArtifacts.length } : null;
-			return textResult(JSON.stringify({ snapshot: summary, task: taskSummary, budgetDiagnostic: diagnosticFor(current), guidanceZh: statusText(current) }));
+			return textResult(JSON.stringify({ snapshot: summary, task: taskSummary, progress: progressView(ctx), budgetDiagnostic: diagnosticFor(current), guidanceZh: statusText(current) }));
 		},
 	});
 
@@ -1493,6 +1796,7 @@ export default function (pi) {
 			}
 			const captured = capture ? nativeReadResult(capture, event) : { sources: [], deliverySpans: [] };
 			const value = boundToolOutput({ content: event.content, details: { ...event.details, ...captured } }, event.toolName, event.toolCallId, run);
+			if (!["write", "edit"].includes(event.toolName)) recordReadProgress(run, event.toolCallId, event.toolName, event.input ?? {}, value);
 			return { content: value.content, details: value.details };
 		} catch (error) {
 			// This hook cannot change Pi 0.63's success flag; never imply rollback.
@@ -1514,19 +1818,27 @@ export default function (pi) {
 			catch (error) { if (error.kind === "cancelled" || error.kind === "precondition") throw error; throw toolError("stale_source", "STALE_OBSERVATION", "观察记录或来源已失效，请重新读取。" + error.message); }
 			assertRun(run);
 			const page = observations.read({ id: item.id, scope: run.scope, toolName: "read_observation", toolCallId: id, start, limit });
+			run.metrics.reference("observationPages");
+			run.metrics.reference("observationPageBytes", bytes(page.payload));
 			chargeRead(run, bytes(page.payload));
 			return textResult(page.payload + (page.hasMore ? "\\n[更多内容：start=" + (start + page.payload.length) + "]" : "\\n[记录结束]"), { observation: item, observationPage: true, observedRun: run.scope, start, hasMore: page.hasMore, totalChars: page.totalChars, deliveryWindow: { id: item.id, start, end: start + page.payload.length } });
 		},
 	});
 	registerReliableTool(pi, {
 		name: "get_context_budget", label: "查看请求预算",
-		description: "Inspect this session's latest request ledger, current run read/output budgets, and observation access counts. Estimates are conservative UTF-8 units, not actual provider tokens. Read-only; does not return source payloads.",
+		description: "Inspect request estimates, SDK usage, file reads and task-scoped ordinary/summary/provider-fetch attempts. Run metrics are process-local; taskTransport has a separate durable journal. Unknown usage/cost stays null, not total task billing or permissions. Read-only; no source payloads. Use /novel-transport-status after a run stops.",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			await loadProject(ctx);
 			const run = currentRun(ctx);
 			const accesses = observations.getAccesses(run.scope);
-			return textResult(JSON.stringify({ request: requestLedgers.get(budgetOwner(run.scope)) ?? null, run: contextBudget.getRunBudget(run.scope), observations: { records: new Set(accesses.map((item) => item.observationId)).size, accesses: accesses.length }, notes: "选材是软估算；读取及输出按运行累计；请求估算不等于真实 tokens。Observation 仅在本进程保存。最终 provider 载荷审计是尽力取消，非所有通道的绝对发送闸门。" }, null, 2));
+			const previous = priorRunMetrics.get(budgetOwner(run.scope));
+			let taskTransport;
+			try { taskTransport = taskTransportMeter(ctx)?.snapshot() ?? null; }
+			catch { taskTransport = { status: "journal-invalid", taskTotalComplete: false, costUsd: null }; }
+			return textResult(JSON.stringify({ request: requestLedgers.get(budgetOwner(run.scope)) ?? null, run: contextBudget.getRunBudget(run.scope), observations: { records: new Set(accesses.map((item) => item.observationId)).size, accesses: accesses.length },
+				metrics: run.metrics.snapshot(), taskTransport, calibration: usageCalibration.snapshot(taskTransportOwner(ctx)), previousRun: previous ? { scope: previous.scope, metrics: previous.metrics.snapshot() } : null,
+				notes: "token 估算、SDK usage、HTTP 次数互不替代；未知为 null，不作零费用。读取及输出预算仍按运行累计。metrics 仅覆盖本进程当前/上一运行；taskTransport 单独记录本任务已观测的普通、摘要和客户端 fetch 尝试，非完整任务账单，包含同一任务已放弃分支的请求。发送次数不等于服务器实收次数，未核实 cache 时费用仍未知。读取统计仅计扩展中纳入预算的 readFile 调用，不含原生工具、验证子进程和元数据 IO；重复路径不等于可安全省略的核验。预算上限与最终写入前版本检查不变。" }));
 		},
 	});
 

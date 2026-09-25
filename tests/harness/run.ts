@@ -28,13 +28,22 @@ import { runSessionTitleCoreTests } from "../session-title-core.js";
 import { runSessionTitleExtensionTests } from "../session-title-extension.js";
 import { runObservationStoreTests } from "./observation-store.js";
 import { runContextBudgetCases } from "./context-budget.js";
+import { runToolOutputAccountingCases } from "./tool-output-accounting.js";
 import { runBudgetDiagnosticCases } from "./budget-diagnostics.js";
+import { runRuntimeMetricCases } from "./runtime-metrics.js";
+import { runRequestSourceCacheCases } from "./request-source-cache.js";
+import { runTaskTransportCases } from "./task-transport.js";
+import { runUsageCalibrationCases } from "./usage-calibration.js";
+import { runTaskProgressCases } from "./task-progress.js";
+import { runTaskProgressExtensionCases } from "./task-progress-extension.js";
+import { runEffectiveProgressCases, runEffectiveProgressExtensionCases } from "./effective-progress.js";
 import { runContextUsageCases } from "./context-usage.js";
 import { runContextMaintenanceCases } from "./context-maintenance.js";
 import { runContextMaintenanceExtensionCases } from "./context-maintenance-extension.js";
 import { runContextMaintenanceGuardCases } from "./context-maintenance-extension-guards.js";
 import { runPhase2ExtensionCases } from "./phase2-extension.js";
 import { runProviderBudgetCases } from "./provider-budget.js";
+import { runLoopbackHttpCases } from "./loopback-http.js";
 import { runStoryRangeCases } from "./read-range.js";
 import { runPhase2InvariantCases } from "./phase2-invariants.js";
 import { runCheckpointStoreCases } from "./checkpoint-store.js";
@@ -113,7 +122,16 @@ for (let repetition = 1; repetition <= 3; repetition++) {
 	await runCase("SESSION-TITLE-02 loaded extension naming and isolation", () => runSessionTitleExtensionTests());
 	await runCase("P2-OBS immutable bounded observation store", () => { runObservationStoreTests(); });
 	await runContextBudgetCases(runCase);
+	await runToolOutputAccountingCases(runCase);
 	await runBudgetDiagnosticCases(runCase);
+	await runRuntimeMetricCases(runCase);
+	await runRequestSourceCacheCases(runCase);
+	await runTaskTransportCases(runCase);
+	await runUsageCalibrationCases(runCase);
+	await runTaskProgressCases(runCase);
+	await runTaskProgressExtensionCases(runCase);
+	await runEffectiveProgressCases(runCase);
+	await runEffectiveProgressExtensionCases(runCase);
 	await runContextUsageCases(runCase);
 	await runContextMaintenanceCases(runCase);
 	await runContextMaintenanceExtensionCases(runCase);
@@ -121,6 +139,7 @@ for (let repetition = 1; repetition <= 3; repetition++) {
 	await runStoryRangeCases(runCase);
 	await runPhase2ExtensionCases(runCase);
 	await runPhase2InvariantCases(runCase);
+	await runLoopbackHttpCases(runCase);
 	await runProviderBudgetCases(runCase);
 	await runCheckpointStoreCases(runCase);
 	await runSourceVersionCases(runCase);
@@ -151,6 +170,10 @@ for (const name of [
 	"src/novel/agents.ts", "src/novel/task-submission.ts", "src/components/chat-view/send-message-flow.ts", "src/components/chat-view/backend-message-mapper.ts",
 	"src/extensions/supervisor-runtime.ts",
 	"src/extensions/budget-diagnostics.ts",
+	"src/harness/runtime-metrics.ts",
+	"src/harness/request-source-cache.ts",
+	"src/harness/task-transport-ledger.ts", "src/extensions/task-transport-runtime.ts", "src/extensions/task-transport-journal.ts",
+	"src/harness/usage-calibration.ts", "tests/harness/usage-calibration.ts", "tests/harness/context-maintenance.ts",
 	"src/extensions/context-maintenance.ts",
 	"src/components/chat-view/context-usage-view.ts",
 	"src/components/chat-view/composer-stats-view.ts",

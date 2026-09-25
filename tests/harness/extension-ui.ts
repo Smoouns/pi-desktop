@@ -98,6 +98,13 @@ export async function runExtensionUiCases(runCase: RunCase): Promise<void> {
 			assert.deepEqual(harness.responses, [{ id: "status-1", data: { confirmed: false } }]);
 			assert.equal(harness.closed(), 1);
 			assert.equal(stub.listenerCount(), 0);
+			const transport = createReadonlyDialogHarness();
+			const transportPending = transport.handler.handleRequest({ id: "transport-status", method: "confirm", title: "任务请求计量", message: "已观测请求与未知费用" });
+			assert.equal((transport.template().strings.join("").match(/<button/g) ?? []).length, 1, "transport details cannot display an acceptance/confirm action");
+			assert.ok(transport.template().values.includes("任务请求计量"));
+			stub.dispatchEscape(); await transportPending;
+			assert.deepEqual(transport.responses, [{ id: "transport-status", data: { confirmed: false } }]);
+			assert.equal(stub.listenerCount(), 0);
 		} finally {
 			if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
 			else delete (globalThis as { window?: unknown }).window;

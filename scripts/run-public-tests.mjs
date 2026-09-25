@@ -11,7 +11,7 @@ const outputParent = path.join(root, "artifacts/harness");
 await mkdir(outputParent, { recursive: true });
 const work = await mkdtemp(path.join(outputParent, ".build-"));
 const mode = process.argv[2];
-assert.ok(["harness", "regression", "long-horizon", "review-repros", "read-delivery", "task-contract", "production-lifecycle"].includes(mode), "Usage: run-public-tests.mjs harness|regression|long-horizon|review-repros|read-delivery|task-contract|production-lifecycle");
+assert.ok(["harness", "regression", "long-horizon", "review-repros", "read-delivery", "task-contract", "production-lifecycle", "runtime-metrics", "request-source-cache", "task-transport", "task-transport-sdk", "context-quality", "usage-calibration", "task-progress", "effective-progress", "provider-budget", "tool-output-accounting", "review-e8", "review-e8-recover"].includes(mode), "Unknown public test mode");
 
 // Always use the installed, pinned loader. Bundled tests still resolve runtime packages
 // from this checkout, not a user's global Pi installation or home extensions.
@@ -34,11 +34,11 @@ async function bundle(entry, alias = {}) {
 	return outfile;
 }
 
-function execute(filename) {
+function execute(filename, args = []) {
 	const environment = { ...process.env, PI_DESKTOP_NOVEL_ROLE: "", PI_CODING_AGENT_DIR: path.join(work, "empty-agent") };
 	// Test inputs are synthetic. Do not pass provider credentials to the test process.
 	for (const key of Object.keys(environment)) if (/(?:API_KEY|AUTH_TOKEN|ACCESS_TOKEN|SECRET_ACCESS_KEY)$/.test(key)) delete environment[key];
-	const result = spawnSync(process.execPath, ["--experimental-strip-types", filename], {
+	const result = spawnSync(process.execPath, ["--experimental-strip-types", filename, ...args], {
 		// C's fixed-commit Windows CI took 83/89 s for its first two repetitions;
 		// the old 240 s suite deadline killed the third without an assertion failure.
 		// Keep a bounded 360 s suite margin; per-tool deadlines/assertions are unchanged.
@@ -64,7 +64,22 @@ async function fixtureBytes() {
 }
 
 try {
-	if (mode === "production-lifecycle") {
+	if (mode === "review-e8") {
+		execute(await bundle("tests/harness/review-e-live/run.ts", aliases));
+	} else if (mode === "review-e8-recover") {
+		assert.equal(process.argv.length, 4, "Supply exactly one offline E8 journal path");
+		execute(await bundle("tests/harness/review-e-live/recover.ts"), [process.argv[3]]);
+	} else if (mode === "context-quality" || mode === "usage-calibration" || mode === "task-progress" || mode === "effective-progress" || mode === "provider-budget" || mode === "tool-output-accounting") {
+		execute(await bundle(`tests/harness/${mode}-run.ts`, aliases));
+	} else if (mode === "runtime-metrics") {
+		execute(await bundle("tests/harness/runtime-metrics-run.ts", aliases));
+	} else if (mode === "request-source-cache") {
+		execute(await bundle("tests/harness/request-source-cache-run.ts", aliases));
+	} else if (mode === "task-transport") {
+		execute(await bundle("tests/harness/task-transport-run.ts", aliases));
+	} else if (mode === "task-transport-sdk") {
+		execute(await bundle("tests/harness/task-transport-sdk.ts", aliases));
+	} else if (mode === "production-lifecycle") {
 		execute(await bundle("tests/harness/production-lifecycle/run.ts", aliases));
 	} else if (mode === "task-contract") {
 		execute(await bundle("tests/harness/task-contract-run.ts", aliases));

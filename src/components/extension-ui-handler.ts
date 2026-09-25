@@ -656,7 +656,7 @@ export class ExtensionUiHandler {
 
 	private async showConfirmDialog(request: ExtensionUiRequest): Promise<void> {
 		if (!this.overlayContainer) return;
-		if (request.title?.trim() === "小说运行状态") {
+		if (["小说运行状态", "任务请求计量"].includes(request.title?.trim() ?? "")) {
 			await this.showNovelRunStatusDialog(request);
 			return;
 		}

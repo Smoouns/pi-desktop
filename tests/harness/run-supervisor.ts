@@ -30,7 +30,7 @@ export async function runSupervisorCases(runCase: RunCase): Promise<void> {
 		assert.throws(() => { const item = createRunSupervisor({ digest }); const itemScope = scope({ runId: "unsafe-path" }); item.begin(itemScope); item.artifact(itemScope, "../escape.md", sha("a")); }, /project-relative/);
 	});
 
-	await runCase("P4-SUP-02 deterministic no-progress needs unchanged artifact, error and evidence", () => {
+	await runCase("P4-SUP-02 verification progress uses related dependencies instead of global activity", () => {
 		const supervisor = createRunSupervisor({ digest, noProgressLimit: 3 }); const own = scope(); supervisor.begin(own);
 		supervisor.evidence(own, "obs-a"); supervisor.artifact(own, "drafts/018.md", sha("a"));
 		for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -38,16 +38,15 @@ export async function runSupervisorCases(runCase: RunCase): Promise<void> {
 			assert.equal(result?.state, "RUNNING");
 		}
 		supervisor.evidence(own, "obs-b");
-		assert.equal(supervisor.verification(own, { callId: "verify-3", subject: "018", artifactSha256: sha("a"), errorDigest: "same-error", passed: false, full: true })?.unchangedAttempts, 1, "new evidence resets the streak");
+		assert.equal(supervisor.verification(own, { callId: "verify-3", subject: "018", artifactSha256: sha("a"), errorDigest: "same-error", passed: false, full: true, relatedSourcesDigest: sha("c") })?.unchangedAttempts, 1, "host-verified related dependency changes open a distinct track");
 		supervisor.artifact(own, "drafts/018.md", sha("b"));
-		assert.equal(supervisor.verification(own, { callId: "verify-4", subject: "018", artifactSha256: sha("b"), errorDigest: "same-error", passed: false, full: true })?.unchangedAttempts, 1, "real artifact change resets the streak");
-		supervisor.verification(own, { callId: "verify-5", subject: "018", artifactSha256: sha("b"), errorDigest: "same-error", passed: false, full: true });
-		const stopped = supervisor.verification(own, { callId: "verify-6", subject: "018", artifactSha256: sha("b"), errorDigest: "same-error", passed: false, full: true });
+		assert.equal(supervisor.verification(own, { callId: "verify-4", subject: "018", artifactSha256: sha("b"), errorDigest: "same-error", passed: false, full: true, relatedSourcesDigest: sha("c") })?.unchangedAttempts, 2, "artifact change alone cannot prove mechanical improvement");
+		const stopped = supervisor.verification(own, { callId: "verify-5", subject: "018", artifactSha256: sha("b"), errorDigest: "same-error", passed: false, full: true, relatedSourcesDigest: sha("c") });
 		assert.equal(stopped?.state, "NO_PROGRESS");
 		assert.equal(stopped?.reasonCode, "UNCHANGED_VERIFICATION");
-		assert.equal(supervisor.verification(own, { callId: "verify-6", subject: "018", artifactSha256: sha("b"), errorDigest: "same-error", passed: false, full: true })?.verificationAttempts, 6, "duplicate results do not advance counters");
+		assert.equal(supervisor.verification(own, { callId: "verify-5", subject: "018", artifactSha256: sha("b"), errorDigest: "same-error", passed: false, full: true })?.verificationAttempts, 5, "duplicate results do not advance counters");
 		const alternating = createRunSupervisor({ digest }); const alternatingScope = scope({ runId: "alternating" }); alternating.begin(alternatingScope);
-		for (const [index, subject] of ["A", "B", "A"].entries()) assert.equal(alternating.verification(alternatingScope, { callId: `alt-${index}`, subject, artifactSha256: null, errorDigest: "same", passed: false, full: true })?.state, "RUNNING", "A-B-A is not consecutive no progress");
+		for (const [index, subject] of ["A", "B", "A"].entries()) assert.equal(alternating.verification(alternatingScope, { callId: `alt-${index}`, subject, artifactSha256: null, errorDigest: "same", passed: false, full: true })?.state, "RUNNING", "each subject still has fewer than three failed attempts");
 	});
 
 	await runCase("P4-SUP-03 hard budgets stop changing-error loops", () => {
@@ -77,7 +76,7 @@ export async function runSupervisorCases(runCase: RunCase): Promise<void> {
 		const progress = createRunSupervisor({ digest }); const own = scope({ runId: "repair-reset" }); progress.begin(own);
 		progress.failure(own, { kind: "validation", code: "REPAIR", signature: "same" }); progress.failure(own, { kind: "validation", code: "REPAIR", signature: "same" });
 		progress.evidence(own, "new-source-version");
-		assert.equal(progress.failure(own, { kind: "validation", code: "REPAIR", signature: "same" })?.state, "RUNNING", "real progress clears a repair loop streak");
+		assert.equal(progress.failure(own, { kind: "validation", code: "REPAIR", signature: "same" })?.state, "RUNNING", "the separate legacy generic-repair heuristic is unchanged");
 		const alternating = createRunSupervisor({ digest }); const alternatingScope = scope({ runId: "repair-alternating" }); alternating.begin(alternatingScope);
 		for (const signature of ["A", "B", "A", "B", "A"]) assert.equal(alternating.failure(alternatingScope, { kind: "validation", code: "REPAIR", signature })?.state, "RUNNING", "only adjacent identical repair failures form a streak");
 	});

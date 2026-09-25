@@ -62,3 +62,5 @@
 用户同意后，补上 npm shim 解析成功早返回分支的 `CREATE_NO_WINDOW`。新增 `src-tauri/src/windows_process_tests.rs`，无控制台的父进程通过生产 command builder 启动本地 Node 夹具，在子进程内查询 `GetConsoleWindow`。修复前精确失败 `consoleAttached=true`；修复后 RPC / 普通 CLI 共 8 条路径无控制台，参数、环境和管道仍正确。Rust 11 项本地测试通过；CI 已要求 Windows 实际执行这 2 项测试。测试使用现有锁文件中的 Koffi，不引入新产品依赖。
 
 这不是重复 D-07 窗口验收，也不重新运行上述旧目录的 SHA 审计。另发现非标准 batch 的含空格绝对入口路径引号问题，尚未修复；新 fallback 控制台测试使用相对入口，未将该引号问题算作通过。详见 `REVIEW_RESOLUTION.md` 的后续记录。
+
+后续 E1（同日）：上述非标准 batch 引号问题现已单独修复，本地 RPC / CLI 各 7 条子进程路径通过，含绝对路径 / `.bat` / 元字符对照。E1 分层计量也已开始，见 `REVIEW_E_METRICS.md`。这些是新代码的独立本地证据，不改变本报告 D-07 原生窗口观察、旧源码指纹或固定提交 CI 归属。

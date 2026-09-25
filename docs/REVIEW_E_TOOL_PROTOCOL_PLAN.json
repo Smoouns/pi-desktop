@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "kind": "e8-explicit-no-tools-diagnostic-design",
+  "executable": false,
+  "authorization": { "required": true, "granted": false, "singleUse": true, "proposedTtlHours": 24, "reusesHistoricalAllowance": false },
+  "executionProfile": "tool-none",
+  "hypothesis": "Observe one full-extension response when tools is empty and tool_choice is explicitly none; not proof of the original root cause.",
+  "model": { "provider": "gemini-proxy", "id": "gemini-3.8-flash-high", "api": "openai-completions", "workingWindow": 262144, "requestOutputCeiling": 2048, "thinkingLevel": "off", "remoteAvailabilityVerified": false },
+  "policy": {
+    "namespace": "review-e-tool-none-v1",
+    "taskIds": ["E8-TOOL-NONE"],
+    "limits": {
+      "maxHttpRequests": 1,
+      "maxTaskHttpRequests": 1,
+      "maxInputTokens": 8192,
+      "maxInputBytes": 8192,
+      "maxOutputTokens": 2048,
+      "safetyMargin": 4096,
+      "maxTotalInputTokens": 8192,
+      "maxTotalOutputTokens": 2048,
+      "requestTimeoutMs": 90000,
+      "taskTimeoutMs": 120000,
+      "batchTimeoutMs": 180000,
+      "maxResponseBytes": 262144,
+      "maxTaskTools": 1
+    }
+  },
+  "request": {
+    "prompt": "仅整理下一步规划，不写正文；不批准章节卡，不晋升 Canon。 只简短确认只读边界。",
+    "tools": [],
+    "toolChoice": "none",
+    "productionExtension": "complete-current-managed-extension",
+    "payloadChange": "Test-only before_provider_request adds tool_choice:none before production auditing; no other payload edits.",
+    "dynamicMetadata": ["SDK current date/time", "owned isolated project cwd", "generated session/task identifiers"],
+    "ordinaryRequestsOnly": true,
+    "additionalPrompts": 0,
+    "nativeSummaries": 0,
+    "automaticCompaction": false,
+    "automaticRetry": false,
+    "titleGeneration": false,
+    "modelJudge": false
+  },
+  "safety": {
+    "publicSyntheticDataOnly": true,
+    "activeTools": [],
+    "successfulToolExecutionsAllowed": 0,
+    "positiveToolCounterLimitIsNotPermission": true,
+    "modelWritePaths": [],
+    "prepareNetworkAllowed": false,
+    "changesGlobalConfig": false,
+    "changesProductionPolicy": false,
+    "unknownOutcomeReplayAllowed": false,
+    "stopOnAnyFault": true
+  },
+  "referencePriceUsdPerMillion": { "input": 0.75, "output": 3.75, "cachedInput": 0.075 },
+  "noCacheReservationReferenceUsd": 0.013824,
+  "referenceIsMoneyCap": false,
+  "actualCostUsd": null,
+  "unknownCacheOrReasoningBillingPolicy": "cost-unknown-not-zero",
+  "successBoundary": "A text response without any tool call is one protocol observation, not a causal conclusion, provider identity verification, or U/C/R acceptance."
+}

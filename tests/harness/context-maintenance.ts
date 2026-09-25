@@ -114,4 +114,43 @@ export async function runContextMaintenanceCases(runCase: RunCase): Promise<void
 			{ role: "custom", customType: "legacy", content: [], display: false, details: undefined, timestamp: 1 },
 		]);
 	});
+
+	await runCase("CM-BATCH recent cutoff protects the whole parallel tool batch", () => {
+		const calls = (ids: string[]) => ({ role: "assistant", content: ids.map(id => ({ type: "toolCall", id, name: "read", arguments: {} })) });
+		const messages = [calls(["old"]), tool("old", "read", "x".repeat(2000), 0), calls(["a", "b", "c"]),
+			... ["a", "b", "c"].map(id => tool(id, "read", "x".repeat(2000), 1)), calls(["new"]), tool("new", "read", "x".repeat(2000), 2)];
+		const result = createContextMaintenance().trimOldToolResults(messages, { maxInlineBytes: 512, keepRecentToolResults: 2 });
+		assert.deepEqual(result.trimmed.map(item => item.toolCallId), ["old"], "RECENT_BATCH_MUST_NOT_SPLIT");
+		for (let i = 2; i < messages.length; i++) assert.strictEqual(result.messages[i], messages[i]);
+	});
+
+	await runCase("CM-ERROR protects failed batch diagnostics and incomplete calls", () => {
+		const assistant = { role: "assistant", content: ["failed", "sibling"].map(id => ({ type: "toolCall", id, name: "read", arguments: {} })) };
+		const failed = { ...tool("failed", "read", "SOURCE_VERSION_CONFLICT " + "x".repeat(2000), 0), isError: true, details: { diagnostic: "retry requires current source" } };
+		const sibling = tool("sibling", "read", "x".repeat(2000), 1);
+		const incomplete = { role: "assistant", content: ["seen", "pending"].map(id => ({ type: "toolCall", id, name: "read", arguments: {} })) };
+		const messages = [assistant, failed, sibling, incomplete, tool("seen", "read", "x".repeat(2000), 2), tool("recent", "read", "ok", 3)];
+		assert.deepEqual(createContextMaintenance().trimOldToolResults(messages, { maxInlineBytes: 512, keepRecentToolResults: 1 }).messages, messages, "ERROR_AND_INCOMPLETE_BATCH_MUST_SURVIVE");
+	});
+
+	await runCase("CM-REFERENCE keeps only the observation ID for later source validation", () => {
+		const result = { ...tool("old", "read", "x".repeat(2000), 1), details: { observation: { id: "obs_synthetic", preview: "PRIVATE_PREVIEW" }, fullText: "PRIVATE_BODY" } };
+		const messages = [{ role: "assistant", content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }] }, result];
+		const once = createContextMaintenance().trimOldToolResults(messages, { maxInlineBytes: 512, keepRecentToolResults: 0 });
+		assert.equal(once.trimmed.length, 1, "explicit zero retention is not slice(-0)");
+		assert.deepEqual(once.messages[1].details, { observation: { id: "obs_synthetic" } });
+		assert.match(JSON.stringify(once.messages[1].content), /obs_synthetic/); assert.doesNotMatch(JSON.stringify(once.messages[1]), /PRIVATE_/);
+		assert.deepEqual(createContextMaintenance().trimOldToolResults(once.messages, { maxInlineBytes: 512, keepRecentToolResults: 0 }).messages, once.messages);
+		assert.equal(result.details.fullText, "PRIVATE_BODY", "durable original remains unchanged");
+	});
+
+	await runCase("CM-UNCERTAIN orphan duplicate pending and non-text batches are protected", () => {
+		const assistant = (ids: string[]) => ({ role: "assistant", content: ids.map(id => ({ type: "toolCall", id, name: "read", arguments: {} })) });
+		const big = (id: string) => tool(id, "read", "x".repeat(2000), 0);
+		const messages = [big("orphan"), assistant(["repeat"]), big("repeat"), assistant(["repeat"]), big("repeat"),
+			assistant(["pending", "sibling"]), big("pending"), big("sibling"), assistant(["text", "image"]), big("text"),
+			{ ...big("image"), content: [{ type: "image", data: "public", mimeType: "image/png" }] }];
+		const result = createContextMaintenance().trimOldToolResults(messages, { maxInlineBytes: 512, keepRecentToolResults: 0, pendingToolCallIds: ["pending"] });
+		assert.deepEqual(result.messages, messages); assert.equal(result.trimmed.length, 0);
+	});
 }

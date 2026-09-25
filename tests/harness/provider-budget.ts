@@ -10,6 +10,7 @@ import {
 	loadExtensions,
 } from "../../node_modules/@mariozechner/pi-coding-agent/dist/core/extensions/index.js";
 import { NOVEL_TOOLS_EXTENSION_CONTENT } from "../../src/extensions/novel-tools-extension.js";
+import { closeLoopbackServer, listenForFetch } from "../support/loopback-http.js";
 import { withProject, type RunCase } from "./testkit.js";
 
 type RecordedRequest = { path: string; body: string };
@@ -21,7 +22,10 @@ type RunnerInterfaces = {
 
 async function withCountingServer<T>(body: (baseUrl: string, requests: RecordedRequest[]) => Promise<T>): Promise<T> {
 	const requests: RecordedRequest[] = [];
+	let started = 0, aborted = 0;
 	const server = http.createServer((request, response) => {
+		started++;
+		request.on("aborted", () => { aborted++; });
 		const chunks: Buffer[] = [];
 		request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
 		request.on("end", () => {
@@ -31,16 +35,17 @@ async function withCountingServer<T>(body: (baseUrl: string, requests: RecordedR
 			response.end(JSON.stringify({ error: { message: "scripted local response" } }));
 		});
 	});
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(0, "127.0.0.1", () => resolve());
-	});
+	const address = await listenForFetch(server);
 	try {
-		const address = server.address();
-		assert.ok(address && typeof address === "object");
-		return await body(`http://127.0.0.1:${address.port}`, requests);
+		const result = await body(address.origin, requests);
+		assert.equal(started, requests.length, "Every received request must be accounted for, including incomplete bodies");
+		assert.equal(aborted, 0, "Counting server must not conceal an aborted body");
+		return result;
+	} catch (error) {
+		if (error instanceof Error) error.message += ` [loopback port=${address.port}; started=${started}; completed=${requests.length}; aborted=${aborted}; excludedBindings=${address.skippedPorts.length}]`;
+		throw error;
 	} finally {
-		await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+		await closeLoopbackServer(server);
 	}
 }
 
@@ -122,7 +127,7 @@ async function exerciseProvider(
 	contextWindow: number,
 	userText: string,
 	options: { history?: unknown[]; interfaces?: RunnerInterfaces } = {},
-): Promise<{ transformed: unknown[]; stopReason: string }> {
+): Promise<{ transformed: unknown[]; stopReason: string; errorMessage: string }> {
 	const controller = new AbortController();
 	let currentModel: Model<any> | undefined = model(api, baseUrl, contextWindow);
 	const project = exerciseProvider.project;
@@ -130,6 +135,7 @@ async function exerciseProvider(
 	const { runner, cleanup } = await loadRunner(project, () => currentModel, () => controller.abort(), options.interfaces);
 	let transformed: unknown[] = [];
 	let stopReason = "";
+	let errorMessage = "";
 	try {
 		await runAgentLoop(
 			[{ role: "user", content: userText, timestamp: 0 }],
@@ -143,7 +149,10 @@ async function exerciseProvider(
 				},
 			},
 			(event) => {
-				if (event.type === "message_end" && event.message.role === "assistant") stopReason = event.message.stopReason;
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					stopReason = event.message.stopReason;
+					errorMessage = (event.message.errorMessage ?? "").replace(/http:\/\/127\.0\.0\.1:\d+/g, "<loopback>").slice(0, 512);
+				}
 			},
 			controller.signal,
 			(selectedModel, context, options) => streamSimple(selectedModel, context, {
@@ -152,7 +161,7 @@ async function exerciseProvider(
 				onPayload: async (payload) => runner.emitBeforeProviderRequest(payload),
 			}),
 		);
-		return { transformed, stopReason };
+		return { transformed, stopReason, errorMessage };
 	} finally {
 		currentModel = undefined;
 		await cleanup();
@@ -166,7 +175,7 @@ export async function runProviderBudgetCases(runCase: RunCase): Promise<void> {
 		for (const api of ["openai-completions", "google-generative-ai"] as const) {
 			await withCountingServer(async (baseUrl, normalRequests) => {
 				const normal = await exerciseProvider(api, baseUrl, 100_000, `${USER_SENTINEL}: short request`);
-				assert.equal(normalRequests.length, 1, `${api} budgeted request must reach the provider once`);
+				assert.equal(normalRequests.length, 1, `${api} budgeted request must reach the provider once; ${normal.stopReason}: ${normal.errorMessage}`);
 				assert.equal(normal.stopReason, "error");
 				assert.match(normalRequests[0].body, new RegExp(SYSTEM_SENTINEL));
 				assert.match(normalRequests[0].body, new RegExp(USER_SENTINEL));
@@ -221,7 +230,7 @@ export async function runProviderBudgetCases(runCase: RunCase): Promise<void> {
 					];
 					const before = requests.length;
 					const result = await exerciseProvider(api, baseUrl, 10_000, `${USER_SENTINEL}: continue`, { history });
-					assert.equal(requests.length, before + 1, `${api}/${isError ? "error" : "success"} should fit only after deterministic offload`);
+					assert.equal(requests.length, before + 1, `${api}/${isError ? "error" : "success"} should fit only after deterministic offload; ${result.stopReason}: ${result.errorMessage}`);
 					assert.equal(result.stopReason, "error");
 					const transformedTool = result.transformed.find((message: any) => message?.role === "toolResult") as { content?: unknown; details?: unknown };
 					assert.ok(transformedTool, "tool result protocol row must remain paired with its assistant call");
@@ -254,8 +263,11 @@ export async function runProviderBudgetCases(runCase: RunCase): Promise<void> {
 				for await (const _event of response) { /* consume the real provider stream */ }
 				const message = await response.result();
 				assert.equal(message.stopReason, "aborted");
+				// The pinned Google client attaches an abort listener after onPayload
+				// without checking the already-aborted signal. Retain this exact oracle;
+				// selecting a valid fetch port must not mask it with a transport failure.
 				const expectedRequests = api === "google-generative-ai" ? 1 : 0;
-				assert.equal(requests.length, expectedRequests, `${api} late-abort behavior changed; revisit the documented provider boundary`);
+				assert.equal(requests.length, expectedRequests, `${api} late-abort behavior changed; revisit the documented provider boundary; ${message.errorMessage ?? "no SDK error"}`);
 				record("late_provider_abort", { api, httpRequests: requests.length, strictNoHttpGate: false });
 			});
 		}

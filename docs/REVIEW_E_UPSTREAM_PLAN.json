@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "kind": "e8-user-accepted-upstream-budget-design",
+  "executionProfile": "joint-upstream",
+  "liveAllowed": true,
+  "authorization": { "required": true, "granted": false, "singleUse": true, "reusesHistoricalAllowance": false },
+  "decision": "User explicitly requested retaining the existing upstream budget instead of further compatibility investigation.",
+  "upstreamBudget": { "maxOutputTokens": 65536, "thinkingBudget": 16384, "outputReservation": 81920 },
+  "budgetSemantics": "Conservative local sum for SDK completion plus reasoning; does not claim client cap enforcement or verified billing semantics.",
+  "clientPayloadAndGlobalConfiguration": "unchanged",
+  "responseContract": "E8-STATE-ENUM-V2",
+  "toolPolicy": "same-as-joint-tool-none",
+  "policy": {
+    "namespace": "review-e-upstream",
+    "taskIds": ["E8-U", "E8-C", "E8-R"],
+    "limits": {
+      "maxHttpRequests": 24,
+      "maxTaskHttpRequests": 8,
+      "maxInputTokens": 65536,
+      "maxInputBytes": 65536,
+      "maxOutputTokens": 81920,
+      "safetyMargin": 4096,
+      "maxTotalInputTokens": 1572864,
+      "maxTotalOutputTokens": 1966080,
+      "requestTimeoutMs": 90000,
+      "taskTimeoutMs": 480000,
+      "batchTimeoutMs": 1500000,
+      "maxResponseBytes": 262144,
+      "maxTaskTools": 12
+    }
+  },
+  "noCacheReservationReferenceUsd": 8.552448,
+  "referenceIsMoneyCap": false,
+  "unknownCacheOrReasoningBillingKeepsCostUnknown": true
+}

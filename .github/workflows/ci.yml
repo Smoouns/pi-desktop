@@ -36,6 +36,7 @@ jobs:
       - run: npm run test:harness
       - run: npm run test:harness:long-horizon
       - run: npm run test:production-lifecycle
+      - run: npm run test:task-transport-sdk
       - run: npm run test:novel-domain
       - run: npm run test:evals
       - run: npm run test:pilot
@@ -62,6 +63,7 @@ jobs:
           path: |
             artifacts/harness/*.json
             artifacts/harness/production-lifecycle/**/*.json
+            artifacts/harness/task-transport/**/summary.json
             artifacts/harness/evals/**/*.json
             artifacts/harness/pilot-rehearsals/**/*.json
             artifacts/harness/live-pilots/dry-run-*/**/*.json

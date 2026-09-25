@@ -2,7 +2,9 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 及其两项 CI 工装修正已提交推送，固定代码提交 `e9f7d69` 的双平台 CI 已通过。D 的完整生产 SDK 生命周期、冷恢复与隔离原生 Desktop 接线现已本地通过，并连同 Windows 控制台修复提交推送为 `d66a302`；该固定提交的四个双平台 CI 任务全部通过。E 优化未开展。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+最新本地进度（2026-09-25）：E1–E7 的分层计量、来源缓存、任务发送账、usage 配对诊断、批次裁剪、非权威进展及测试端口修复已在本地验证，仍未提交。E8 已取得真实 U/C 观察和独立 R 补测通过，并修复工具结果重复计量；这不是同版本一次全套联合通过。摘要逐项审读已完成：9/10 明确保留，关键 5/6；“正文尚未验证”表述缺失，但实际恢复请求从结构化检查点取得原话，原生摘要本身未进入答题请求。真实兼容锚点未命中、通用语义进展和真实小说长程质量仍未验证，不能将这些局部证据等同整个 E 完成。详见文末及 [摘要审读](REVIEW_E_SUMMARY_CONTENT_REVIEW.md)。
+
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 及其两项 CI 工装修正已提交推送，固定代码提交 `e9f7d69` 的双平台 CI 已通过。D 的完整生产 SDK 生命周期、冷恢复与隔离原生 Desktop 接线现已本地通过，并连同 Windows 控制台修复提交推送为 `d66a302`；该固定提交的四个双平台 CI 任务全部通过。后续 E1 已加入分层计量和非标准 batch 路径修复，属于尚未提交的本地验证结果，见文末及 `REVIEW_E_METRICS.md`；不等于 E 全部完成。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
@@ -14,12 +16,12 @@
 | AUD-02 | fixed / CI_passed | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | `c67467e` 双平台 CI 全绿；新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放 |
 | AUD-03 | fixed / CI_passed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | `f1b19df` 双平台 CI 全绿；263 例 × 3 实际执行。没有本批 Desktop 验收 |
 | AUD-04 | fixed / CI_passed | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | C 的 `e9f7d69` 双平台 CI 全绿；D 的 `d66a302` 又通过完整 SDK 压缩 / 冷恢复及双平台 CI，隔离原生 Desktop 任务提交单独本地验收 |
-| AUD-05 | partially_addressed | C 保留任务目标、约束、产物与验证凭证，E 再测量压缩质量 | 这是必需恢复信息，不是通用规划器或语义进度摘要；不将其当作 Canon |
+| AUD-05 | partially_addressed / local_pass | C 保留任务合同；E4 保护工具批次；E5 提供有界非权威历史；E8 补局部真实摘要审读 | 单样本摘要 9/10 明确保留、关键 5/6；正文未验证状态只由检查点明确保留。恢复答案 10/10 不证明摘要独立有效；不授予 Canon 或关闭通用语义质量，见 REVIEW_E_SUMMARY_CONTENT_REVIEW.md |
 | AUD-06 | fixed / CI_passed | D 补完整生产接线、冷恢复与来源版本定向突变回归；D-07 补隔离原生窗口验收 | `d66a302` 双平台实际通过 SDK 8 组 / 15 进程、Harness 285 例 × 3；隔离原生 UI → Rust RPC → 固定 CLI → 完整扩展另经本地验收。不是安装包或真实模型验收 |
-| AUD-07 | deferred | E：分层计量预算估算、provider usage 和 HTTP 派发 | 不把 eval 单请求限制复制到生产重试策略 |
-| AUD-08 | deferred | E：先测量物理读取和逻辑引用，再考虑请求内缓存 | 最终写入仍须核验版本 |
+| AUD-07 | partially_addressed / local_pass | E1 分层计量、E3 发送出口与任务账；E4 配对诊断；E8 补真实用量配对和重复输出计量修复 | 原上游批次 14 配对、独立 R 9 配对；兼容增量锚点未命中，不据此降低预算或猜费用。见 REVIEW_E_UPSTREAM_RESULT.md / REVIEW_E_READ_RETEST_RESULT.md |
+| AUD-08 | partially_addressed / local_pass | E2 单次 Context 复用来源指纹；E8 R 独立实测确认复用、跨请求重验及 v2 重读 | 五项 R 证据通过；只代表扩展计量的 readFile 行为，不是 OS IO、真实小说延迟或费用节省。见 REVIEW_E_SOURCE_CACHE.md / REVIEW_E_READ_RETEST_RESULT.md |
 | AUD-09 | deferred | 需求出现后再决定是否持久化 Observation | 本轮不加数据库、向量检索或新 agent loop |
-| AUD-10 | deferred | E：按任务相关证据判断有效进展 | 保留硬上限，不引入模型裁判 |
+| AUD-10 | mechanically_addressed / local_pass | E6：按验证对象、模式、已核对依赖及规范化诊断跟踪修复；无关读写不重置验证停滞 | 同类失败三次未改善停止；实际差额改善及完整修复正例通过。保留硬上限与独立的通用工具重试启发式，不引入模型裁判，不宣称语义进展，见 REVIEW_E_EFFECTIVE_PROGRESS.md |
 
 ## 执行记录
 
@@ -250,3 +252,179 @@
 - Windows 普通及短 TEMP 两轮 journal 均为 **11**、unsupported=[]，真实 `PASS journal.windows-short-temp` 出现在日志中；Ubuntu journal **10**、unsupported=[]。
 - 平台条件跳过仅三处：Ubuntu 的 Windows 短 TEMP、Windows 控制台用例；Windows 的 Linux 系统依赖安装。没有必需检查因失败而未执行。逐步状态与关键日志摘录留存在本机 `artifacts/harness/ci-d66a302-36001222669/verification.json`。
 - 本次远程结果绑定上述固定代码 SHA，后续登记结果的纯文档提交标记 `[skip ci]`，不将未运行的文档提交算作重新验收。原生窗口验收仍以 D-07 的独立本地记录为准，CI 不自动驾驶桌面；E 与真实模型实验未启动。三份原始规划文档保持未跟踪，没有纳入提交。
+
+## E1：启动边缘修复与计量基线（2026-09-24，本地）
+
+此节保留 E1 当时的结果；后续请求内缓存 E2 的独立验收见下一节。
+
+- Windows 非标准 `.cmd` / `.bat` 不再通过普通 `cmd.exe /C` 参数编码；使用 Rust 的批处理专用转义，并按请求 cwd 解析相对入口。先复现含空格绝对路径失败和元字符误解析，再通过 RPC / CLI 各 7 条真实子进程路径。保留无控制台标志、标准 npm → Node 快捷分支和所有管道。
+- 管理扩展 v19 新增诊断专用 `runtime-metrics`，`get_context_budget` 返回本次运行及同项目 / 会话 / 职能上一运行的有界计量。估算、SDK usage、HTTP 计数互不冒充；缺失 / 全零 usage 不当作免费；无法核实 cache 和费用时仍未知。
+- 区分业务文档、指纹、检查点、Observation、记忆索引及验证报告读取；只数纳入预算的扩展 `readFile` 调用，不声称是全部 OS 磁盘 IO。来源引用和 Observation 分页字节另计，不改变既有收费 / 安全限制。
+- 完整 SDK 新增计量 + 冷恢复两进程验收；最新源码独立报告 `artifacts/harness/production-lifecycle/d-XJiNOk/summary.json`，共 9 组 / 17 进程通过，真实模型和网络请求为 0。此前初轮报告 `d-UzJB0p`、`d-OMc5ee` 保留，不覆盖。
+- 合成样本一次 Context 的同一 87 字节来源被检查点和 Observation 各读取一次：2 次 / 174 字节；只支持“存在单次请求内复用机会”，不代表真实小说收益或允许省略最后写入版本检查。
+- 新增 5 项计量定向用例通过，覆盖生成 / 压缩后的扩展、未知 usage、读取 / 引用分层、容量及会话隔离；Rust 全部 11 项、应用 / 测试 TypeScript、领域测试、长程 1 例 × 3、前端构建通过。最终源码完整 Harness **290 例 × 3**，deterministic=true、failures=false。
+- 首轮完整 Harness 的 290 例 × 3 只有同一项失败：预算工具的新说明遗漏既有“累计”提示；实际字节预算断言均已通过。补回“读取及输出预算仍按运行累计”，不改原测试或预算行为；随后三轮全部通过。失败快照保存在 `artifacts/harness/review-e1/harness-first-failure-365683597f504acdad95ba1ecbd5b5e7`，未用成功结果覆盖。
+- E1 尚未 commit / push，未进行本批远程 CI、原生窗口或真实模型验收。完整任务级 HTTP / 摘要 / 重试总账、usage 校准、请求内缓存、压缩质量与任务相关进展仍待后续；Observation 持久化继续按需预留。
+
+## E2：单次上下文来源快照（2026-09-24，本地）
+
+- 管理扩展 v20：Checkpoint 与 Observation 在一次 Context hook 内复用文件 SHA / 行数；局部传递并在 finally 销毁，不保留正文或人工验收结果。每次命中仍核验路径、链接、类型、文件大小与 stat 变化；SHA 仍来自实际字节。
+- 下一请求、主动分页读取、工具刷新 / 对账、最终写入及完成核验不沿用该缓存。128 项 / 4 MiB 来源规模上限只限制缓存，超限回退读取，原累计预算继续执行。验收撤回、同大小 / 还原 mtime 的改写、取消后旧 IO 均有定向负例。
+- 相同 SDK 受控样本的来源引用仍为 2 次，实际读取从 E1 的 2 次 / 174 字节降为 1 次 / 87 字节。`sourceCache` 统计命中、未命中、失效与容量回退；不把命中量当作普遍省钱 / 磁盘 / 端到端加速结论。
+- 定向缓存 **7 项**、原计量 **5 项**、完整 Harness **297 例 × 3**（deterministic=true、failures=false）、长程 **1 例 × 3**、应用 / 测试 TypeScript、领域回归及前端构建通过。Harness 冻结副本：`artifacts/harness/review-e2/harness-passed-847d8331f39d4436a7ce9481b65dd4ea`。
+- 完整生产 SDK 生命周期 **10 组 / 19 个独立进程** 通过，报告 `artifacts/harness/production-lifecycle/d-stpncV/summary.json`。Context 结束后改写来源，原生写入仍被拒绝；冷启动不继承缓存，也不自动恢复失效证据的权限。真实模型调用与网络防护触发均为 0。
+- 详情见 [E2 验收记录](REVIEW_E_SOURCE_CACHE.md)。E1 历史证据未改写。本批没有改真实小说 / 全局 Pi，没有新 Desktop / Rust 验收、提交推送或远程 CI；E3 的 transport 任务总账、真实 usage 校准、压缩质量与任务相关进展仍待后续。
+
+## E3：任务级请求计量（2026-09-24，本地）
+
+- 管理扩展 v21：普通 provider 调用、Pi 原生压缩 / 分支摘要、同一次客户端调用内的 fetch 再次尝试按项目 / 会话 / 职能 / taskId 归属。支持固定 SDK 的 OpenAI 兼容与 Google 发送层；其余通道覆盖缺口明确标记，发送预记不冒充服务器实收，`httpRequests` / 费用仍可未知、`taskTotalComplete=false`。
+- 新增 `/novel-transport-status` 只读详情，结束后的任务仍可查询；`get_context_budget.taskTransport` 提供结构化快照，原运行级 metrics 不变。SDK 归一化 usage 不视为已核实 cache，不根据参考价格补猜费用。
+- 支持通道在最终序列化后的 fetch 前检查预算、取消及记录归属；journal 绑定失败时显式拒绝，不能因 SDK 吞掉 payload hook 错误而继续发送。保留原重试策略；直接转交 assistant stream，HTTP body 背压转交，不缓冲完整 SSE。
+- 实测 Pi 首条 assistant 前只缓冲自定义记录，因而增加有界、同步提交的会话 / 任务计量旁路文件。先落盘再发出；损坏、并发版本冲突、遗留锁均拒绝而不重置。冷恢复的未结请求为未知，不重放。该计量恢复不代表尚未落盘的 Pi 聊天 / 合同也能恢复；同一任务已放弃分支的消耗不回滚。
+- 定向 **10 项**、完整 Harness **307 例 × 3**（deterministic=true、失败 0）、长程 **1 例 × 3**、应用 / 测试 TypeScript、领域 smoke 与前端构建通过。完整 SDK 生命周期 **10 组 / 19 个独立进程** 通过：`artifacts/harness/production-lifecycle/d-3vuewg/summary.json`，包括任务普通 / 摘要计量跨 PID 精确恢复及零重放。
+- 实际 OpenAI / Google SDK 客户端连接本机计数服务器：**14 组 / 24 次 loopback HTTP** 通过，`artifacts/harness/task-transport/e3-xACstO/summary.json`。服务器在应答前核对磁盘发送记录；覆盖原生摘要、分支、默认客户端重试、超限与损坏零新增 HTTP、首段流式可见后取消、未知 usage 和失败摘要。真实模型调用 0、外网阻断触发 0、测试服务器失败 0。
+- 首轮完整 Harness 的原预算诊断失败已保留：`artifacts/harness/review-e3/harness-first-failure-329f3c970deb4bc296c1932dfc7a7012`。调整预算检查 / 计量绑定顺序后原断言通过，成功副本为 `artifacts/harness/review-e3/harness-passed-7faa69f05e4a4fb497ae37651d0b927e`。其余 SDK 初轮失败与修复边界详见 [E3 验收记录](REVIEW_E_TRANSPORT.md)。
+- 本批没有真实模型、Desktop 点击、Rust、发布包或远程 CI 验收，没有提交 / 推送，没有修改真实小说 / 全局 Pi。下一步仍为同模型 / 同投影 usage 校准、压缩质量与任务相关进展；Observation 持久化继续按需预留，不因计量通过而宣告整个 E 完成。
+
+## E4：配对用量诊断与工具裁剪保护（2026-09-24，本地）
+
+- 管理扩展 v22：在 E3 的同一发送作用域内将最终序列化输入与终态 SDK usage 配对。仅完整单次发送、无重定向、成功且 usage 有效的响应形成进程内诊断锚点；按固定 SDK 将缓存输入加回上下文输入，不混入输出 token，不计算未知费用。
+- 只有模型 / endpoint / 静态参数 / system prompt / 工具 schema / 投影相同且历史严格追加时才记录增量预测误差。模型、会话、任务、压缩边界、历史改写、缺失 usage、重试及迟到响应不会借用旧锚点。诊断有界、不保存原文或密钥、不持久化、不修改预算。
+- 修复已复现的按结果条数拆散近期并行批次、裁剪旧错误及未完成批次问题。裁剪成功结果保留 Observation ID；完整生产扩展中来源改版仍返回 `stale_source`。自然语言摘要仍不得授予 Canon 权限；不是已实现通用进度摘要。
+- `test:usage-calibration` **11**、`test:context-quality` **10**、原 `test:task-transport` **10** 项通过；完整 Harness **323 例 × 3**，deterministic=true、失败 0，另有类型检查、领域 smoke、长程 **1 例 × 3**及前端构建通过。初始两项红灯与固定成功副本均保留在 `artifacts/harness/review-e4`。
+- 完整生产 SDK + 真正客户端 / 本机服务器 **15 组 / 33 HTTP**通过（`task-transport/e4-H3cTQ1`）；完整生命周期 **10 组 / 19 PID**通过（`production-lifecycle/d-sxOk6y`）。三次有意返回错误批准文字的原生摘要仍不能替代原文约束和权威检查；冷进程恢复任务账但没有校准锚点。两类工装的替身、边界与路径见 [E4 验收](REVIEW_E_CALIBRATION.md)。
+- 真实模型调用 0，无桌面控制 / 真实小说 / 全局配置改动，未提交推送。下一步可补有界非权威的任务执行进展与相关性回归；真实 usage 误差和语义质量需另行授权、预登记同任务对照后测试。不能据合成数据宣称 token 节省、摘要质量或所有 E 项目已经完成。
+
+## E5：有界非权威任务进展（2026-09-25，本地）
+
+- 管理扩展 v23：宿主实际读取、确认写入、机械验证和结构化失败生成独立历史记录，绑定活动分支及项目 / 会话 / 职能 / taskId。每份最多 24 条 / 24 KiB；模型投影最多 12 条 / 12 KiB，纳入既有预算。没有原始正文或自由文本记忆，不从模型“已完成”推断事实。
+- `/novel-run-status` 显示最近进展，Agent 检查点 / 运行状态结果包含 `progress`。全部标为历史、非权威且未人工验收；旧 PASS 遇到来源变化必须重验。可选记录失败不改变写入、检查点或完成门槛，不自动重放；缺失和淘汰明确标注。
+- 定向 **12 项**通过；完整生产 SDK 生命周期 **11 组 / 21 独立进程**通过（`production-lifecycle/d-FdcT4x`），覆盖三次压缩、冷恢复、失败诊断、作用域隔离、损坏记录与零重放。实际 SDK / 本机服务器 **15 组 / 33 HTTP**通过（`task-transport/e4-yuuj84`），不是实际模型质量证据。
+- 应用 / 测试 TypeScript、领域 smoke、长程 **1 例 × 3**、前端构建通过。完整 Harness 复跑 **335 例 × 3**通过，deterministic=true、失败 0；成功副本保存在 `artifacts/harness/review-e5/harness-passed-344e67e25785b7ceb608aef352bb667e1e09d2f6ea968d138155293596d9fa83`。
+- 首次完整 Harness 第二轮的两个既有 Google HTTP 数断言失败单独冻结；第一、三轮通过且 trace 一致。补测试诊断后固定 8 轮定向 **32/32**与完整复跑通过，但原因仍未定位，不标记为已修复。初始缺口与首版接线失败也保留。路径、故障注入边界及证据见 [E5 验收](REVIEW_E_PROGRESS.md)。
+- 未提交 / 推送，无新增 Desktop / Rust / 远程 CI / 真实模型验收，不改真实小说或全局 Pi。下一步可处理 AUD-10 的任务相关有效进展判定；保留硬预算，不让该历史记录本身重置无进展计数。真实 usage 校准与摘要语义质量继续单列。
+
+## E6：验证对象级机械进展（2026-09-25，本地）
+
+- 管理扩展 v24：不再将全局新读取或文件 SHA 改变视为验证修复；按对象 / 具体验证模式 / 已核对依赖版本 / 诊断形态独立计数。字数等可解析差额严格改善可继续；同值、变差、无关读写、正文空白及返回旧错误 / 依赖不冲掉原计数。机械长度改善不等于写作质量，未知诊断不猜测严重性。
+- schema 2 运行快照有界并校验完整性，旧 schema 1 原样可读；冷恢复不自动运行，明确新输入才能重启。任务完成仍须当前来源的完整 PASS，用户验收和 Canon 权限不变。通用工具修复错误继续使用既有独立启发式，不冒充通用语义进展。
+- 先补 5 项有效红灯，再实现并扩展到 **13 项**定向验收。完整 Harness **348 例 × 3**通过，deterministic=true、失败 0；146 项实现文件哈希与当前代码一致。固定副本：`artifacts/harness/review-e6/harness-passed-0479457e93394627ba38bfe0472e555b7b654539f03c0b7ff1f19f35cb515925`。
+- 完整 SDK 生命周期 **13 组 / 24 独立进程**通过（`production-lifecycle/d-gy4UB6`）。真实验证器在无关活动间重复失败 3 次后准确 NO_PROGRESS；冷恢复零重放，明确修复后可候选完成。另一正例 4 次同形态字数差额改善不误停，第 5 次完整验证通过。
+- 如实区分 SDK provider 入口与请求：停滞负例 10 个工具、10 次生成回复，另有 1 次已取消的 provider 入口，不生成回复或派发工具；不是 HTTP 计数。初轮并行写入触发旧门禁、入口计数假设错误等失败证据保留，详见 [E6 验收](REVIEW_E_EFFECTIVE_PROGRESS.md)。
+- 实际固定 OpenAI / Google 客户端连接本机服务器 **15 组 / 33 HTTP**通过（`task-transport/e4-dDsrSz`）；应用 / 测试 TypeScript、领域 smoke、长程 **1 例 × 3**、前端构建通过。真实模型调用 0，无新增 Desktop / Rust / 远程 CI 验收，未提交 / 推送；不改真实小说、全局 Pi 或冻结评测实现。
+- 下一步：定位 E5 的两个 Google 偶发测试问题；再另行授权并预登记真实模型 usage / 压缩质量 / 读成本联合验收，最后提交推送、跨平台 CI 与更新后的原生 Desktop 验收。AUD-09 Observation 持久化仍按需求预留，不在本批扩展。
+
+## E7：Google 测试端口问题（2026-09-25，本地）
+
+- 此 Windows 的随机端口范围与 Fetch 受限端口重叠。固定 6667 确定重现两个原失败（SDK `fetch failed`，底层 `bad port`，HTTP 实收 0），固定允许端口后原断言通过。原 E5 失败缺少端口 / cause，历史归因仍未证实；未修改其冻结记录。
+- 仅修当前公共 HTTP 测试的 loopback 选址：最多 32 次空绑定，排除受限端口，普通绑定错误不重试；SDK 请求不重试、不放宽任何预算或 late-abort HTTP 数量断言。完整记录见 [E7 端口调查](REVIEW_E_PROVIDER_TEST_STABILITY.md)。
+- 受控真实端口注入确认两个受限绑定均在调用 provider 前被替换；定向 **8 项 × 3**通过。实际固定 SDK 本机测试 **15 组 / 33 HTTP**通过（`task-transport/e4-lY1745`），外网阻断触发与服务器失败均为 0。应用 / 测试 TypeScript 通过；完整 Harness **352 例 × 3**通过，deterministic=true、失败 0，149 项实现文件哈希核对相同。固定副本 `artifacts/harness/review-e7/harness-passed-a88fe5dbaa174ac968ffc03db002caaf378cdea860e6fe0ec8c0fef25c4d49c6`。
+- 本批生产代码和运行策略未改，无真实模型、系统网络配置、全局 Pi、原生 Desktop 或远程 CI 操作，未提交 / 推送。下一步是另行授权并预登记真实模型 usage / 压缩质量 / 读成本联合验收；不是继续猜测历史端口或反复重跑直到通过。
+
+## E8：真实模型联合验收准备（2026-09-25，仅方案）
+
+- 已拟定 [E8 方案 v1](REVIEW_E_LIVE_VALIDATION_PLAN.md) 及不可执行的 JSON 草案：3 个公开合成场景分别观察同请求用量配对、独立会话的压缩对照、实际读取与来源新鲜度。
+- 拟定每场景 8 / 全批 24 次 HTTP，普通与原生摘要共享；每请求最多 65,536 输入字节、2,048 输出参数。用户参考价的满额无缓存预留约 $1.36，不是美元硬限额；cache 不明仍记费用未知。
+- 当前只读核对选定模型配置存在，未解析凭据、探测端点、生成已授权 manifest 或发送模型请求。旧 live 工装是独立 profile，下一步先实现完整当前扩展的新驱动并离线验证，再 prepare 精确清单、单独请求真实批次批准。不改旧冻结实验、生产运行策略、真实小说或全局 Pi，不提交 / 推送。
+- 不可执行方案通过 7 组静态检查及既有 `freezeRequestPolicy` 校验，E7 的 149 项实现文件字节不变。结果在 `artifacts/harness/review-e8/plan-check-1dzvFE/summary.json`；此检查不是新驱动验收或 live prepare。
+
+### E8 离线驱动（2026-09-25）
+
+- 新增 `test:review-e8` 与只读 `test:review-e8:recover`。完整 v24 扩展一次生成后逐字复制到隔离 worker；固定 SDK、原生工具与单 / 双摘要、真实序列化 / 解析和串流均运行，对端仅为本机合成 broker，不替换 provider 或另写 Agent 循环。
+- U 逐次对应请求与 usage，cache 缺失保持 null；C 同 seed 的独立压缩对照、摘要 / 结构化记录 / 最近消息 / 最终投影分别留档；R 实际 992 字节来源在单上下文复用读取、下一上下文重读，同大小 v2 改写后重新读取并刷新。正确合成答案不等于真实摘要质量，未命中锚点不造命中。
+- **23 组 / 35 次本机 HTTP**通过（U/C/R 正例 14 次），覆盖缺失用量、超限、认证 / 限流 / 服务器错误、重定向、超时、取消、崩溃、未启用工具及越界路径、日志改写 / 损坏、终态相关性与冷恢复零重放。结果 `artifacts/harness/review-e8/offline-fbGy8H/summary.json`；首轮接线失败与未启用工具未及时停批的失败也保留，详见 [E8 离线验收](REVIEW_E_OFFLINE_DRIVER.md)。
+- 完整 Harness **352 例 × 3**通过，deterministic=true、失败 0，157 项实现 SHA 核对一致。固定副本 `artifacts/harness/review-e8/harness-passed-849578b4cb51642db7fdc6cb597fd04cc8c6740281e4eb1c236b405ca95d872d`。原有 SDK 发送层 **15 组 / 33 HTTP**通过（`task-transport/e4-d8JGhB`），应用 / 测试类型检查及 diff 检查通过。
+- 本批没有生产代码 / 运行策略、真实小说、全局 Pi、冻结 eval 实现改动，无真实模型、Desktop、Rust、远程 CI 或提交推送。`livePrepareReady=false`；下一步补真实批次的无网络 prepare / 配置投影与授权门禁，冻结精确清单后另行批准。不能沿用旧 allowance，也不能把本次离线批准当成付费请求授权。
+
+### E8 准备与授权门禁（2026-09-25，配置待确认）
+
+- 新增独立 prepare / verify / 单次授权 / 只读 recover；受控 live 出口已接线但本轮不运行。准备不解析真实凭据，SDK 原始 / 占位 URL 序列化需一致，完整扩展 U/C/R 通过零网络 IPC 合成 SSE 演练，普通及双摘要均按生产调用 ID 配对。
+- 冻结代码、资产、选定已安装依赖和编译器 / Node 字节、模型 / endpoint / 凭据引用指纹、fixture / 工具 / 提示 / 预算。授权先以独立无凭据进程同步落盘消耗，再允许解析所选环境变量；配置漂移、过期、复制目录、重复启动拒绝。中止及迟到结果不恢复请求，C 的独立两会话共享场景额度与期限；cache 未知继续保留费用未知。
+- 最终门禁 **20 组**通过（`review-e8/gate-tests-F4xs5G`），原 E8 本机 HTTP **23 组**通过（`review-e8/offline-8U6zWG`），固定目的地址适配器 **61 项模拟断言**通过；完整 Harness **352 × 3**通过，deterministic=true，固定副本 `review-e8/harness-prepare-passed-410d85703ce65d09f026febc24877e906a3218c5b4102b5850c87b5d5702ec5d`。166 项实现清单中仅 README 文档在报告后更新，其余 165 项字节一致；应用 / 测试类型及 diff 检查通过。
+- 用户实际配置的 prepare 在前置格式检查失败：所选 provider 的 `apiKey` 不是支持的环境变量名引用；模型、窗口与显式本机 HTTP 地址符合已检查要求。失败目录 `review-e8/prepared-RqccKG` 保留；没有生成实际 manifest、读取环境变量 key、发送请求或改全局配置。需要用户提供变量名 / 确认配置调整，再生成新清单并单独批准，不能拿虚构配置测试的 manifest 代替。
+- 详见 [准备记录](REVIEW_E_PREPARATION.md)。本轮真实模型调用 0，未操作 Desktop、真实小说、全局 Pi 或冻结评测实现，未提交 / 推送；仍不宣称真实模型用量校准、摘要语义质量、读取节省或整个 E 已完成。
+
+### E8 精确清单冻结（2026-09-25，等待真实批次批准）
+
+- 用户指定 `GEMINI_API_KEY` 后，仅将 `models.json` 中所选 provider 的 `apiKey` 改为该引用，其余配置语义不变；只确认变量名存在，不读取值或进行鉴权。历史失败 `prepared-RqccKG` 保留。
+- 收紧启动环境传递为先筛名称、后取白名单值；两条实际表达式的合成 getter 检查通过，凭据访问 0。准备门禁复跑 **20 组**通过（`review-e8/gate-tests-FbE9pc`），测试类型检查通过；没有新增完整 Harness / Desktop / Rust / 远程 CI 结果。
+- 当前选定配置成功完成无网络 SDK 序列化对比及 14 次完整扩展合成调用，独立 verify 通过。清单 `review-e8/prepared-q4sDJ2/manifest.json`，SHA `21a0caa94d17f6fc8c158ebb76a7261a9504081b35f7b052853e06219b7f7d47`，到期 **2026-09-26 15:57:15.777 UTC+8**；授权未消耗、执行未启动、真实模型调用 0。
+- 下一步仅在用户明确批准这份清单及未知费用边界后执行 U/C/R。全批 24 / 单场景 8 次上限不变，参考满额无缓存预留约 $1.36，不是硬金额上限。没有提交推送，没有沿用旧授权或拿合成结果证明真实模型质量。
+
+### E8 首次真实执行（2026-09-25，权限异常停批）
+
+- 用户明确批准 `prepared-q4sDJ2` 后消费单次授权并执行；首个实际请求 `tools: []`，响应却要求 `list_dir({})`。固定 SDK 拒绝未启用工具，外围 `tool_permission` 停止后续发送。成功工具执行 0，1 次真实派发 / 1 个完整响应；另一个被取消的 provider 入口不是第二次 HTTP。
+- U 未完成第二次固定提示，C 的两个分支及 R 均 `not_run`，不能算联合验收通过。模型行为 / 代理转换 / 上游注入的具体根因尚不能由单条响应判定，没有另发探测或自动重试；授权已消耗，不续用余量。
+- 原始用量为输入 798、completion 6、reasoning 708；固定 SDK 归一化输出 714，cache 缺失，实际 / 参考费用均未知。输入估算 1,642 相对同调用 798 高估 844；只有一条诊断样本，未调整生产估算器，不证明真实校准或摘要质量完成。
+- 原报告失败路径漏导出 ledger，自动配对为 0；只读审计校验 broker 链和持久会话生产账 SHA 后恢复 1 条配对，原报告不改写。新证据：`review-e8/readback-q4sDJ2/summary.json`，原报告：`review-e8/prepared-q4sDJ2/live/report.json`；详见 [真实执行记录](REVIEW_E_LIVE_RESULT.md)。
+- 已确认 Canon / 验收 sentinel 与来源 v1 未变，执行后 verify 通过；recover 1 预留 / 1 终态 / 0 未结 / 0 新请求、禁止重放。建议下一步离线完善失败收尾导出和 reasoning 计量，并诊断无工具请求的兼容性；本轮不实施这些修复、不改全局配置、不提交推送，也不新增 Desktop / Rust / 远程 CI 验收结论。
+
+### E8 失败收尾与工具协议离线回归（2026-09-25）
+
+- 经用户批准，仅修 E8 工装：失败路径保留消息 / 会话路径 / 通知 / 生产台账，清理错误不掩盖首错；未运行场景不记失败分数，停批或业务观察失败退出非零。显式含 reasoning 的输出按固定 SDK 归一化口径检查，不猜供应商账单，未知费用继续保留。
+- 先复现 2 项红灯（`review-e8/gate-tests-iSIYO3`），修复后准备门禁 **33 组**通过（`review-e8/gate-tests-XGbEGG`），原 SDK / loopback 回归 **23 组**通过（`review-e8/offline-88d7g3`）。模拟未启用 `list_dir` 响应时自动报告能保留 1 条用量配对，后续请求仍被拒绝；不冒充新的真实样本。
+- 固定 SDK 四种工具策略的零网络 payload 核对确认：空数组不自动生成 `tool_choice: none`，显式选项可被序列化。但代理是否遵守、为何返回未声明工具仍未验证；没有开放工具、删减生产扩展或偷偷改变真实请求来获得通过。
+- 原真实批次 8 项证据 SHA 未改变，无真实模型请求、全局 Pi / 真实小说 / Desktop 操作或提交推送。旧授权已消耗且源码已变化，再次实测需新清单及批准。详见 [离线修复记录](REVIEW_E_FAILURE_RECOVERY.md)；没有新增完整 Harness / Rust / 远程 CI 结论。
+
+### E8 单请求工具协议诊断准备（2026-09-25，待批准）
+
+- 新建独立 `tool-none` profile，保留完整生产扩展、原只读提示及空工具集合；仅在诊断专用 hook 添加 `tool_choice: none`，位于生产审计之前。最多 1 次请求，输入 8,192 bytes、输出 2,048，禁止追加、工具执行、重试和摘要。普通 U/C/R 及生产运行策略不自动改变。
+- 新诊断 **16 组**、原准备门禁 **33 组**、原 SDK / loopback **23 组**均通过；覆盖纯文本、未声明 / 旧式工具调用、HTTP 400、用量缺失、空 / 截断回复、参数和授权漂移及零第二次派发。证据分别为 `tool-none-tests-qvwqVd`、`gate-tests-qsMDJE`、`offline-5RrYAo`。应用 / 测试类型检查通过，真实模型调用 0。
+- 用户当前配置的无网络准备与独立 verify 已完成。新清单 `review-e8/tool-none-Z93R4B/manifest.json`，SHA `5c77620d71b94c9d352e7ce72436c3fa725e29ae315be0f81d384fde43e69b02`，到期 **2026-09-26 16:52:10.260 UTC+8**；授权未消耗、执行未启动。满额无缓存预留参考 $0.013824，不是账单或硬金额上限，未知费用保留未知。
+- 只得到一次协议观察也不能确定原异常根因或上游身份，U/C/R 仍未实测。旧真实批次 / 旧计划保持原样；不读真实 key、不改全局配置或真实小说、不操作 Desktop、不提交推送。详见 [单请求诊断记录](REVIEW_E_TOOL_PROTOCOL_DIAGNOSTIC.md)。下一步仅在用户批准这份新清单后执行一次。
+
+### E8 单请求工具协议真实诊断（2026-09-25，已完成并消耗授权）
+
+- 用户批准精确清单 `tool-none-Z93R4B` 及未知费用边界后，执行前 verify 和未消耗检查通过，17:09:30.138 UTC+8 消耗单次授权。只发送 1 次，HTTP 200，显式 `tools: []` / `tool_choice: none`；原始 SSE 和 SDK 均无工具调用，成功工具执行 0，退出 0。没有重试、摘要或追加请求。
+- 原始输入 802、completion 296、reasoning 519，SDK 输出 815；1 条同调用 usage 配对，缓存缺失，费用未知。输入估算 1,656，误差 +854；仅一条本批观察，不调整生产估算，也不能由 HTTP 200 和文本回复证明旧异常的唯一根因或上游身份。回复偏长，不能当成已满足全部表达要求。
+- 原报告 `review-e8/tool-none-Z93R4B/live/report.json`，只读审计 `review-e8/readback-tool-none-Z93R4B/summary.json`。broker 链、持久会话台账与用量相符，测试文件不变，旧失败批次 8 项证据 SHA 未变；recover 无未结 / 无新请求 / 禁止重放，执行后 verify 通过且授权已消耗。
+- 不改生产策略、真实小说或全局 Pi，不操作 Desktop，不提交推送；U/C/R 仍未完成。下一步建议仅对 U/C 无工具测试启用显式禁止，再另行准备新联合验收清单及批准，不能挪用本次已用尽额度。详见 [单次真实诊断](REVIEW_E_TOOL_PROTOCOL_DIAGNOSTIC.md)。
+
+### E8 U/C 显式禁止工具的联合准备（2026-09-25，待批准）
+
+- 用户批准后新增隔离 `joint-tool-none` profile：U/C 普通请求及 2 个原生摘要均在生产审计 / 最终请求计量之前加入 `tool_choice: none`；原 provider、摘要、流解析和完整生产扩展保留，R 和正常生产工具不变。原 joint、单请求 profile、旧计划和旧批次不覆盖。
+- 新 **16 组**、原准备 **33 组**、原单请求 **16 组**、原 SDK / loopback **23 组**通过；证据为 `joint-tool-none-tests-GxeVEw`、`gate-tests-uV1uVW`、`tool-none-tests-fMVr9Q`、`offline-5EYecv`。新首轮误写 HTTP 错误码断言的 15/16 记录保留在 `joint-tool-none-tests-61DW2q`，未修改生产错误码来迎合测试。
+- 新清单 `review-e8/joint-tool-none-XbVP5l/manifest.json`，SHA `1c77cdb7c7b4d3c068003e23e06dc32b0d0d7f634182f9f2d60fd47e1adf18fa`，到期 **2026-09-26 17:33:59.271 UTC+8**；独立 verify 通过，授权未消耗、未启动。14 次零网络完整扩展演练：U/C 6 次有明确禁用，R 8 次不变，14 条 input/output 配对。真实模型调用和凭据解析为 0。
+- 上限仍全批 24 / 每任务 8，单次 65,536 输入字节与 2,048 输出；满额无缓存参考 $1.363968 不是硬金额上限，未知缓存 / 计费继续保留费用未知。人工摘要核对仍未做，不能将合成结果或单次诊断写成联合实测通过。
+- 两个旧实测批次各 8 项证据 SHA 和 139 项生产 / 冻结评测文件未变。类型检查与 diff 检查通过；不改全局 Pi、真实小说，不操作 Desktop，不提交推送。详见 [新版联合验收准备](REVIEW_E_JOINT_TOOL_NONE.md)；下一步需用户批准新清单后再发送请求。
+
+### E8 新版联合真实执行（2026-09-25，输出用量超额停批）
+
+- 用户批准 `joint-tool-none-XbVP5l` 精确清单和未知费用后，执行前 verify / 未消耗检查通过，18:20:16.403 UTC+8 消耗授权。共 3 次真实派发，均 HTTP 200，工具调用 0；前两次成功，C 未压缩对照的第三次按 `usage_exceeded_reservation` 停批，无第 4 次或重试。
+- 第三次实际发送 `max_completion_tokens: 2048` / `tool_choice: none`，返回 completion 93、reasoning 9,016，SDK 与持久台账均为输出 9,109，超过单次预留。原生 SDK 被中止，不能把有 HTTP 200 和 usage 回执当成正常完成。上游参数 / 思考预算映射语义尚未确认，不直接提高额度或忽略 reasoning。
+- U 两条完整校准配对；C `not_completed`，处理组与 R `not_run`，摘要请求 0。第三条虽可核对用量，但不合格于完整响应校准，原报告 paired=2 保留。总输入 5,701、SDK 输出 10,379，cache 缺失，参考 / 实际费用未知。
+- 另记录严格字符串评分与自由 snake_case 题目的歧义：对照残留 JSON 为 6/10、关键 4/6，goal/card/unresolved 有同义表达风险，next 缺少按需 refresh。仅诊断、不修改分数，不把此失败归因于未发生的压缩。
+- 原报告 `review-e8/joint-tool-none-XbVP5l/live/report.json`；独立只读审计 `review-e8/readback-joint-tool-none-XbVP5l/summary.json`。本批 10 项及两个历史批次各 8 项原始证据 SHA 不变，Canon / 验收哨兵 / 来源 v1 不变；recover 0 未结 / 0 新请求 / 禁止重放，执行后 verify 通过且授权已消耗。
+- 没有改代码、全局 Pi 或真实小说，没有 Desktop / commit/push。后续先离线核实输出预算和评分契约，再决定是否新清单；不沿用已消耗授权。详见 [真实执行记录](REVIEW_E_JOINT_TOOL_NONE_RESULT.md)。
+
+### E8 代理预算映射与评分契约 v2（2026-09-25，仅离线）
+
+- 已定位到本机 Antigravity Tools 4.7.8 保存的转发参数差异。三条原请求除 `max_completion_tokens`、`store`、`stream_options` 被移除外均匹配；客户端上限 2,048，而保存的上游输出上限为 65,536、思考预算为 16,384。这是代理日志证据，不是抓包或供应商执行语义证明；未直接提高额度。
+- 固定 Agent / SDK 捕获验证：off 是省略参数；未声明 reasoning 的模型即使选 low / high 也不发普通 effort；SDK 可以序列化 `max_tokens`，但代理是否接受和约束总输出尚未验证。当前网关控制模式和 Flash high=16,384 只读核对，无全局配置变更或凭据解析。
+- 新增独立 `E8-STATE-ENUM-V2` 与 `joint-enum-v2` 离线 profile。题目提供全部备选状态、严格 10 字段 JSON / 枚举 / 布尔 / 重复键检查，保留重读后按需刷新要求；不回填旧分数。授权、启动和 broker 三层拒绝真实模式，原有预算不变。
+- 新测试 **16**、原联合 **16**、准备门禁 **33**、单请求 **16**、原离线 **23**，共 **104 组**通过；应用 / 测试类型检查和 diff 检查通过。初轮因题目定位错误的 15/16 证据保留，修正测试而不改生产投影。
+- 只读脱敏证据 `review-e8/proxy-budget-audit-20260925/summary.json`；三个历史批次 **8 + 8 + 10** 项证据及 140 项生产 / 既有评测 / 历史题目 SHA 不变。新增真实请求 0，无 Desktop / Rust / 远程 CI / commit/push；联合实测仍未完成。
+- 下一步先核实代理版本实现并设计隔离兼容方案，必要时另行准备单请求清单、取得批准后验证，不沿用已消耗授权。详见 [离线核查与回归](REVIEW_E_PROXY_BUDGET_AND_CONTRACT.md)。
+
+### E8 按用户决定沿用上游预算（2026-09-25）
+
+- 用户要求不再研究代理兼容，直接使用现有上游设置。新增隔离 `joint-upstream`：按输出 65,536 + 思考 16,384 保守预留 81,920，保留 24 / 8 次请求、超时、工具与未知用量保护，不改全局配置 / 生产代码。使用枚举契约 v2，旧批次原样保留。
+- 新 **9**、旧参数 / 契约 **16**、旧联合 **16**，共 **41 组**和两类类型检查通过。准备与执行前 verify 通过后执行新批次 `joint-upstream-gYx27t`，授权已消耗，执行后 verify / recover 通过，无未结或重放。
+- 14 次真实派发全部有完整 usage，14 条配对；U 完成，C 未压缩 / 压缩后各 **10/10、关键 6/6**，2 次原生摘要。摘要审读仍 pending_review，不将恢复答案归因于摘要单独作用。
+- R 已观察复用、重验及 v2 重读，但最终答复前被生产扩展的累计工具结果预算阻断。整体 `worker_failed` / 退出 1，不写成全套通过；没有追加请求或放宽这项不同的本地保护。
+- 总输入 82,973、SDK 输出 9,207，缓存未知、费用未知。旧证据 26 项与受保护源码 140 项 SHA 不变，真实小说 / 全局配置 / Desktop 未动，未提交推送。下一步仅诊断工具结果预算与体积，再另开批次补测 R。详见 [本轮执行记录](REVIEW_E_UPSTREAM_RESULT.md)。
+
+### E8 工具结果重复计量修复与 R 单独实测（2026-09-25）
+
+- 已复现：预算 / 检查点工具结果返回时计入额度，下一次上下文又将其当历史结果计入一次。生产扩展 v25 用仅当前 run、工具名称 / 调用 ID / 内容绑定的有界宿主回执避免重复计量；新输出仍计入额度，64 KiB 上限、来源校验和完整模型输入估算不变。
+- 定向计量 **6**、新 R profile **6**、来源缓存 **7**、读取交付 **47** 通过；完整 Harness **358 × 3**、deterministic=true、失败 0，180 项实现 SHA 核对一致；领域 smoke、两类类型检查通过。见 [修复与验收记录](REVIEW_E_READ_RETEST_RESULT.md)。
+- 独立新批 `read-upstream-FuDfJM` 沿用用户接受的上游预算，只运行 R。因旧轨迹 8 次后还需最终答复，新批最多 12 次；实际 **9 请求 / 9 完成 / 9 用量配对**，8 工具无错误，五项读取 / 新鲜度证据通过，退出 0。未重跑 U/C 或摘要，未放宽生产工具结果额度。
+- 执行前后 verify / 只读 recover 通过，授权已消耗，0 未结 / 0 重放。输入 101,809、SDK 输出 4,681；缓存未知，费用未知。旧证据 26 项 SHA 不变，没有改真实小说或全局配置，没有 Desktop / Rust / 远程 CI / commit/push。
+- 本次修复和 R 补测完成；之前 U/C 与当前 R 是分批、不同源码版本的证据，不能宣称同版本一次联合通过。摘要人工审读仍 pending，兼容校准锚点未命中；不再自动追加付费测试。
+
+### E8 原生摘要本地审读（2026-09-25）
+
+- 助手对既有 C 样本完成十项逐项审读，独立结论为 `completed_with_gap`：摘要 9/10、关键 5/6 明确保留；“正文当前尚未验证”仅被泛化为需要人工检查，不能当成完整状态保留。不是用户验收，也不修改旧报告运行时 pending 状态。
+- 核对持久会话、原始请求和最终投影后确认：原生摘要正文在实际 `e8-6` 被固定归档提示替换；三个原始用户约束由 checkpoint 逐字提供，包含缺失状态。因此原对照 / 恢复各 10/10 是完整系统答案，不是自然摘要独立有效的证据。
+- 纯本地核对脚本及 [审读报告](REVIEW_E_SUMMARY_CONTENT_REVIEW.md) 已加入；证据 `review-e8/summary-content-review-VVOdpr`，10 项历史文件 SHA、11 项冻结资产和 broker 哈希链通过。新增模型 / HTTP 请求 0，未解析凭据，未改生产策略、真实小说或全局配置，未提交推送。
+- 本次局部审读完成；保留缺口和样本限制，不继续为归档摘要追加付费测试。下一步建议先确认提交范围、整理提交，再做固定版本 CI 与更新后的隔离 Desktop 验收；用户批准和通用语义质量不得预填。

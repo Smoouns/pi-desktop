@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "kind": "e8-joint-live-validation-design",
+  "state": "draft-not-prepared",
+  "executable": false,
+  "realModelCallsThisPreparation": 0,
+  "authorization": {
+    "required": true,
+    "granted": false,
+    "manifestSha256": null,
+    "expiresAt": null,
+    "proposedTtlHours": 24,
+    "singleUse": true,
+    "reusesHistoricalAllowance": false
+  },
+  "baseline": {
+    "head": "cbc5862dad7f302f647d96e5ed338abfd9f8d5ec",
+    "dirty": true,
+    "e7ImplementationSha256": "a88fe5dbaa174ac968ffc03db002caaf378cdea860e6fe0ec8c0fef25c4d49c6",
+    "piSdk": "0.63.1",
+    "managedExtensionVersion": 24,
+    "mustRefreezeAfterToolingImplementation": true
+  },
+  "model": {
+    "provider": "gemini-proxy",
+    "id": "gemini-3.8-flash-high",
+    "api": "openai-completions",
+    "workingWindow": 262144,
+    "configuredMaxTokensObserved": 16384,
+    "proposedRequestOutputCeiling": 2048,
+    "thinkingLevel": "off",
+    "outputField": null,
+    "endpointFingerprint": null,
+    "effectiveConfigFingerprint": null,
+    "remoteAvailabilityVerified": false,
+    "credentialResolved": false,
+    "upstreamReasoningDisabledVerified": false
+  },
+  "policy": {
+    "namespace": "review-e-live-v1",
+    "taskIds": ["E8-U", "E8-C", "E8-R"],
+    "limits": {
+      "maxHttpRequests": 24,
+      "maxTaskHttpRequests": 8,
+      "maxInputTokens": 65536,
+      "maxInputBytes": 65536,
+      "maxOutputTokens": 2048,
+      "safetyMargin": 4096,
+      "maxTotalInputTokens": 1572864,
+      "maxTotalOutputTokens": 49152,
+      "requestTimeoutMs": 90000,
+      "taskTimeoutMs": 480000,
+      "batchTimeoutMs": 1500000,
+      "maxResponseBytes": 262144,
+      "maxTaskTools": 12
+    }
+  },
+  "inputReservationBasis": "serialized-utf8-bytes-not-provider-tokenizer",
+  "requestKinds": {
+    "ordinary": true,
+    "nativeManualSummary": true,
+    "branchSummary": false,
+    "automaticCompaction": false,
+    "titleGeneration": false,
+    "modelJudge": false,
+    "automaticRetry": false
+  },
+  "cases": [
+    {"id": "E8-U", "repetitions": 1, "maxHttpRequests": 8, "plannedUserInputs": 2, "toolUseAllowed": false, "plannedManualCompactions": 0, "maxSummaryRequests": 0},
+    {"id": "E8-C", "repetitions": 1, "maxHttpRequests": 8, "pairedIndependentSessions": 2, "controlAnswerSharedWithTreatment": false, "toolUseAllowed": false, "plannedManualCompactions": 1, "maxSummaryRequests": 2, "oracleItems": 10, "criticalOracleItems": [1, 2, 3, 4, 6, 10]},
+    {"id": "E8-R", "repetitions": 1, "maxHttpRequests": 8, "plannedUserInputs": 3, "toolUseAllowed": true, "readPaths": ["notes/e8-source.md"], "hostFixtureTransitions": ["v1-to-v2"], "plannedManualCompactions": 0, "maxSummaryRequests": 0}
+  ],
+  "safety": {
+    "publicSyntheticDataOnly": true,
+    "modelWritePaths": [],
+    "oracleInsideModelProject": false,
+    "changesGlobalConfig": false,
+    "changesProductionBudget": false,
+    "changesFrozenEvalImplementations": false,
+    "modelTools": ["read", "read_story_document", "read_observation", "get_context_budget", "get_task_checkpoint", "refresh_task_checkpoint"],
+    "unknownOutcomeReplayAllowed": false,
+    "prepareNetworkAllowed": false
+  },
+  "referencePriceUsdPerMillion": {"input": 0.75, "output": 3.75, "cachedInput": 0.075},
+  "noCacheReservationReferenceUsd": 1.363968,
+  "actualCostUsd": null,
+  "referenceIsMoneyCap": false,
+  "missingCachePolicy": "cost-unknown-not-zero",
+  "productionEstimateChangesAllowed": false,
+  "readyForPrepare": false,
+  "requiresOfflineFullExtensionDriver": true
+}
