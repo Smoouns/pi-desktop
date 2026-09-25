@@ -24,6 +24,7 @@ import { runReviewRepros } from "./review-repros.js";
 import { runWorkflowUiCases } from "./workflow-ui.js";
 import { runSessionRestoreCases } from "./session-restore.js";
 import { runSessionRefreshCases } from "./session-refresh.js";
+import { runSessionStatusBindingCases } from "./session-status-binding.js";
 import { runSessionTitleCoreTests } from "../session-title-core.js";
 import { runSessionTitleExtensionTests } from "../session-title-extension.js";
 import { runObservationStoreTests } from "./observation-store.js";
@@ -118,6 +119,7 @@ for (let repetition = 1; repetition <= 3; repetition++) {
 	await runWorkflowUiCases(runCase);
 	await runSessionRestoreCases(runCase);
 	await runSessionRefreshCases(runCase);
+	await runSessionStatusBindingCases(runCase);
 	await runCase("SESSION-TITLE-01 bounded visible naming input", () => { runSessionTitleCoreTests(); });
 	await runCase("SESSION-TITLE-02 loaded extension naming and isolation", () => runSessionTitleExtensionTests());
 	await runCase("P2-OBS immutable bounded observation store", () => { runObservationStoreTests(); });

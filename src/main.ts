@@ -2659,6 +2659,19 @@ function syncSidebarSelectionFromWorkspace(workspace: WorkspaceState | null = ge
 	sidebar.setTransientSessionDraft(null);
 }
 
+function isRuntimeReadyForSessionTab(
+	runtime: SessionRuntime | null,
+	tab: WorkspaceSessionTab,
+	projectPath: string | null,
+): runtime is SessionRuntime {
+	// A tab is a reusable UI slot, not a session identity. Navigation changes
+	// its target before the queued backend switch/launch starts.
+	return Boolean(runtime && projectPath && runtime.phase === "ready" && runtime.bridge.isConnected
+		&& normalizeProjectPath(runtime.projectPath) === normalizeProjectPath(projectPath)
+		&& normalizeSessionPath(runtime.lastKnownSessionPath) === normalizeSessionPath(tab.sessionPath)
+		&& runtime.launchedNovelRole === tab.novelRole);
+}
+
 function syncActiveChatRuntimeBinding(
 	workspace: WorkspaceState | null = getActiveWorkspace(),
 	options: { forceReset?: boolean; statusText?: string } = {},
@@ -2678,21 +2691,24 @@ function syncActiveChatRuntimeBinding(
 	// reload action. Do not turn ordinary editor renders into a fresh session
 	// switch while that failure is unresolved.
 	if (expectedRuntime?.phase === "failed" && !options.forceReset) return;
-	const expectedRuntimeKey = expectedRuntime?.key ?? null;
+	const bindingRuntime = isRuntimeReadyForSessionTab(expectedRuntime, activeSessionTab, projectPath) ? expectedRuntime : null;
+	const expectedRuntimeKey = bindingRuntime?.key ?? null;
 	const runtimeChanged = expectedRuntimeKey !== activeSessionRuntimeKey;
 	if (runtimeChanged) {
 		recordDebugTrace(`syncActiveChatRuntimeBinding runtime=${expectedRuntimeKey ?? "-"} tab=${activeSessionTab.id}`);
-		setActiveRuntime(expectedRuntime);
+		// Detach only the visible RPC listener while the target is unconfirmed.
+		// The owning runtime keeps recording background statuses without replay.
+		setActiveRuntime(bindingRuntime);
 	}
-	if (options.forceReset || runtimeChanged || !expectedRuntime) {
+	if (options.forceReset || runtimeChanged || !bindingRuntime) {
 		extensionUiHandler?.clearSessionStatus();
 		chatView.prepareForSessionSwitch(
 			projectPath,
 			options.statusText ?? (activeSessionTab.sessionPath ? "Loading session…" : "Starting new session…"),
 		);
-		// prepareForSessionSwitch clears the chat projection. Rehydrate only
-		// the selected runtime, never the status belonging to the previous tab.
-		extensionUiHandler?.restoreSessionStatus(expectedRuntime?.extensionStatuses.snapshot() ?? []);
+		// Restore only a ready runtime whose project, session and role match the
+		// selected target, even when navigation reused the same tab/runtime key.
+		extensionUiHandler?.restoreSessionStatus(bindingRuntime?.extensionStatuses.snapshot() ?? []);
 	}
 }
 

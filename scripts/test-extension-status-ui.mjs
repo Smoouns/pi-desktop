@@ -7,7 +7,9 @@ import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 
 const root = path.resolve(import.meta.dirname, "..");
-const output = path.join(root, "artifacts/harness/extension-status-ui");
+const outputParent = path.join(root, "artifacts/harness/extension-status-ui");
+mkdirSync(outputParent, { recursive: true });
+const output = mkdtempSync(path.join(outputParent, "check-"));
 const browser = [
 	"C:/Program Files/Google/Chrome/Application/chrome.exe",
 	"C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
@@ -22,6 +24,7 @@ const script = await build({
 	stdin: { contents: `
 import { ExtensionUiHandler, normalizeExtensionUiRequest } from './src/components/extension-ui-handler.ts';
 import { renderExtensionStatusView } from './src/components/chat-view/extension-status-view.ts';
+import { ChatView } from './src/components/chat-view.ts';
 import { html, render } from 'lit';
 const check=(value,label)=>{if(!value)throw new Error(label)};
 const pause=()=>new Promise(resolve=>setTimeout(resolve,0));
@@ -103,12 +106,28 @@ async function run(){
  check(responses.length===beforeRestoreResponses,'restoration and local details emit no RPC actions');
  ui.restoreSessionStatus([]); await pause();
  check(!document.querySelector('.chat-extension-status'),'empty runtime does not inherit previous status');
+ // Exercise the actual ChatView composer, not a test reimplementation of its
+ // loading gate. Only transport is absent; production rendering stays intact.
+ const chat=new ChatView(document.querySelector('#chat-container'));
+ chat.projectPath='C:/synthetic/status'; chat.isConnected=true;
+ chat.bindingStatusText='Loading session…';
+ chat.setExtensionStatus({key:'novel-supervisor',text:'candidate B ready',onOpen:()=>{}}); await pause();
+ check(!document.querySelector('.chat-extension-status'),'confirmed target status stays hidden until its history is ready');
+ chat.bindingStatusText=null; chat.render(); await pause();
+ check(document.querySelector('.chat-extension-status')?.textContent.includes('candidate B ready'),'target status appears once history is ready');
+ chat.prepareForSessionSwitch('C:/synthetic/status'); await pause();
+ check(!document.querySelector('.chat-extension-status'),'next switch clears the previous target status');
+ chat.setExtensionStatus({key:'novel-supervisor',text:'restored A cancelled',onOpen:()=>{}}); await pause();
+ check(!document.querySelector('.chat-extension-status'),'status arriving while loading must remain hidden');
+ chat.bindingStatusText=null; chat.render(); await pause();
+ check(document.querySelector('.chat-extension-status')?.textContent.includes('restored A cancelled'),'latest target status is retained, not dropped');
  pane.style.flex='0 0 360px'; pane.style.width='360px'; await pause();
- document.documentElement.setAttribute('data-result',JSON.stringify({pass:true,width:innerWidth,paneWidths,closes:responses.length,modelRequests:0}));
+ document.documentElement.setAttribute('data-result',JSON.stringify({pass:true,width:innerWidth,paneWidths,closes:responses.length,loadingProjectionChecks:5,modelRequests:0}));
 }
 run().catch(error=>{document.documentElement.setAttribute('data-result',JSON.stringify({pass:false,error:String(error)}))});
 `, resolveDir: root, loader: "ts" },
 	bundle: true, platform: "browser", format: "iife", write: false, logLevel: "warning",
+	define: { "import.meta.url": JSON.stringify(pathToFileURL(path.join(root, "src/components/chat-view.ts")).href) },
 });
 const results = [];
 for (const width of [700, 1000]) {
@@ -120,6 +139,7 @@ for (const width of [700, 1000]) {
 		const match = dom.match(/data-result="([^"]*)"/);
 		assert.ok(match, "Browser did not report UI results");
 		const result = JSON.parse(match[1].replaceAll("&quot;", '"').replaceAll("&amp;", "&"));
+		writeFileSync(path.join(output, `result-${width}.json`), JSON.stringify(result, null, 2));
 		assert.equal(result.pass, true, JSON.stringify(result));
 		results.push(result);
 	} finally {
@@ -129,4 +149,4 @@ for (const width of [700, 1000]) {
 	}
 }
 writeFileSync(path.join(output, "summary.json"), JSON.stringify({ browser, results }, null, 2));
-console.log("Extension status UI browser checks passed", results);
+console.log("Extension status UI browser checks passed", { output, results });

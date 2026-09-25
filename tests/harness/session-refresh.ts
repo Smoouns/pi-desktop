@@ -34,7 +34,7 @@ export async function runSessionRefreshCases(runCase: RunCase): Promise<void> {
 		assert.equal(cache.snapshot().length, 31);
 		const main = await readFile("src/main.ts", "utf8");
 		assert.match(main, /runtime\.extensionStatuses\.observe\(event\)/);
-		assert.match(main, /chatView\.prepareForSessionSwitch\([\s\S]*?restoreSessionStatus\(expectedRuntime\?\.extensionStatuses\.snapshot\(\)/);
+		assert.match(main, /chatView\.prepareForSessionSwitch\([\s\S]*?restoreSessionStatus\(bindingRuntime\?\.extensionStatuses\.snapshot\(\)/);
 		assert.match(main, /if \(!bridge\.isConnected\) \{\s*runtime.phase = "starting";[\s\S]*?runtime\.extensionStatuses\.clear\(\);/);
 	});
 	await runCase("SESSION-UI-01 late responses across A B A", () => {

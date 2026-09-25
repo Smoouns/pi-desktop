@@ -107,6 +107,7 @@
 		"test:chat-layout": "node scripts/test-chat-layout.mjs",
 		"test:chat-panel-resize": "node --experimental-strip-types scripts/test-chat-panel-resize.mjs",
 		"test:extension-status-ui": "npm run build:frontend && node scripts/test-extension-status-ui.mjs",
+		"test:session-status-binding": "node scripts/run-public-tests.mjs session-status-binding",
 		"test:context-usage-ui": "npm run build:frontend && node scripts/test-context-usage-ui.mjs",
 		"test:context-entry-ui": "npm run build:frontend && node scripts/test-context-entry-ui.mjs",
 		"test:context-maintenance:global": "node scripts/test-global-pi-context-maintenance.mjs",

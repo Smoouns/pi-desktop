@@ -4806,7 +4806,7 @@ export class ChatView {
 		return html`
 			<div class="composer-shell">
 				<div class="composer-inner">
-					${renderExtensionStatusView(this.extensionStatus)}
+					${renderExtensionStatusView(this.bindingStatusText ? null : this.extensionStatus)}
 					${renderQueuedComposerMessagesView(this.queuedComposerMessages, truncate)}
 					<div class="composer-panel">
 						${this.selectedSkillDraft

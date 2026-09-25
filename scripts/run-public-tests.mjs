@@ -11,7 +11,7 @@ const outputParent = path.join(root, "artifacts/harness");
 await mkdir(outputParent, { recursive: true });
 const work = await mkdtemp(path.join(outputParent, ".build-"));
 const mode = process.argv[2];
-assert.ok(["harness", "regression", "long-horizon", "review-repros", "read-delivery", "task-contract", "production-lifecycle", "runtime-metrics", "request-source-cache", "task-transport", "task-transport-sdk", "context-quality", "usage-calibration", "task-progress", "effective-progress", "provider-budget", "tool-output-accounting", "review-e8", "review-e8-recover"].includes(mode), "Unknown public test mode");
+assert.ok(["harness", "regression", "long-horizon", "review-repros", "read-delivery", "task-contract", "production-lifecycle", "runtime-metrics", "request-source-cache", "task-transport", "task-transport-sdk", "context-quality", "usage-calibration", "task-progress", "effective-progress", "provider-budget", "tool-output-accounting", "review-e8", "review-e8-recover", "session-status-binding"].includes(mode), "Unknown public test mode");
 
 // Always use the installed, pinned loader. Bundled tests still resolve runtime packages
 // from this checkout, not a user's global Pi installation or home extensions.
@@ -65,7 +65,9 @@ async function fixtureBytes() {
 }
 
 try {
-	if (mode === "review-e8") {
+	if (mode === "session-status-binding") {
+		execute(await bundle("tests/harness/session-status-binding-run.ts"));
+	} else if (mode === "review-e8") {
 		execute(await bundle("tests/harness/review-e-live/run.ts", aliases));
 	} else if (mode === "review-e8-recover") {
 		assert.equal(process.argv.length, 4, "Supply exactly one offline E8 journal path");
