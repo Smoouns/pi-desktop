@@ -9,6 +9,9 @@ import { expected, policy, rebuild, validateManifest, validateRecord } from "../
 export async function runTests() {
   let checks = 0;
   const check = (fn: () => void) => { fn(); checks++; };
+  const buildInputs = JSON.parse(await readFile(process.env.PI_S4_BUILD_INPUTS!, "utf8"));
+  check(() => assert.ok(buildInputs["evals/adapters/snapshots/context-maintenance.ts"]));
+  check(() => assert.equal(buildInputs["src/extensions/context-maintenance.ts"], undefined));
   const root = path.resolve("artifacts/harness/sdk-supervision"); await mkdir(root, { recursive: true });
   const faults = await mkdtemp(path.join(root, "s4-fault-tests-"));
   const initial = await snapshot();

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { compact } from "@mariozechner/pi-coding-agent";
-import { createContextMaintenance } from "../../src/extensions/context-maintenance.js";
+import { createContextMaintenance } from "../../evals/adapters/snapshots/context-maintenance.js";
 import { assertInside, digest, sha256, treeManifest } from "../../evals/core/io.js";
 import { freezeRequestPolicy } from "../../evals/core/request-policy.js";
 import { createJournalScope } from "../../evals/core/request-journal.js";
@@ -24,6 +24,11 @@ export async function runTests() {
   const endpoint = "https://pilot.invalid/v1/chat/completions", body = JSON.stringify({ model: MODEL.id, max_tokens: 2048, messages: [] });
   const response = () => new Response('data: {"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n');
   try {
+    await test("frozen context factory is bundled without current production maintenance", async () => {
+      const buildInputs = JSON.parse(await readFile(process.env.PI_ABLATION_BUILD_INPUTS!, "utf8"));
+      assert.ok(buildInputs["evals/adapters/snapshots/context-maintenance.ts"]);
+      assert.equal(buildInputs["src/extensions/context-maintenance.ts"], undefined);
+    });
     await diagnosticUnitTests(test, temporary);
     await test("only the versioned request reservations grow", () => {
       assert.equal(SCHEMA_VERSION, 3); assert.equal(POLICY.namespace, "sdk-supervision-live-v2");

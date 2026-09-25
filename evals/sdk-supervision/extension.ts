@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createRunSupervisor } from "../adapters/snapshots/run-supervisor.js";
 import { createSupervisorRuntime } from "../adapters/snapshots/supervisor-runtime.js";
-import { createContextMaintenance } from "../../src/extensions/context-maintenance.js";
+import { createContextMaintenance } from "../adapters/snapshots/context-maintenance.js";
 import { lifecycleExtensionSource } from "../sdk-context/lifecycle-extension.js";
 import { expectedInventory as baseInventory, validateContextProvenance } from "../sdk-context/extension.js";
 import { CONTROL_KEY } from "../sdk-context/policy.js";
@@ -136,7 +136,8 @@ export async function validateProvenance() {
   await validateContextProvenance();
   for (const [file, expected] of Object.entries(provenance.files)) {
     const snapshot = file === "src/harness/run-supervisor.ts" ? "evals/adapters/snapshots/run-supervisor.ts"
-      : file === "src/extensions/supervisor-runtime.ts" ? "evals/adapters/snapshots/supervisor-runtime.ts" : file;
+      : file === "src/extensions/supervisor-runtime.ts" ? "evals/adapters/snapshots/supervisor-runtime.ts"
+      : file === "src/extensions/context-maintenance.ts" ? "evals/adapters/snapshots/context-maintenance.ts" : file;
     let content = (await readFile(snapshot, "utf8")).replaceAll("\r\n", "\n");
     if (file === "src/harness/run-supervisor.ts") content = content.replaceAll('"../../../src/harness/', '"./');
     if (file === "src/extensions/supervisor-runtime.ts") content = content.replaceAll('"../../../src/harness/', '"../harness/').replace('"./run-supervisor.js"', '"../harness/run-supervisor.js"');

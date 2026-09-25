@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createRunSupervisor } from "../adapters/snapshots/run-supervisor.js";
 import { createSupervisorRuntime } from "../adapters/snapshots/supervisor-runtime.js";
-import { createContextMaintenance } from "../../src/extensions/context-maintenance.js";
+import { createContextMaintenance } from "../adapters/snapshots/context-maintenance.js";
 import { lifecycleExtensionSource } from "../sdk-context/lifecycle-extension.js";
 import { expectedInventory } from "../sdk-context/extension.js";
 import { CONTROL_KEY, LIMITS as OLD_LIMITS } from "../sdk-context/policy.js";
