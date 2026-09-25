@@ -2,13 +2,13 @@
 
 审查基线：`87b4ac8e009e36471a9530ce3918f2a2b360d1f1`。审查日期：2026-09-23。
 
-最新本地进度（2026-09-25）：E1–E7 的分层计量、来源缓存、任务发送账、usage 配对诊断、批次裁剪、非权威进展及测试端口修复已在本地验证，仍未提交。E8 已取得真实 U/C 观察和独立 R 补测通过，并修复工具结果重复计量；这不是同版本一次全套联合通过。摘要逐项审读已完成：9/10 明确保留，关键 5/6；“正文尚未验证”表述缺失，但实际恢复请求从结构化检查点取得原话，原生摘要本身未进入答题请求。真实兼容锚点未命中、通用语义进展和真实小说长程质量仍未验证，不能将这些局部证据等同整个 E 完成。详见文末及 [摘要审读](REVIEW_E_SUMMARY_CONTENT_REVIEW.md)。
+最新进度（2026-09-25）：E1–E8 实现、测试及证据说明已提交推送为 `684769f`，另以 `c974480` 修正原生合成工装的输入识别、`9eace1f` 调整扩容后三轮 Harness 的外层时限、`5f92cd3` 将旧 S4 接回原始冻结工厂。固定代码 `5f92cd3` 的四个双平台 CI 任务全部通过；隔离原生 Desktop 的读取/停止/验证/冷恢复/项目隔离回读也已通过，加载过渡的旧状态短暂显示仍单独保留为下一步 UI 修复。详见 [E 固定版本验收](REVIEW_E_FIXED_ACCEPTANCE.md)。E8 已有真实 U/C 观察和独立 R 补测通过，但不是同版本一次全套联合通过。摘要逐项审读为 9/10 明确保留、关键 5/6；“正文尚未验证”仍靠结构化检查点保留。真实兼容锚点、通用语义进展和真实小说长程质量仍未验证，不能将这些局部证据等同整个 E 完成。
 
-首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 及其两项 CI 工装修正已提交推送，固定代码提交 `e9f7d69` 的双平台 CI 已通过。D 的完整生产 SDK 生命周期、冷恢复与隔离原生 Desktop 接线现已本地通过，并连同 Windows 控制台修复提交推送为 `d66a302`；该固定提交的四个双平台 CI 任务全部通过。后续 E1 已加入分层计量和非标准 batch 路径修复，属于尚未提交的本地验证结果，见文末及 `REVIEW_E_METRICS.md`；不等于 E 全部完成。不调用真实模型，不改真实小说、全局 Pi 配置或历史验收报告。
+首批范围：A 批次（Windows Pilot 路径诊断、测试环境修复及直接回归），以及 B1/B2 的复现用例。随后分别提交推送 A、B1、B2 并验证双平台 CI，再进入 C 稳定任务目标与完成合同。C 及其两项 CI 工装修正已提交推送，固定代码提交 `e9f7d69` 的双平台 CI 已通过。D 的完整生产 SDK 生命周期、冷恢复与隔离原生 Desktop 接线已本地通过，并连同 Windows 控制台修复提交推送为 `d66a302`；该固定提交的四个双平台 CI 任务全部通过。文末 E 记录保留当时版本与证据归属，最新提交和验收以开头链接为准。本次提交/CI/隔离桌面验收不新增真实模型调用，不改真实小说、全局 Pi 配置或历史验收报告。
 
 ## 关闭标准
 
-每项必须具备：复现或反证、最小修复、直接回归、剩余边界。`confirmed` 不等于 `fixed`；本地通过不等于远程 CI 或 Desktop 验收通过。冻结实验批次与版本化验收报告保持不变；新增审查复现 / SDK 评测使用独立输出。常规 Harness 的固定文件名汇总沿用原脚本机制，仅代表最近一次回归。
+每项必须具备：复现或反证、最小修复、直接回归、剩余边界。`confirmed` 不等于 `fixed`；本地通过不等于远程 CI 或 Desktop 验收通过。冻结实验批次与版本化验收报告保持不变；新增审查复现 / SDK 评测使用独立输出。常规 Harness 的固定文件名汇总沿用原脚本机制，仅代表最近一次回归。表中 E 的 `regression_CI_passed` 仅指机械回归，不关闭同一行的语义质量或真实环境证据缺口。
 
 | ID | 状态 | 本轮动作 / 后续计划 | 证据与限制 |
 | --- | --- | --- | --- |
@@ -16,12 +16,12 @@
 | AUD-02 | fixed / CI_passed | B1：区分历史完成、当前后置状态和派发许可；终态不复活；完整扩展与三进程冷恢复回归 | `c67467e` 双平台 CI 全绿；新、旧 toolCallId 均核验当前 post-image；历史 A、当前 B 返回冲突且不重放 |
 | AUD-03 | fixed / CI_passed | B2：按真实 SDK 返回内容映射行范围，并单独记录交付凭证；分页只累计已交付内容；旧凭证需重读 | `f1b19df` 双平台 CI 全绿；263 例 × 3 实际执行。没有本批 Desktop 验收 |
 | AUD-04 | fixed / CI_passed | C：版本化 TaskContract 绑定稳定 taskId、原始目标、最新指令、预期产物及当前版本完成凭证 | C 的 `e9f7d69` 双平台 CI 全绿；D 的 `d66a302` 又通过完整 SDK 压缩 / 冷恢复及双平台 CI，隔离原生 Desktop 任务提交单独本地验收 |
-| AUD-05 | partially_addressed / local_pass | C 保留任务合同；E4 保护工具批次；E5 提供有界非权威历史；E8 补局部真实摘要审读 | 单样本摘要 9/10 明确保留、关键 5/6；正文未验证状态只由检查点明确保留。恢复答案 10/10 不证明摘要独立有效；不授予 Canon 或关闭通用语义质量，见 REVIEW_E_SUMMARY_CONTENT_REVIEW.md |
+| AUD-05 | partially_addressed / regression_CI_passed | C 保留任务合同；E4 保护工具批次；E5 提供有界非权威历史；E8 补局部真实摘要审读 | 单样本摘要 9/10 明确保留、关键 5/6；正文未验证状态只由检查点明确保留。恢复答案 10/10 不证明摘要独立有效；不授予 Canon 或关闭通用语义质量，见 REVIEW_E_SUMMARY_CONTENT_REVIEW.md |
 | AUD-06 | fixed / CI_passed | D 补完整生产接线、冷恢复与来源版本定向突变回归；D-07 补隔离原生窗口验收 | `d66a302` 双平台实际通过 SDK 8 组 / 15 进程、Harness 285 例 × 3；隔离原生 UI → Rust RPC → 固定 CLI → 完整扩展另经本地验收。不是安装包或真实模型验收 |
-| AUD-07 | partially_addressed / local_pass | E1 分层计量、E3 发送出口与任务账；E4 配对诊断；E8 补真实用量配对和重复输出计量修复 | 原上游批次 14 配对、独立 R 9 配对；兼容增量锚点未命中，不据此降低预算或猜费用。见 REVIEW_E_UPSTREAM_RESULT.md / REVIEW_E_READ_RETEST_RESULT.md |
-| AUD-08 | partially_addressed / local_pass | E2 单次 Context 复用来源指纹；E8 R 独立实测确认复用、跨请求重验及 v2 重读 | 五项 R 证据通过；只代表扩展计量的 readFile 行为，不是 OS IO、真实小说延迟或费用节省。见 REVIEW_E_SOURCE_CACHE.md / REVIEW_E_READ_RETEST_RESULT.md |
+| AUD-07 | partially_addressed / regression_CI_passed | E1 分层计量、E3 发送出口与任务账；E4 配对诊断；E8 补真实用量配对和重复输出计量修复 | 原上游批次 14 配对、独立 R 9 配对；兼容增量锚点未命中，不据此降低预算或猜费用。见 REVIEW_E_UPSTREAM_RESULT.md / REVIEW_E_READ_RETEST_RESULT.md |
+| AUD-08 | partially_addressed / regression_CI_passed | E2 单次 Context 复用来源指纹；E8 R 独立实测确认复用、跨请求重验及 v2 重读 | 五项 R 证据通过；只代表扩展计量的 readFile 行为，不是 OS IO、真实小说延迟或费用节省。见 REVIEW_E_SOURCE_CACHE.md / REVIEW_E_READ_RETEST_RESULT.md |
 | AUD-09 | deferred | 需求出现后再决定是否持久化 Observation | 本轮不加数据库、向量检索或新 agent loop |
-| AUD-10 | mechanically_addressed / local_pass | E6：按验证对象、模式、已核对依赖及规范化诊断跟踪修复；无关读写不重置验证停滞 | 同类失败三次未改善停止；实际差额改善及完整修复正例通过。保留硬上限与独立的通用工具重试启发式，不引入模型裁判，不宣称语义进展，见 REVIEW_E_EFFECTIVE_PROGRESS.md |
+| AUD-10 | mechanically_addressed / regression_CI_passed | E6：按验证对象、模式、已核对依赖及规范化诊断跟踪修复；无关读写不重置验证停滞 | 同类失败三次未改善停止；实际差额改善及完整修复正例通过。保留硬上限与独立的通用工具重试启发式，不引入模型裁判，不宣称语义进展，见 REVIEW_E_EFFECTIVE_PROGRESS.md |
 
 ## 执行记录
 
